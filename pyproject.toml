@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepsc"
+version = "0.1.0"
+description = "Deep Foundation Models for Single Cell RNA Sequencing"
+authors = [
+    { name = "Mou YongLi", email = "mou@dbis.rwth-aachen.de" },
+    { name = "Ang Li" },
+    { name = "Sikander Hayat" },
+    { name = "Stefan Decker" }
+]
+license = { text = "MIT" }
+readme = "README.md"  # Optional
+requires-python = ">=3.7"  # Adjust as needed
+urls = { "Homepage" = "https://github.com/MouYongli/DeepSC" }
+classifiers = [
+    "Development Status :: 1 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
