@@ -106,11 +106,11 @@ More detailed tutorials can be found in our [documentation](https://your-project
 
 | Model         | Accuracy | Batch Effect Score | Training Time |
 |--------------|---------:|-------------------:|--------------:|
-| sCmilarity | 85.2%    | 0.78               | 2h 30m        |
-| scFoundation | 85.2%    | 0.78               | 2h 30m        |
-| scGPT    | 89.1%    | 0.85               | 3h 10m        |
-| scBERT | 89.1%    | 0.85               | 3h 10m        |
-| DeepSC (ours) | **93.4%**| **0.91**           | 4h 50m        |
+| sCmilarity | xx.x%    | 0.xx               | xh xxm        |
+| scFoundation | xx.x%    | 0.xx               | xh xxm        |
+| scGPT   | xx.x%    | 0.xx               | xh xxm        |
+| scBERT | xx.x%    | 0.xx               | xh xxm        |
+| DeepSC (ours)  | **xx.x%**   | **0.xx**               | xh xxm        |
 
 More benchmarks are available in the [research paper](https://your-project-website.com/paper).
 
