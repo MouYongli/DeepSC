@@ -70,7 +70,6 @@ if __name__ == "__main__":
             organ_name=organ_name.replace("-"," ")
             row_dict["Organ"] = organ_name 
             uuid_str = str(uuid.uuid4())
-            print(uuid_str)
             row_dict["Study_uuid"] = uuid_str 
             data.append(row_dict)
 
@@ -90,7 +89,7 @@ if __name__ == "__main__":
 "Meta programs", "Meta programs_link", "CNAs", "CNAs_link", "UMAP", "UMAP_link", "Cell cycle", "Cell cycle_link"
 ]
         dfnew = merged_df[desired_order]
-        dfnew.to_csv("merged_table_data.csv", index=False)
+        dfnew.to_csv("data_info.csv", index=False)
         print("Merged table saved to merged_table_data.csv")
     else:
         print("No valid tables found.")
