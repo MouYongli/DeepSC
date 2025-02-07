@@ -1,4 +1,4 @@
-# Deep Foundation Models for Single Cell RNA Sequencing
+# Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data
 
 This is official repo for "Deep Foundation Models for Single Cell RNA Sequencing"  by DBIS at RWTH Aachen University 
 [Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Sikander Hayat, Stefan Decker
