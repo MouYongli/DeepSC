@@ -18,9 +18,9 @@ conda install ipykernel
 ```
 
 ```
-pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 # torch==2.5.1, torchvision==0.20.1, torchaudio==2.5.1
 pip install torch_geometric
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.2.0+cu121.html
+pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
 pip install -r requirements.txt
 pip install -e .
 ```
