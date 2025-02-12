@@ -12,6 +12,7 @@ import mimetypes
 from urllib.parse import urlparse
 import multiprocessing
 import time  # 用于延迟重试
+import zipfile
 
 
 def get_parse():
@@ -23,12 +24,12 @@ def get_parse():
     parser.add_argument("--num_processes", type=int, default=min(4, os.cpu_count()), help="Number of parallel processes")
     return parser.parse_args()
 
-def setup_logging(log_path):
+def setup_logging(type, log_path):
     os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
 
     # 生成带时间戳的日志文件名
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file = osp.join(log_path, f"download_{timestamp}.log")
+    log_file = osp.join(log_path, f"{type}_{timestamp}.log")
 
     logging.basicConfig(
         filename=log_file,
@@ -87,7 +88,7 @@ def download_file(url, folder_path, filename, log_path):
     except requests.exceptions.RequestException as e:
         error_message = f"下载失败: {url}, 错误: {e}"
         logging.error(error_message)
-        return {"url": url, "filename": filename, "folderpath": folder_path, "error": str(e)}  # 失败信息
+        return {"url": url, "filename": filename, "folderpath": folder_path, "error": str(e)}  
 
 def is_valid_url(url):
     """检查 URL 是否有效"""
@@ -97,14 +98,7 @@ def is_valid_url(url):
     url = url.strip()
     if url == "":
         return False  
-
-    
-def get_filename_from_url(url, default_ext=".bin"):
-    """从 URL 提取文件名，并自动补全扩展名（如果缺失）"""
-    parsed_url = urlparse(url)
-    filename = osp.basename(parsed_url.path).strip().strip('"').strip("'")
-    ext = '.zip'
-    return filename + ext
+    return True
 
 def merge_logs(log_path, main_log_file):
     """合并子进程的日志到主日志文件"""
@@ -114,12 +108,55 @@ def merge_logs(log_path, main_log_file):
                 worker_log_file = osp.join(log_path, log_filename)
                 with open(worker_log_file, "r") as worker_log:
                     main_log.write(worker_log.read()) 
-                os.remove(worker_log_file) 
+                os.remove(worker_log_file)
+
+
+def extract_and_delete_zips(root_folder, csv_path):
+    """
+    遍历 root_folder 下的所有子文件夹，找到所有 .zip 文件并解压到以 .zip 文件名命名的文件夹中，之后删除 .zip 文件。
+    失败的解压记录会存入 pandas DataFrame，并写入 csv_path (CSV) 文件中。
+    """
+    logging.error(f"开始解压缩......")
+    failed_extractions = []  # 存储失败的 .zip 文件信息
+
+    for folder_path, _, files in os.walk(root_folder):
+        for file in files:
+            if file.lower().endswith(".zip"):  # 仅处理 .zip 文件
+                zip_path = os.path.join(folder_path, file)
+                extract_folder = os.path.join(folder_path, file[:-4])  # 创建去掉 .zip 后的文件夹
+                
+                try:
+                    # 创建解压目标文件夹（如果不存在）
+                    os.makedirs(extract_folder, exist_ok=True)
+
+                    # 解压 ZIP 文件
+                    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                        zip_ref.extractall(extract_folder)
+                    logging.info(f"解压成功: {zip_path} -> {extract_folder}")
+
+                    # 删除 ZIP 文件
+                    os.remove(zip_path)
+                    logging.info(f"已删除 ZIP 文件: {zip_path}")
+
+                except zipfile.BadZipFile as e:
+                    error_message = str(e)
+                    logging.error(f"解压失败: {zip_path}, 错误: {error_message}")
+
+                    # 记录失败信息
+                    failed_extractions.append([folder_path, file, error_message])
+
+    # 如果有解压失败的文件，存入 DataFrame 并写入 CSV
+    if failed_extractions:
+        df = pd.DataFrame(failed_extractions, columns=["文件夹路径", "文件名", "错误信息"])
+        df.to_csv(csv_path, mode="a", index=False, encoding="utf-8-sig", header=not os.path.exists(csv_path))
+        logging.info(f"失败的解压记录已保存至: {csv_path}")
+    else:
+        logging.info("全部文件解压成功")
 
 if __name__ == "__main__":
     args = get_parse()
 
-    main_log_file = setup_logging(args.log_path)
+    main_log_file = setup_logging('download',args.log_path)
     failed_output_csv = osp.join(args.log_path, "failed_downloads.csv")
 
     logging.info("开始下载任务")
@@ -176,7 +213,7 @@ if __name__ == "__main__":
                 os.makedirs(folder_path, exist_ok=True)
 
                 for file_type, url in [("data_set", url_dataset), ("meta_data", url_metadata)]:
-                    filename = f"{file_type}_{get_filename_from_url(url)}"
+                    filename = f"{file_type}_{uuid}.zip"
                     logging.info(f"正在将文件 {filename} 下载到路径 {folder_path}")
 
                     task = delayed(download_file)(url, folder_path, filename, args.log_path)
@@ -205,3 +242,5 @@ if __name__ == "__main__":
 
     if retry_count >= max_retries:
         logging.error("达到最大重试次数，仍有文件下载失败，请手动检查 failed_downloads.csv")
+    
+    extract_and_delete_zips(args.output_path, "./extract_failed.csv")
