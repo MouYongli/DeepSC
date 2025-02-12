@@ -3,19 +3,22 @@ import os
 import os.path as osp
 import requests
 import dask
-from dask import delayed, compute, config
+from dask import delayed, compute
 from dask.diagnostics import ProgressBar
 import argparse
 import logging
 from datetime import datetime
 import mimetypes
 from urllib.parse import urlparse
+import multiprocessing
+import time  # 用于延迟重试
+
 
 def get_parse():
     parser = argparse.ArgumentParser(description="Download files using Dask with multiprocessing.")
     parser.add_argument("--csv_path", type=str, required=True, help="Path to the CSV file containing download links")
     parser.add_argument("--output_path", type=str, required=True, help="Path to the directory where files will be saved")
-    parser.add_argument("--log_path", type=str, required=True, help="Path to the log directory or log file")
+    parser.add_argument("--log_path", type=str, required=True, help="Path to the log directory")
     parser.add_argument("--num_files", type=int, default=3, help="Number of files to download")
     parser.add_argument("--num_processes", type=int, default=min(4, os.cpu_count()), help="Number of parallel processes")
     return parser.parse_args()
@@ -43,7 +46,33 @@ def setup_logging(log_path):
     
     return log_file
 
-def download_file(url, folder_path, filename):
+def download_file(url, folder_path, filename, log_path):
+    """ 子进程下载文件，返回失败信息（如果失败） """
+    process_id = multiprocessing.current_process().pid
+    process_log_file = osp.join(log_path, f"worker_{process_id}.log")
+    
+    # 设置单独的日志文件
+    logging.basicConfig(
+        filename=process_log_file,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filemode="a"
+    )
+    
+    logging.info(f"进程 {process_id} 开始下载: {filename} -> {folder_path}")
+    
+
+    # 检查 URL 是否有效
+    try:
+        response = requests.head(url, timeout=5)
+        if response.status_code not in [200, 301, 302]:  
+            raise requests.RequestException(f"Invalid status code: {response.status_code}")  
+    except requests.RequestException as e:
+        error_message = f"无效的 URL，跳过下载: {url}, 错误: {e}"
+        logging.error(error_message)
+        return {"url": url, "filename": filename, "folderpath": folder_path, "error": str(e)}
+
+    # 下载文件
     try:
         response = requests.get(url, stream=True, timeout=10)
         response.raise_for_status()  # 确保请求成功
@@ -53,79 +82,126 @@ def download_file(url, folder_path, filename):
             for chunk in response.iter_content(chunk_size=8192):
                 file.write(chunk)
 
-        with open(log_file, "a") as log:
-            log.write(f"下载完成: {file_path}\n")
-        return file_path
+        logging.info(f"下载完成: {file_path}")
+        return None  # 成功下载，返回 None
     except requests.exceptions.RequestException as e:
-        with open(log_file, "a") as log:
-            log.write(f"下载失败: {url}, 错误: {e}\n")
-        return None
-    
+        error_message = f"下载失败: {url}, 错误: {e}"
+        logging.error(error_message)
+        return {"url": url, "filename": filename, "folderpath": folder_path, "error": str(e)}  # 失败信息
+
 def is_valid_url(url):
     """检查 URL 是否有效"""
-    if not isinstance(url, str) or url.strip() == "":
-        return False  # 空值或非字符串，直接返回 False
-    
-    try:
-        response = requests.head(url, timeout=5)
-        return response.status_code in [200, 301, 302]  # 仅接受 200、301、302 状态码
-    except requests.RequestException:
-        return False  # 请求失败，认为 URL 无效
+    if not isinstance(url, str) or pd.isna(url):
+        return False
+
+    url = url.strip()
+    if url == "":
+        return False  
+
     
 def get_filename_from_url(url, default_ext=".bin"):
     """从 URL 提取文件名，并自动补全扩展名（如果缺失）"""
     parsed_url = urlparse(url)
     filename = osp.basename(parsed_url.path).strip().strip('"').strip("'")
-    ext='.zip'
+    ext = '.zip'
     return filename + ext
+
+def merge_logs(log_path, main_log_file):
+    """合并子进程的日志到主日志文件"""
+    with open(main_log_file, "a") as main_log:
+        for log_filename in os.listdir(log_path):
+            if log_filename.startswith("worker_") and log_filename.endswith(".log"):
+                worker_log_file = osp.join(log_path, log_filename)
+                with open(worker_log_file, "r") as worker_log:
+                    main_log.write(worker_log.read()) 
+                os.remove(worker_log_file) 
 
 if __name__ == "__main__":
     args = get_parse()
 
-    # 设置日志系统，并获取最终的日志文件路径
-    log_file = setup_logging(args.log_path)
+    main_log_file = setup_logging(args.log_path)
+    failed_output_csv = osp.join(args.log_path, "failed_downloads.csv")
 
     logging.info("开始下载任务")
 
-    # 确保输出目录存在
     os.makedirs(args.output_path, exist_ok=True)
 
-    # 读取数据文件
-    try:
-        df = pd.read_csv(args.csv_path)
-    except Exception as e:
-        logging.error(f"无法读取 CSV 文件: {args.csv_path}, 错误: {e}")
-        exit(1)
+    retry_count = 0  # 记录重试次数
+    max_retries = 10  # 最大重试次数
 
-    # 准备下载任务
-    tasks = []
-    logging.info(f"选择下载文件数目为 {args.num_files}")
-    for _, row in df.head(args.num_files).iterrows():
+    while retry_count < max_retries:
+        # 准备下载任务
+        tasks = []
+        failed_downloads = []  # 存储新的失败任务
 
-        uuid = row["Study_uuid"]
-        url_dataset = row["Data_link"]
-        url_metadata=row["Meta data_link"]
+        # 检查是否有未下载成功的记录
+        if osp.exists(failed_output_csv) and osp.getsize(failed_output_csv) > 0:
+            logging.info(f"第 {retry_count+1} 次尝试下载失败任务...")
+            df = pd.read_csv(failed_output_csv)  # 读取之前失败的任务
+            for _, row in df.iterrows():
+                url = row["url"]
+                filename = row["filename"]
+                folder_path = row["folderpath"]
+                os.makedirs(folder_path, exist_ok=True)
 
-        if pd.isna(uuid) or not isinstance(uuid, str):
-            logging.error(f"数据集 UUID 为空，跳过该条记录")
-            continue
+                logging.info(f"正在将文件 {filename} 下载到路径 {folder_path}")
 
-        if any(not is_valid_url(url) for url in [url_dataset, url_metadata]):
-            logging.error(f"数据集 {uuid} 的下载链接无效: {url_dataset}, {url_metadata}，跳过该任务")
-            continue
+                task = delayed(download_file)(url, folder_path, filename, args.log_path)
+                tasks.append(task)
+        # 读取原始csv文件
+        else:
+            logging.info("读取原始 CSV 文件...")
+            try:
+                df = pd.read_csv(args.csv_path)
+            except Exception as e:
+                logging.error(f"无法读取 CSV 文件: {args.csv_path}, 错误: {e}")
+                exit(1)
+            logging.info(f"选择下载文件数目为 {args.num_files}")
+            for _, row in df.head(args.num_files).iterrows():
 
-        folder_path = os.path.join(args.output_path, uuid)
+                uuid = row["Study_uuid"]
+                url_dataset = row["Data_link"]
+                url_metadata=row["Meta data_link"]
 
-        os.makedirs(folder_path, exist_ok=True)
+                if pd.isna(uuid) or not isinstance(uuid, str):
+                    logging.error(f"数据集 UUID 为空，跳过该条记录")
+                    continue
 
-        for file_type, url in [("data_set", url_dataset), ("meta_data", url_metadata)]:
-            filename = f"{file_type}_{get_filename_from_url(url)}"
-            logging.info(f"正在将文件 {filename} 下载到路径 {folder_path}")
+                if any(not is_valid_url(url) for url in [url_dataset, url_metadata]):
+                    logging.error(f"数据集 {uuid} 的下载链接无效: {url_dataset}, {url_metadata}，跳过该任务")
+                    continue
 
-            task = delayed(download_file)(url, folder_path, filename)
-            tasks.append(task)
+                folder_path = os.path.join(args.output_path, uuid)
 
-    with ProgressBar():
-        results = compute(*tasks, scheduler="processes", num_workers=args.num_processes)
+                os.makedirs(folder_path, exist_ok=True)
 
-    logging.info("所有文件下载完成")
+                for file_type, url in [("data_set", url_dataset), ("meta_data", url_metadata)]:
+                    filename = f"{file_type}_{get_filename_from_url(url)}"
+                    logging.info(f"正在将文件 {filename} 下载到路径 {folder_path}")
+
+                    task = delayed(download_file)(url, folder_path, filename, args.log_path)
+                    tasks.append(task)
+
+
+
+        with ProgressBar():
+            results = compute(*tasks, scheduler="processes", num_workers=args.num_processes)
+
+
+        failed_downloads = [res for res in results if res is not None]  # 过滤出失败的下载任务
+        if failed_downloads:
+            failed_df = pd.DataFrame(failed_downloads)
+            failed_df.to_csv(failed_output_csv, index=False)
+            logging.info(f"仍有未成功下载的文件，失败任务已保存到: {failed_output_csv}")
+            retry_count += 1  # 增加重试次数
+            logging.info(f"等待 10 秒后重试 (重试次数: {retry_count}/{max_retries})...")
+            time.sleep(10)  # 让服务器缓冲一会再尝试
+        else:
+            logging.info("所有文件下载完成，没有失败任务")
+            if osp.exists(failed_output_csv):
+                os.remove(failed_output_csv)  
+            break
+    merge_logs(args.log_path, main_log_file)
+
+    if retry_count >= max_retries:
+        logging.error("达到最大重试次数，仍有文件下载失败，请手动检查 failed_downloads.csv")
