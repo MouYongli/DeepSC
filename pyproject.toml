@@ -9,6 +9,7 @@ description = "Deep Foundation Models for Single Cell RNA Sequencing"
 authors = [
     { name = "Mou YongLi", email = "mou@dbis.rwth-aachen.de" },
     { name = "Ang Li" },
+    { name = "Er Jin" },
     { name = "Sikander Hayat" },
     { name = "Stefan Decker" }
 ]
@@ -22,6 +23,18 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+dependencies = [
+    "torch==2.6.0+cu126",
+    "torchaudio==2.6.0+cu126",
+    "torchvision==0.21.0+cu126",
+    "torch-geometric==2.6.1",
+    "numpy==2.2.3",
+    "pandas==2.2.3",
+    "pyarrow==19.0.1",
+    "dask==2025.2.0",
+    "matplotlib==3.10.0",
 ]
 
 [tool.setuptools]

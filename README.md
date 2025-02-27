@@ -45,7 +45,7 @@ This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell
 #### Anaconda
 1. create conda environment
 ```
-conda create --name deepsc python=3.11
+conda create --name deepsc python=3.10
 conda activate deepsc
 ```
 
@@ -57,10 +57,8 @@ conda install ipykernel
 
 3. Install dependencies
 ```
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 # torch==2.5.1, torchvision==0.20.1, torchaudio==2.5.1
-pip install torch_geometric
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
-pip install -r requirements.txt
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 # torch==2.6.0+cu126, torchvision==0.21.0+cu126, torchaudio==2.6.0+cu126
+# pip install torch_geometric # torch-geometric==2.6.1
 pip install -e .
 ```
 #### Docker
