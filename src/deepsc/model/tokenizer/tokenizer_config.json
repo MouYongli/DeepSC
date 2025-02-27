@@ -1,0 +1,6 @@
+{
+    "tokenizer_class": "GeneTokenizer",
+    "vocab_file": "gene_vocab.json",
+    "unk_token": "[UNK]",
+    "pad_token": "[PAD]"
+  }
