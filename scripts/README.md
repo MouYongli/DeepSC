@@ -32,6 +32,19 @@ This folder contains of multiple scripts and data files used for web crawling, d
     ./download_3ca.sh
     ```
 
+- **process_3ca.sh**
+  -Identify which matrix file contains the raw count data.
+  -Insert datasets with raw count into target_dataset_files.csv.
+  -Use another script (not provided) to generate a dataset ID for each dataset.
+
+- **noiseAnalysis.py**
+  -Analyze the proportion of noise within the matrix.
+
+- **merge_adata.py**
+  -Combine .mtx, gene, and cell files into AnnData objects.
+- **filter_datasets.py**
+  -Filter out genes with low expression levels or cells with a low number of genes
+
 ### Data Files
 
 - **data_info.csv**
