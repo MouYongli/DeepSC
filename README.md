@@ -69,10 +69,10 @@ pip install -e .
 
 ### Download datasets
 1. [Cellxgene Census](https://cellxgene.cziscience.com/datasets)
-2. [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA) 
+2. [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA)
    * Configure the organs in [organ_list.txt](./data/download/3ac/organ_list.txt)
    * Collect information of data and metadata
-3. 
+3.
 
 ## Usage
 
