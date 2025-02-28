@@ -61,4 +61,4 @@ if __name__ == "__main__":
             adata.write(file_path / "transformed_adata.h5ad")
 
     else:
-        print("CSV 文件中没有 'path' 列")
+        print("CSV 文件中没有 'path' 或 'filename' 列")
