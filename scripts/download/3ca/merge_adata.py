@@ -37,7 +37,10 @@ if __name__ == "__main__":
             path_of_gene_file = path_of_file(file_path, "gene")
             path_of_cell_file = path_of_file(file_path, "cell")
 
-            genes = pd.read_csv(path_of_gene_file, header=None, names=["gene_name"])
+            genes = pd.read_csv(path_of_gene_file, header=None, names=["feature_name"])
+            genes["feature_name"] = genes["feature_name"].str.replace(
+                '"', ""
+            )  # 有的feature name是带有双引号的，需要去掉
             genes.index = range(1, len(genes) + 1)
             cells = pd.read_csv(path_of_cell_file)
             cells.index = range(1, len(cells) + 1)
