@@ -4,6 +4,13 @@ This folder contains of multiple scripts and data files used for web crawling, d
 
 ## File Descriptions
 
+## Pipeline of data preprocessing:
+1. crawl correspinding link from 3ca database with crawl_3ca.py
+2. download datasets with download_3ca.py
+3. only keep datasets with raw counts: process_3ca.py
+4. merge mtx file, gene list and cell table into one anndata file: merge_adata.py
+5. filter anndata with low number of genes/cells. Filer genes with low expressions and cells that has not enough genes
+
 ### Scripts
 
 - **crawl_3ca.py**
