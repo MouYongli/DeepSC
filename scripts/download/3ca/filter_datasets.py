@@ -6,7 +6,6 @@ import scanpy as sc
 if __name__ == "__main__":
     csv_path = "target_dataset_with_datasetid.csv"
     df = pd.read_csv(csv_path)
-    output_path = "../../../data/3ac/"
     invalid_dataset_ids = set()
     valid_dataset_ids = set(df["dataset_id"])
 
