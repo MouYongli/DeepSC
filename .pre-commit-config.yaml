@@ -28,3 +28,10 @@ repos:
         args: ["--remove"]
       - id: mixed-line-ending
         args: ["--fix=lf"]
+  - repo: local
+    hooks:
+      - id: run-pytest
+        name: Run Pytest
+        entry: bash -c "cd /home/angli/DeepSC && pytest -s"
+        language: system
+        always_run: true
