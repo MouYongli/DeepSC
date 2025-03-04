@@ -23,6 +23,3 @@ format:
 sync:
 	git pull
 	git pull origin main
-
-test:
-	pytest -s
