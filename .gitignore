@@ -169,9 +169,9 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
-
+*.h5ad
 *.csv
-
+*.png
 data/download/.DS_Store
 
 data/download/3ac/.DS_Store

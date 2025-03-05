@@ -1,11 +1,10 @@
-
 import os
 import os.path as osp
-from bs4 import BeautifulSoup
-import requests
-import pandas as pd
 import uuid
 
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 
 here = os.path.dirname(os.path.abspath(__file__))
 
@@ -14,7 +13,7 @@ base_url = "https://www.weizmann.ac.il/sites/3CA/"
 all_dfs = []  # 用于存储所有的 DataFrame
 
 if __name__ == "__main__":
-    with open(osp.join(here, 'organ_list.txt'), 'r') as file:
+    with open(osp.join(here, "organ_list.txt"), "r") as file:
         organ_list = file.read().splitlines()
 
     # 合并 base_url 和 organ_list 生成完整链接
@@ -66,11 +65,11 @@ if __name__ == "__main__":
             row_dict = dict(zip(headers, row_data))
             row_dict.update(row_links)  # 把超链接列添加进去
 
-            organ_name=link.replace(base_url,"")
-            organ_name=organ_name.replace("-"," ")
-            row_dict["Organ"] = organ_name 
+            organ_name = link.replace(base_url, "")
+            organ_name = organ_name.replace("-", " ")
+            row_dict["Organ"] = organ_name
             uuid_str = str(uuid.uuid4())
-            row_dict["Study_uuid"] = uuid_str 
+            row_dict["Study_uuid"] = uuid_str
             data.append(row_dict)
 
         # 转换为 DataFrame
@@ -80,14 +79,36 @@ if __name__ == "__main__":
         all_dfs.append(df)
 
     # **合并所有表格**
-    merged_df=all_dfs[0]
+    merged_df = all_dfs[0]
     if all_dfs:
         merged_df = pd.concat(all_dfs, ignore_index=True)
 
         desired_order = [
-"Study_uuid","Organ","Title", "Title_link", "Data", "Data_link", "Meta data", "Meta data_link", "Cell types", "Cell types_link", "Summary", "Summary_link", "Disease", "Technology", "#samples", "#cells",
-"Meta programs", "Meta programs_link", "CNAs", "CNAs_link", "UMAP", "UMAP_link", "Cell cycle", "Cell cycle_link"
-]
+            "Study_uuid",
+            "Organ",
+            "Title",
+            "Title_link",
+            "Data",
+            "Data_link",
+            "Meta data",
+            "Meta data_link",
+            "Cell types",
+            "Cell types_link",
+            "Summary",
+            "Summary_link",
+            "Disease",
+            "Technology",
+            "#samples",
+            "#cells",
+            "Meta programs",
+            "Meta programs_link",
+            "CNAs",
+            "CNAs_link",
+            "UMAP",
+            "UMAP_link",
+            "Cell cycle",
+            "Cell cycle_link",
+        ]
         dfnew = merged_df[desired_order]
         dfnew.to_csv("data_info.csv", index=False)
         print("Merged table saved to merged_table_data.csv")
