@@ -1,0 +1,8 @@
+{
+    "tokenizer_class": "GeneTokenizer",
+    "vocab_file": "gene_vocab.json",
+    "unk_token": "[UNK]",
+    "pad_token": "[PAD]",
+    "masked_gene_token": "[MASK_GENE]",
+    "masked_expression_token": "[MASK_EXPR]"
+  }

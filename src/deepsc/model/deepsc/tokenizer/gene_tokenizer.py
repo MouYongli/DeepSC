@@ -27,7 +27,7 @@ class GeneTokenizer(PreTrainedTokenizer):
     }
     max_model_input_sizes = {"gene": 100000}
 
-    def __init__(self, vocab_file=gene_vocab_file, **kwargs):
+    def __init__(self, vocab_file: str=gene_vocab_file, **kwargs):
         # 加载词表文件
         with open(vocab_file, "r", encoding="utf-8") as f:
             self.vocab = json.load(f)
@@ -107,6 +107,6 @@ class GeneTokenizer(PreTrainedTokenizer):
 
 if __name__ == "__main__":
     tokenizer = GeneTokenizer(vocab_file=gene_vocab_file)
-    print(tokenizer.tokenize("BRCA1 BRCA2"))
+    print(tokenizer.tokenize("BRCA1, BRCA2"))
     print(tokenizer.encode("BRCA1 BRCA2"))
     print(tokenizer.decode([2897, 2899]))
