@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import os
 import argparse
@@ -13,16 +14,14 @@ from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from performer_pytorch import PerformerLM
 import anndata as ad
 from utils import *
-
+from lightning.fabric import Fabric
 
 def setup_logging(type, log_path):
-    os.makedirs(log_path, exist_ok=True)  
-
+    os.makedirs(log_path, exist_ok=True)
 
     timestamp = 'today'
     log_file = osp.join(log_path, f"pretrain_{type}_{timestamp}.log")
@@ -62,7 +61,7 @@ parser.add_argument("--replace_prob", type=float, default=0.9, help='Probability
 parser.add_argument("--pos_embed", type=bool, default=True, help='Using Gene2vec encoding or not.')
 parser.add_argument("--data_path", type=str, default='/hpcwork/p0021245/smallset', help='Path of data for pretraining.')
 parser.add_argument("--ckpt_dir", type=str, default='./ckpts/', help='Directory of checkpoint to save.')
-parser.add_argument("--model_name", type=str, default='cellxgene_model', help='Pretrained model name.')
+parser.add_argument("--model_name", type=str, default='cellxgene_model_no_divide', help='Pretrained model name.')
 args = parser.parse_args()
 local_rank = args.local_rank
 print(f"local_rank: {local_rank}")
@@ -94,7 +93,7 @@ ckpt_dir = args.ckpt_dir
 
 
 dist.init_process_group(
-    backend="nccl", 
+    backend="nccl",
     init_method=f"tcp://{master_addr}:{master_port}",
     rank=rank,
     world_size=world_size
@@ -182,13 +181,11 @@ def merge_h5ad_X(path_list):
 
     anndata_list = []
     for path in path_list:
-
         data = ad.read_h5ad(path)
         logging.info(f'Reading file: {path}')
         anndata_list.append(data)
         logging.info(f'File shape: {data.shape[0]}')
-
-    combined_anndata = ad.concat(anndata_list, axis=0)  # 纵向拼接形成一个大的矩阵
+    combined_anndata = ad.concat(anndata_list, axis=0)
     logging.info(f'Combined shape: {combined_anndata.shape[0]}')
 
     return combined_anndata.X
@@ -201,13 +198,12 @@ def get_path_h5ad_in_dir(path):
                 file_path = osp.join(path, filename)
                 path_list.append(file_path)
     if len(path_list) == 0:
-        raise ValueError("文件夹中未找到任何 .h5ad 文件！")
+        raise ValueError("no datasets available in the directory!")
     return path_list
 
-
 path_list = get_path_h5ad_in_dir(args.data_path)
-data = merge_h5ad_X(path_list)
-logging.info(f'Rank {rank} has {len(path_list)} files.')
+data = merge_h5ad_X(path_list) 
+
 data_train, data_val = train_test_split(data, test_size=0.05, random_state=SEED)
 
 train_dataset = SCDataset(data_train)
@@ -218,6 +214,12 @@ val_sampler = SequentialDistributedSampler(val_dataset, batch_size=BATCH_SIZE, w
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, sampler=val_sampler)
+
+fabric = Fabric(accelerator="cuda", devices=4, num_nodes=2, strategy="ddp")
+fabric.launch()
+
+train_loader, val_loader = fabric.setup_dataloaders(train_loader, val_loader)
+
 model = PerformerLM(
     num_tokens = CLASS,
     dim = 200,
@@ -227,13 +229,12 @@ model = PerformerLM(
     local_attn_heads = 0,
     g2v_position_emb = POS_EMBED_USING
 )
-model.to(device)
-model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
 current_device = torch.cuda.current_device()
 
 # optimizer
 optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
+model, optimizer = fabric.setup(model, optimizer)
 # learning rate scheduler
 scheduler = CosineAnnealingWarmupRestarts(
     optimizer,
@@ -246,28 +247,26 @@ scheduler = CosineAnnealingWarmupRestarts(
 )
 loss_fn = nn.CrossEntropyLoss(ignore_index = PAD_TOKEN_ID, reduction='mean').to(local_rank)
 softmax = nn.Softmax(dim=-1)
-dist.barrier()
 for i in range(1, EPOCHS+1):
     train_loader.sampler.set_epoch(i)
     model.train()
-    dist.barrier()
     running_loss = 0.0
     cum_acc = 0.0
     for index, data in enumerate(train_loader):
         index += 1
         logging.info(f"Accumulated gradient on rank: {rank}, local_rank: {local_rank}")
-        data = data.to(device)
         data, labels = data_mask(data)
         if index % GRADIENT_ACCUMULATION != 0:
-            with model.no_sync():
+            with fabric.no_backward_sync(model, enabled=False):
                 logits = model(data)
-                loss = loss_fn(logits.transpose(1, 2), labels) / GRADIENT_ACCUMULATION
-                loss.backward()
+                loss = (loss_fn(logits.transpose(1, 2), labels) / GRADIENT_ACCUMULATION)
+                fabric.backward(loss)  
+
         if index % GRADIENT_ACCUMULATION == 0:
             logging.info(f"Accumulated gradient on rank: {rank}, local_rank: {local_rank}")
             logits = model(data)
             loss = loss_fn(logits.transpose(1, 2), labels) / GRADIENT_ACCUMULATION
-            loss.backward()
+            fabric.backward(loss)
             torch.nn.utils.clip_grad_norm_(model.parameters(), int(1e2))
             optimizer.step()
             optimizer.zero_grad()
@@ -279,16 +278,17 @@ for i in range(1, EPOCHS+1):
         cum_acc += torch.true_divide(correct_num, pred_num).mean().item()
     epoch_loss = running_loss / index
     epoch_acc = 100 * cum_acc / index
-    epoch_loss = get_reduced(epoch_loss, local_rank, 0, world_size)
-    epoch_acc = get_reduced(epoch_acc, local_rank, 0, world_size)
+    epoch_loss = get_reduced_with_fabric(epoch_loss, fabric)
+    epoch_acc = get_reduced_with_fabric(epoch_acc, fabric)
+    #epoch_loss = get_reduced(epoch_loss, local_rank, 0, world_size)
+    #epoch_acc = get_reduced(epoch_acc, local_rank, 0, world_size)
+    epoch_loss
     if is_master:
         print(f'    ==  Epoch: {i} | Training Loss: {epoch_loss:.6f} | Accuracy: {epoch_acc:6.4f}%  ==')
-    dist.barrier()
     scheduler.step()
 
     if i % VALIDATE_EVERY == 0:
         model.eval()
-        dist.barrier()
         running_loss = 0.0
         running_error = 0.0
         predictions = []
@@ -314,7 +314,8 @@ for i in range(1, EPOCHS+1):
             correct_num = ((truths != PAD_TOKEN_ID) * (predictions == truths)).sum(dim=-1)[0].item()
             val_num = (truths != PAD_TOKEN_ID).sum(dim=-1)[0].item()
             val_loss = running_loss / index
-            val_loss = get_reduced(val_loss, local_rank, 0, world_size)
+            val_loss = get_reduced_with_fabric(val_loss, fabric)
+            #val_loss = get_reduced(val_loss, local_rank, 0, world_size)
         if is_master:
             val_acc = 100 * correct_num / val_num
             print(f'    ==  Epoch: {i} | Validation Loss: {val_loss:.6f} | Accuracy: {val_acc:6.4f}%  ==')
