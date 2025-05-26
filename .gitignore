@@ -2,10 +2,11 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.txt
+*.tsv
 # C extensions
 *.so
-
+/scripts/download/3ca/archive
 # Distribution / packaging
 .Python
 build/
