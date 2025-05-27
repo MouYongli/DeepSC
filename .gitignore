@@ -8,8 +8,8 @@ __pycache__/
 *.so
 /scripts/download/3ca/archive
 /scripts/normalization_0527
-/scripts/normalization/archive
-/scripts/normalization/result
+/scripts/preprocessing/archive
+/scripts/preprocessing/result
 # Distribution / packaging
 .Python
 build/
