@@ -61,27 +61,132 @@ $$\mathbf{e}^{expr}_{j} = \mathbf{W}_{bin} \cdot \text{OneHot}_{N}(b_{j}) + \alp
 - $\alpha$ 是平衡离散和连续特征的权重参数
 - $N$ 是离散化的bin数量
 
-### 2.2 双分支Transformer架构
+## 2.2 双分支Transformer架构
 
-传统的多头自注意力机制如下：
+### 2.2.1 传统的Transformer架构
 
-$$\text{MultiHead-Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{concat}(\text{head}_1, \text{head}_2, ..., \text{head}_h)$$
+#### 2.2.1.1 传统的Transformer Block
 
-其中：
-- $\text{head}_i = \text{Attention}_{i}(\mathbf{Q}, \mathbf{K}, \mathbf{V})$ 是第 $i$ 个头
-- $\text{Attention}_{i}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) = \text{softmax}\left(\frac{\mathbf{Q}\mathbf{K}^T}{\sqrt{d}}\right)\mathbf{V}$ 是注意力机制
-- $h$ 是头数
-- $d$ 是维度
-- $\mathbf{Q} = \mathbf{H} \cdot \mathbf{W}^{Q}_{i}$ 是查询向量的矩阵
-- $\mathbf{K} = \mathbf{H} \cdot \mathbf{W}^{K}_{i}$ 是键向量的矩阵
-- $\mathbf{V} = \mathbf{H} \cdot \mathbf{W}^{V}_{i}$ 是值向量的矩阵 
+传统的，标准的Transformer Block包括：
 
-隐藏状态的更新过程如下：
+- Multi-Head Self-Attention层
+- Add & Norm（残差连接 + LayerNorm）
+- Position-wise Feed-Forward Network (FFN)
+- 再次 Add & Norm
 
-$$\mathbf{H}^{(l+1)} = \text{MultiHead-Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) + \mathbf{H}^{(l)}$$
+```mermaid
+flowchart TD
+    Input["Input: X"]
+    MHSA["Multi-Head Self-Attention (MHSA)"]
+    Add1["(+)"]
+    AddNorm1["LayerNorm"]
+    FFN["Feed Forward Network (FFN)"]
+    Add2["(+)"]
+    AddNorm2["LayerNorm"]
+    Output["Output: Z"]
+
+    Input --> MHSA
+    MHSA --> Add1
+    Input --> Add1
+    Add1 --> AddNorm1
+    AddNorm1 --> FFN
+    FFN --> Add2
+    AddNorm1 --> Add2
+    Add2 --> AddNorm2
+    AddNorm2 --> Output
+```
+
+具体流程：
+
+1. Multi-Head Self-Attention层和残差和归一化
+
+$$
+\mathbf{Y} = \text{LayerNorm}\big(\mathbf{X} + \text{MHSA}(\mathbf{X})\big)
+$$
+
+2. 前馈网络子层和残差和归一化
+
+$$
+\mathbf{Z} = \text{LayerNorm}\big(\mathbf{Y} + \text{FFN}(\mathbf{Y})\big)
+$$
+
+FFN一般是两个线性层和一个激活函数（通常是ReLU或GELU）：
+
+$$
+\text{FFN}(\mathbf{Y}) = \max(0, \mathbf{Y} \mathbf{W}_1 + \mathbf{b}_1) \mathbf{W}_2 + \mathbf{b}_2
+$$
+
+其中
+
+$$
+\mathbf{W}_1 \in \mathbb{R}^{d \times d_{ff}}, \quad \mathbf{W}_2 \in \mathbb{R}^{d_{ff} \times d}
+$$
+
+$( d_{ff} )$ 通常比 $( d )$ 大，比如4倍。
 
 
-#### 2.2.1 初始化基因和表达的编码
+
+#### 2.2.1.2 多头自注意力机制 Multi-Head Self-Attention (MHSA)
+
+多头自注意力机制 Multi-Head Self-Attention (MHSA)的核心思想是将输入映射为多组查询（Query）、键（Key）、值（Value），分别计算注意力，然后拼接输出。
+
+假设输入是序列长度为 $( n )$，每个元素是维度为 $( d )$ 的向量，输入矩阵为：
+
+$$
+\mathbf{X} \in \mathbb{R}^{n \times d}
+$$
+
+- 头数为 $( h )$
+- 每个头的维度为 $( d_k = d / h )$，其中 $( d )$ 是维度
+
+对于第 $( i )$ 个头，有三个权重矩阵：
+
+$$
+\mathbf{W}_i^Q, \mathbf{W}_i^K, \mathbf{W}_i^V \in \mathbb{R}^{d \times d_k}
+$$
+
+将输入 $( \mathbf{X} )$ 分别映射为查询、键、值矩阵：
+
+$$
+\mathbf{Q}_i = \mathbf{X} \mathbf{W}_i^Q \in \mathbb{R}^{n \times d_k}
+$$
+$$
+\mathbf{K}_i = \mathbf{X} \mathbf{W}_i^K \in \mathbb{R}^{n \times d_k}
+$$
+$$
+\mathbf{V}_i = \mathbf{X} \mathbf{W}_i^V \in \mathbb{R}^{n \times d_k}
+$$
+
+
+$$
+\mathbf{A}_i = \text{softmax}\left(\frac{\mathbf{Q}_i \mathbf{K}_i^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
+$$
+
+这里 $\frac{1}{\sqrt{d_k}}$ 是缩放因子，防止点积过大导致梯度消失。
+
+计算注意力输出
+
+$$
+\mathbf{Z}_i = \mathbf{A}_i \mathbf{V}_i \in \mathbb{R}^{n \times d_k}
+$$
+
+拼接所有头的输出,将所有头的输出按特征维度拼接：
+
+$$
+\mathbf{Z} = \text{Concat}(\mathbf{Z}_1, \mathbf{Z}_2, \ldots, \mathbf{Z}_h) \in \mathbb{R}^{n \times d}
+$$
+
+然后通过一个线性变换：
+
+$$
+\text{MHSA}(\mathbf{X}) = \mathbf{Z} \mathbf{W}^O, \quad \mathbf{W}^O \in \mathbb{R}^{d \times d}
+$$
+
+### 2.3 双分支Transformer架构
+
+我们将采样Multi-Head Latent-Attention (MHLA)的机制，来实现基因编码分支和表达量编码分支的注意力机制。但是，为了简化建模描述，我们只讨论其中的Attention机制。
+
+#### 2.3.1 初始化基因和表达的编码
 
 结合生物学背景，我们考虑基因编码信息和表达量编码信息的双分支的注意力机制，并引入生物学约束的注意力权重。其中，基因编码分支的注意力机制只考虑基因编码信息，表达量编码分支的注意力机制表达量编码信息以外还考虑基因调控信息（从基因编码分支的注意力机制中提取）。
 
@@ -107,4 +212,4 @@ $$\mathbf{H}_{gene}^{(l+1)} = \text{Attention}_{gene}(\mathbf{Q}_{gene}, \mathbf
 - $\mathbf{W}^{V}_{gene} \in \mathbb{R}^{d \times d}$ 是基因编码分支的值矩阵
 
 
-#### 2.2.3 表达量编码分支的注意力机制
+#### 2.3.2 表达量编码分支的注意力机制
