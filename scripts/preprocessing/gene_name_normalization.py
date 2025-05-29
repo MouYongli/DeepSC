@@ -1,7 +1,11 @@
 import csv
+import logging
 import os
 
 import argparse
+from scripts.utils.utils import setup_logging
+from .config import HGNC_DATABASE
+from .get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 
 
 def map_genes_to_hgnc(input_gene_file, hgnc_database_file, output_file):
@@ -28,11 +32,11 @@ def map_genes_to_hgnc(input_gene_file, hgnc_database_file, output_file):
 
     # match genes from input file against the HGNC database
     matched_rows = []
-
     with open(input_gene_file, "r") as f:
         for line in f:
             gene = line.strip()
             if not gene:
+                logging.info("Empty gene name in this line.")
                 continue
             gene_upper = gene.upper()
             row_data = {"feature_name": gene}
@@ -129,7 +133,7 @@ def process_gene_names(
 ):
     cxg_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/cxg_matched_genes.csv"
     ca3_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/3ca_matched_genes.csv"
-
+    main_log_file = setup_logging("preprocessing", "./logs")
     map_genes_to_hgnc(cxg_input_path, hgnc_database_path, cxg_mapped_output)
     map_genes_to_hgnc(ca3_input_path, hgnc_database_path, ca3_mapped_output)
 
@@ -139,6 +143,22 @@ def process_gene_names(
     else:
         intersec_output = "merged_matched_genes.csv"
     merge_gene_mappings(cxg_mapped_output, ca3_mapped_output, intersec_output)
+
+
+def gene_name_normalization(
+    hgnc_database_path: str = HGNC_DATABASE,
+    intersec_output: str = "",
+):
+    """
+    Main function to normalize gene names from CXG and 3CA datasets.
+    """
+    cxg_input_path, ca3_input_path = get_feature_name_3ca_cxg()
+    process_gene_names(
+        cxg_input_path=cxg_input_path,
+        ca3_input_path=ca3_input_path,
+        hgnc_database_path=hgnc_database_path,
+        intersec_output=intersec_output,
+    )
 
 
 if __name__ == "__main__":
@@ -168,10 +188,15 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    process_gene_names(
+    cxg_feature_names, ca3_feature_names = get_feature_name_3ca_cxg()
+    print(f"CXG feature names saved to: {cxg_feature_names}")
+    print(f"3CA feature names saved to: {ca3_feature_names}")
+    logging.info(f"CXG feature names saved to: {cxg_feature_names}")
+    logging.info(f"3CA feature names saved to: {ca3_feature_names}")
+"""     process_gene_names(
         cxg_input_path=args.cxg_input_path,
         ca3_input_path=args.ca3_input_path,
         hgnc_database_path=args.hgnc_database_path,
         intersec_output=args.intersec_output,
     )
+ """

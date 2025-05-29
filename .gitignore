@@ -4,12 +4,13 @@ __pycache__/
 *$py.class
 *.txt
 *.tsv
+*.idx
 # C extensions
 *.so
-/scripts/download/3ca/archive
+**/archive/
+**/result/
 /scripts/normalization_0527
-/scripts/preprocessing/archive
-/scripts/preprocessing/result
+
 # Distribution / packaging
 .Python
 build/

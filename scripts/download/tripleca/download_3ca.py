@@ -11,18 +11,13 @@ from dask.diagnostics import ProgressBar
 import argparse
 import multiprocessing
 import time  # 用于延迟重试
-from datetime import datetime
+from scripts.utils.utils import setup_logging
+from .crawl_3ca import data_crawl
 
 
 def get_parse():
     parser = argparse.ArgumentParser(
         description="Download files using Dask with multiprocessing."
-    )
-    parser.add_argument(
-        "--csv_path",
-        type=str,
-        required=True,
-        help="Path to the CSV file containing download links",
     )
     parser.add_argument(
         "--output_path",
@@ -43,30 +38,6 @@ def get_parse():
         help="Number of parallel processes",
     )
     return parser.parse_args()
-
-
-def setup_logging(type, log_path):
-    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
-
-    # 生成带时间戳的日志文件名
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file = osp.join(log_path, f"{type}_{timestamp}.log")
-
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        filemode="w",
-    )
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    console.setFormatter(formatter)
-    logging.getLogger("").addHandler(console)
-
-    logging.info(f"日志文件: {log_file}")
-
-    return log_file
 
 
 def download_file(url, folder_path, filename, log_path):
@@ -200,6 +171,7 @@ def extract_and_delete_zips(root_folder, csv_path):
 
 
 if __name__ == "__main__":
+    download_url_table = data_crawl()
     args = get_parse()
 
     main_log_file = setup_logging("download", args.log_path)
@@ -231,12 +203,8 @@ if __name__ == "__main__":
                 tasks.append(task)
         # 读取原始csv文件
         else:
-            logging.info("读取原始 CSV 文件...")
-            try:
-                df = pd.read_csv(args.csv_path)
-            except Exception as e:
-                logging.error(f"无法读取 CSV 文件: {args.csv_path}, 错误: {e}")
-                exit(1)
+            logging.info("读取原始含下载链接的表格...")
+            df = download_url_table
             logging.info(f"选择下载文件数目为 {args.num_files}")
             for _, row in df.head(args.num_files).iterrows():
 
