@@ -200,6 +200,9 @@ $$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
 
 #### 2.2.2 基因编码分支的注意力机制
 
+在模型训练时，Attention 矩阵 $\mathbf{A}$ 可以看作隐式学习到的基因调控关系的近似。但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系。
+
+
 $$\mathbf{H}_{gene}^{(l+1)} = \text{Attention}_{gene}(\mathbf{Q}_{gene}, \mathbf{K}_{gene}, \mathbf{V}_{gene}) + \mathbf{H}_{gene}^{(l)}$$
 
 其中：
@@ -214,3 +217,13 @@ $$\mathbf{H}_{gene}^{(l+1)} = \text{Attention}_{gene}(\mathbf{Q}_{gene}, \mathbf
 
 #### 2.3.2 表达量编码分支的注意力机制
 
+因为基因调控网络（基因和基因之间的调控关系），会影响基因的表达量，所以表达量编码分支的注意力机制需要考虑基因调控信息。
+
+$$\mathbf{H}_{expr}^{(l+1)} = \text{Attention}_{expr}(\mathbf{Q}_{expr}, \mathbf{K}_{expr}, \mathbf{V}_{expr}) + \mathbf{H}_{expr}^{(l)}$$
+
+其中：
+- $\mathbf{Q}_{expr} = \mathbf{H}_{expr}^{(l)} \cdot \mathbf{W}^{Q}_{expr}$ 是表达量编码分支的查询向量的矩阵
+- $\mathbf{K}_{expr} = \mathbf{H}_{expr}^{(l)} \cdot \mathbf{W}^{K}_{expr}$ 是表达量编码分支的键向量的矩阵
+- $\mathbf{V}_{expr} = \mathbf{H}_{expr}^{(l)} \cdot \mathbf{W}^{V}_{expr}$ 是表达量编码分支的值向量的矩阵
+
+- $\mathbf{W}^{Q}_{expr} \in \mathbb{R}^{d \times d}$ 是表达量编码分支的查询矩阵
