@@ -213,3 +213,4 @@ $$\mathbf{H}_{gene}^{(l+1)} = \text{Attention}_{gene}(\mathbf{Q}_{gene}, \mathbf
 
 
 #### 2.3.2 表达量编码分支的注意力机制
+
