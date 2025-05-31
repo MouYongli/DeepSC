@@ -9,7 +9,6 @@ __pycache__/
 *.so
 **/archive/
 **/result/
-/scripts/normalization_0527
 
 # Distribution / packaging
 .Python
