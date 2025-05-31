@@ -133,7 +133,7 @@ def anndata_generate(target_datasets):
         for row in target_datasets.itertuples(index=False):
             file_path = Path(row.path)
             file_name = row.filename
-            uuid = row.Study_uuid
+            uuid = row.dataset_id
             path_of_mtx_file = file_path / file_name
             print(file_path)
             if not file_path.exists():
@@ -196,7 +196,8 @@ def anndata_generate(target_datasets):
         target_datasets["dataset_id"].isin(valid_dataset_ids)
     ]  # 仅保留有效的 dataset_id
     target_datasets.to_csv(
-        "newly_updated_target_dataset_with_datasetid.csv", index=False
+        "/home/angli/DeepSC/scripts/download/tripleca/updated_target_dataset_with_datasetid.csv",
+        index=False,
     )
     print(
         f"已更新 CSV 文件并保存至 updated_target_dataset_with_datasetid.csv ，删除了 {len(invalid_dataset_ids)} 个无效的数据集！"

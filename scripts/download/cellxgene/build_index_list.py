@@ -5,9 +5,9 @@ from typing import List
 
 import cellxgene_census
 import pandas as pd
-from data_config import VALUE_FILTER, VERSION
 
 import argparse
+from .data_config import VALUE_FILTER, VERSION
 
 parser = argparse.ArgumentParser(description="Build soma index list based on query")
 

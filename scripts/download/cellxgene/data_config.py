@@ -7,9 +7,9 @@ MAJOR_TISSUE_LIST = [
     "intestine",
     "pancreas",
 ]
-VERSION = "2023-12-15"
+VERSION = "2025-01-30"
 
-CANCER_LIST_PATH = "./cancer_list.txt"
+CANCER_LIST_PATH = "/home/angli/DeepSC/scripts/download/cellxgene/cancer_list.txt"
 with open(CANCER_LIST_PATH) as f:
     CANCER_LIST = [line.rstrip("\n") for line in f]
 

@@ -1,10 +1,8 @@
 import csv
 import logging
-import os
 
-import argparse
 from scripts.utils.utils import setup_logging
-from .config import HGNC_DATABASE
+from .config import GENE_MAP_PATH, HGNC_DATABASE
 from .get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 
 
@@ -112,13 +110,23 @@ def merge_gene_mappings(cxg_file, ca3_file, merged_output):
         key=lambda x: (x["Approved Name"].upper(), x["feature_name"].upper())
     )
 
+    # 为每个唯一的 Approved Name 分配 ID
+    approved_to_id = {
+        name: idx
+        for idx, name in enumerate(sorted({e["Approved Name"] for e in final_entries}))
+    }
+    for entry in final_entries:
+        entry["id"] = approved_to_id[entry["Approved Name"]]
+
     fieldnames = [
         "feature_name",
         "Ensembl id",
         "Approved Name",
         "occur in cellxgene",
         "occur in 3ca",
+        "id",
     ]
+    logging.info(f"Writing merged gene mappings to {merged_output}")
     with open(merged_output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -129,74 +137,35 @@ def process_gene_names(
     cxg_input_path: str,
     ca3_input_path: str,
     hgnc_database_path: str,
-    intersec_output: str = "",
 ):
     cxg_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/cxg_matched_genes.csv"
     ca3_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/3ca_matched_genes.csv"
     main_log_file = setup_logging("preprocessing", "./logs")
     map_genes_to_hgnc(cxg_input_path, hgnc_database_path, cxg_mapped_output)
     map_genes_to_hgnc(ca3_input_path, hgnc_database_path, ca3_mapped_output)
-
-    if intersec_output:
-        os.makedirs(intersec_output, exist_ok=True)
-        intersec_output = os.path.join(intersec_output, "merged_matched_genes.csv")
-    else:
-        intersec_output = "merged_matched_genes.csv"
-    merge_gene_mappings(cxg_mapped_output, ca3_mapped_output, intersec_output)
+    merge_gene_mappings(cxg_mapped_output, ca3_mapped_output, GENE_MAP_PATH)
 
 
 def gene_name_normalization(
     hgnc_database_path: str = HGNC_DATABASE,
-    intersec_output: str = "",
 ):
     """
     Main function to normalize gene names from CXG and 3CA datasets.
     """
-    cxg_input_path, ca3_input_path = get_feature_name_3ca_cxg()
+    # cxg_input_path, ca3_input_path = get_feature_name_3ca_cxg()
+    cxg_input_path = "/home/angli/DeepSC/scripts/preprocessing/cxg_gene_names.txt"
+    ca3_input_path = "/home/angli/DeepSC/scripts/preprocessing/3ca_gene_names.txt"
     process_gene_names(
         cxg_input_path=cxg_input_path,
         ca3_input_path=ca3_input_path,
         hgnc_database_path=hgnc_database_path,
-        intersec_output=intersec_output,
     )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Map gene from CXG and 3CA to HGNC names, then get overlapping genes."
-    )
-    parser.add_argument(
-        "cxg_input_path",
-        type=str,
-        help="Path to the CXG gene name input file (txt format, one gene name per line).",
-    )
-    parser.add_argument(
-        "ca3_input_path",
-        type=str,
-        help="Path to the 3CA gene name input file (txt format, one gene name per line).",
-    )
-    parser.add_argument(
-        "hgnc_database_path",
-        type=str,
-        help="Path to the HGNC reference database file",
-    )
-    parser.add_argument(
-        "--intersec_output",
-        type=str,
-        default="",
-        help="(Optional) Output directory. Default saves to current folder as 'merged_matched_genes.csv'.",
-    )
-
-    args = parser.parse_args()
     cxg_feature_names, ca3_feature_names = get_feature_name_3ca_cxg()
     print(f"CXG feature names saved to: {cxg_feature_names}")
     print(f"3CA feature names saved to: {ca3_feature_names}")
     logging.info(f"CXG feature names saved to: {cxg_feature_names}")
     logging.info(f"3CA feature names saved to: {ca3_feature_names}")
-"""     process_gene_names(
-        cxg_input_path=args.cxg_input_path,
-        ca3_input_path=args.ca3_input_path,
-        hgnc_database_path=args.hgnc_database_path,
-        intersec_output=args.intersec_output,
-    )
- """
+    gene_name_normalization()
