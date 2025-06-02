@@ -9,6 +9,7 @@ __pycache__/
 *.so
 **/archive/
 **/result/
+.env
 
 # Distribution / packaging
 .Python

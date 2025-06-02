@@ -74,6 +74,25 @@ pip install -e .
    * Collect information of data and metadata
 3.
 
+### Environment Configuration
+
+Before running the scripts, make sure to configure your environment variables in a `.env` file located in the project root. Below is an example of what your `.env` file might look like:
+
+```env
+# Path of storing the data index, data result and query list for Cellxgene
+INDEX_PATH_CELLXGENE="/home/xxxx/DeepSC/data/index_list"
+QUERY_PATH_CELLXGENE="/home/xxxx/DeepSC/scripts/download/cellxgene/query_list.txt"
+DATA_PATH_CELLXGENE="/home/xxxx/DeepSC/data"
+
+# Path of storing the data for 3CA
+DATA_PATH_3CA="/home/xxxx/DeepSC/data/3ca/raw"
+MAPPED_DATA_PATH_3CA="/home/xxxx/DeepSC/mapped_batch_data/3ca"
+MERGED_DATA_PATH_3CA="/home/xxxx/DeepSC/data/3ac/merged_batch_data"
+
+# Path of storing the logs
+LOG_PATH="/home/xxxx/DeepSC/logs"
+```
+
 ## Usage
 
 Here’s an example of how to process a dataset:

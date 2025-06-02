@@ -1,6 +1,11 @@
-INPUT_DIR="/home/angli/DeepSC/data/3ac/mapped_batch_data"
-OUTPUT_DIR="/home/angli/DeepSC/data/3ac/merged_batch_data
+#!/bin/bash
+
+cd "$(dirname "$0")/../.."
+
+set -a
+source .env
+set +a
 
 python -m scripts.preprocessing.preprocess_3ca_merge \
-  --input_dir "$INPUT_DIR" \
-  --output_dir "$OUTPUT_DIR" \
+  --input_dir "$MAPPED_DATA_PATH_3CA" \
+  --output_dir "$MERGED_DATA_PATH_3CA" \

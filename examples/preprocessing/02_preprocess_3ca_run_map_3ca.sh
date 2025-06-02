@@ -1,6 +1,10 @@
 #!/bin/bash
 
-OUTPUT_DIR="/home/angli/DeepSC/mapped_batch_data/3ca"
+cd "$(dirname "$0")/../.."
+
+set -a
+source .env
+set +a
 
 python -m scripts.preprocessing.preprocess_datasets_3ca \
-  --output_dir "$OUTPUT_DIR" \
+  --output_dir "$MAPPED_DATA_PATH_3CA" \

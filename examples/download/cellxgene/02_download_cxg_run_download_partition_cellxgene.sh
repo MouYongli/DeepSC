@@ -5,17 +5,17 @@
 #SBATCH --mem=48G
 #SBATCH -p cpu
 
+cd "$(dirname "$0")/../../.."
+
+set -a
+source .env
+set +a
+
 source /home/rn260358/miniforge3/etc/profile.d/conda.sh
 conda activate scbertnew
 
-
-INDEX_PATH="/hpcwork/p0021245/Data/index_lists"
-QUERY_PATH="/hpcwork/p0021245/DeepSC/scripts/download/cellxgene/query_list.txt"
-DATA_PATH="/hpcwork/p0021245/scBERT"
-
-
-query_name=$(sed -n "${SLURM_ARRAY_TASK_ID}p" $QUERY_PATH)
+query_name=$(sed -n "${SLURM_ARRAY_TASK_ID}p" $QUERY_PATH_CELLXGENE)
 
 echo "downloading ${query_name}"
 
-/hpcwork/p0021245/DeepSC/scripts/download/cellxgene/download_partition.sh ${query_name} ${INDEX_PATH} ${DATA_PATH}
+/hpcwork/p0021245/DeepSC/scripts/download/cellxgene/download_partition.sh ${query_name} ${INDEX_PATH_CELLXGENE} ${DATA_PATH_CELLXGENE}
