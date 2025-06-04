@@ -157,7 +157,6 @@ $$
 \mathbf{V}_i = \mathbf{X} \mathbf{W}_i^V \in \mathbb{R}^{n \times d_k}
 $$
 
-
 $$
 \mathbf{A}_i = \text{softmax}\left(\frac{\mathbf{Q}_i \mathbf{K}_i^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
 $$
@@ -198,32 +197,24 @@ $$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
 
 然后，新基因编码分支和表达量编码分支的隐藏状态，多头注意力机制的计算过程如下：
 
-#### 2.2.2 基因编码分支的注意力机制
+#### 2.2.2 基因编码分支
 
-在模型训练时，Attention 矩阵 $\mathbf{A}$ 可以看作隐式学习到的基因调控关系的近似。但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系。
+在模型训练时，Attention 矩阵 $\mathbf{A}$ 学习token之间的注意力权重，可以看作隐式学习到的基因调控关系的近似。
 
+**_但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息，并且基因调控是一个稀疏的矩阵。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系，并且能够学习到基因调控的稀疏性。_**
 
-$$\mathbf{H}_{gene}^{(l+1)} = \text{Attention}_{gene}(\mathbf{Q}_{gene}, \mathbf{K}_{gene}, \mathbf{V}_{gene}) + \mathbf{H}_{gene}^{(l)}$$
+对于第 $( l )$ 层，基因编码的隐藏状态是 $\mathbf{H}_{gene}^{(l)}$，表达量编码的隐藏状态是 $\mathbf{H}_{expr}^{(l)}$。我们先计算基因编码的Q,K,V矩阵：
 
-其中：
-- $\mathbf{Q}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{Q}_{gene}$ 是基因编码分支的查询向量的矩阵
-- $\mathbf{K}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{K}_{gene}$ 是基因编码分支的键向量的矩阵
-- $\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$ 是基因编码分支的值向量的矩阵
+$$\mathbf{Q}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{Q}_{gene}$$
+$$\mathbf{K}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{K}_{gene}$$
+$$\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
 
-- $\mathbf{W}^{Q}_{gene} \in \mathbb{R}^{d \times d}$ 是基因编码分支的查询矩阵
-- $\mathbf{W}^{K}_{gene} \in \mathbb{R}^{d \times d}$ 是基因编码分支的键矩阵
-- $\mathbf{W}^{V}_{gene} \in \mathbb{R}^{d \times d}$ 是基因编码分支的值矩阵
+```citation
+@article{louizos2017learning,
+  title={Learning sparse neural networks through $ L\_0 $ regularization},
+  author={Louizos, Christos and Welling, Max and Kingma, Diederik P},
+  journal={arXiv preprint arXiv:1712.01312},
+  year={2017}
+}
+```
 
-
-#### 2.3.2 表达量编码分支的注意力机制
-
-因为基因调控网络（基因和基因之间的调控关系），会影响基因的表达量，所以表达量编码分支的注意力机制需要考虑基因调控信息。
-
-$$\mathbf{H}_{expr}^{(l+1)} = \text{Attention}_{expr}(\mathbf{Q}_{expr}, \mathbf{K}_{expr}, \mathbf{V}_{expr}) + \mathbf{H}_{expr}^{(l)}$$
-
-其中：
-- $\mathbf{Q}_{expr} = \mathbf{H}_{expr}^{(l)} \cdot \mathbf{W}^{Q}_{expr}$ 是表达量编码分支的查询向量的矩阵
-- $\mathbf{K}_{expr} = \mathbf{H}_{expr}^{(l)} \cdot \mathbf{W}^{K}_{expr}$ 是表达量编码分支的键向量的矩阵
-- $\mathbf{V}_{expr} = \mathbf{H}_{expr}^{(l)} \cdot \mathbf{W}^{V}_{expr}$ 是表达量编码分支的值向量的矩阵
-
-- $\mathbf{W}^{Q}_{expr} \in \mathbb{R}^{d \times d}$ 是表达量编码分支的查询矩阵
