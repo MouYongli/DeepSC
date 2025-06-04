@@ -2,9 +2,14 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.txt
+*.tsv
+*.idx
 # C extensions
 *.so
+**/archive/
+**/result/
+.env
 
 # Distribution / packaging
 .Python
@@ -179,3 +184,4 @@ data/download/3ac/.DS_Store
 data/.DS_Store
 
 .DS_Store
+glossary/*bk.md

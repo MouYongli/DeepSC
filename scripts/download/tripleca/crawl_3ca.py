@@ -1,4 +1,3 @@
-import os
 import os.path as osp
 import uuid
 
@@ -6,18 +5,14 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-here = os.path.dirname(os.path.abspath(__file__))
+from .config import BASE_URL, ORGAN_LIST
 
-base_url = "https://www.weizmann.ac.il/sites/3CA/"
 
-all_dfs = []  # 用于存储所有的 DataFrame
-
-if __name__ == "__main__":
-    with open(osp.join(here, "organ_list.txt"), "r") as file:
-        organ_list = file.read().splitlines()
-
+def data_crawl():
+    all_dfs = []
+    organ_list = ORGAN_LIST
     # 合并 base_url 和 organ_list 生成完整链接
-    organ_links = [osp.join(base_url, organ) for organ in organ_list]
+    organ_links = [osp.join(BASE_URL, organ) for organ in organ_list]
 
     # 遍历每个链接并解析表格
     for link in organ_links:
@@ -65,7 +60,7 @@ if __name__ == "__main__":
             row_dict = dict(zip(headers, row_data))
             row_dict.update(row_links)  # 把超链接列添加进去
 
-            organ_name = link.replace(base_url, "")
+            organ_name = link.replace(BASE_URL, "")
             organ_name = organ_name.replace("-", " ")
             row_dict["Organ"] = organ_name
             uuid_str = str(uuid.uuid4())
@@ -110,9 +105,7 @@ if __name__ == "__main__":
             "Cell cycle_link",
         ]
         dfnew = merged_df[desired_order]
-        dfnew.to_csv("data_info.csv", index=False)
-        print("Merged table saved to merged_table_data.csv")
+        return dfnew
     else:
+        return None
         print("No valid tables found.")
-
-# %%

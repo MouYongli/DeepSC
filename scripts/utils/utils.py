@@ -1,4 +1,9 @@
+import logging
+import os
+import os.path as osp
 from pathlib import Path
+
+from datetime import datetime
 
 
 def path_of_file(file_path, file_name):
@@ -48,3 +53,27 @@ def path_of_file(file_path, file_name):
                 print(f"Multiple files found in path {file_path}")
         else:
             print(f"Corresponding file not found in path {file_path}")
+
+
+def setup_logging(type, log_path):
+    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
+
+    # 生成带时间戳的日志文件名
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_file = osp.join(log_path, f"{type}_{timestamp}.log")
+
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filemode="w",
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    console.setFormatter(formatter)
+    logging.getLogger("").addHandler(console)
+
+    logging.info(f"日志文件: {log_file}")
+
+    return log_file
