@@ -161,7 +161,7 @@ def data_mask(data,
     labels = data.masked_fill(~mask, pad_token_id)        # the label of masked tokens
     return masked_input, labels
 
-class SCDataset(Dataset):
+""" class SCDataset(Dataset):
     def __init__(self, data):
         super().__init__()
         self.data = data
@@ -175,7 +175,23 @@ class SCDataset(Dataset):
         return full_seq
 
     def __len__(self):
-        return self.data.shape[0]
+        return self.data.shape[0] """
+class SCDataset(Dataset):
+    def __init__(self, coo_tensor):
+        if not coo_tensor.is_coalesced():
+            raise ValueError("输入的稀疏张量不是 coalesced 格式，请先调用 coalesce() 进行合并")
+        self.num_samples = coo_tensor.shape[0]
+    
+    def __getitem__(self, idx):
+        rand_idx = random.randint(0, self.num_samples - 1)
+        row = self.coo_tensor[rand_idx].to_dense()
+        row[row > (CLASS - 2)] = CLASS - 2
+        row = row.long()
+        row = torch.cat((row, torch.tensor([0]))).to(row.device)
+        return row
+
+    def __len__(self):
+        return self.num_samples
 
 def merge_h5ad_X(path_list):
 
