@@ -193,7 +193,7 @@ class SCDataset(Dataset):
     def __len__(self):
         return self.num_samples
 
-def merge_h5ad_X(path_list):
+""" def merge_h5ad_X(path_list):
 
     anndata_list = []
     for path in path_list:
@@ -215,12 +215,40 @@ def get_path_h5ad_in_dir(path):
                 path_list.append(file_path)
     if len(path_list) == 0:
         raise ValueError("no datasets available in the directory!")
-    return path_list
+    return path_list """
 
-path_list = get_path_h5ad_in_dir(args.data_path)
+""" path_list = get_path_h5ad_in_dir(args.data_path)
 data = merge_h5ad_X(path_list) 
 
 data_train, data_val = train_test_split(data, test_size=0.05, random_state=SEED)
+ """
+"用于提取目标行的稀疏张量"
+def extract_rows_from_sparse_tensor(tensor, row_ids):
+    tensor = tensor.coalesce()
+    idx = tensor.indices()
+    val = tensor.values()
+    
+    # 找出属于目标 row 的位置
+    mask = torch.isin(idx[0], torch.tensor(row_ids, device=idx.device))
+    new_indices = idx[:, mask]
+    new_values = val[mask]
+    
+    # 行号需要重新映射：比如原来 row 100 在 row_ids 中是第 5 行
+    row_id_map = {orig: i for i, orig in enumerate(row_ids)}
+    remapped_rows = torch.tensor([row_id_map[int(r)] for r in new_indices[0].tolist()], device=idx.device)
+    new_indices[0] = remapped_rows
+
+    return torch.sparse_coo_tensor(new_indices, new_values, size=(len(row_ids), tensor.shape[1]))
+
+tensor_path = "/hpcwork/p0021245/Data/test_pth_folder/1d84333c-0327-4ad6-be02-94fee81154ff_sparse_preprocessed.pth"
+coo_tensor = torch.load(tensor_path)
+
+num_rows = coo_tensor.shape[0]
+row_indices = np.arange(num_rows)
+train_idx, val_idx = train_test_split(row_indices, test_size=0.05, random_state=SEED)
+
+data_train = extract_rows_from_sparse_tensor(coo_tensor, train_idx)
+data_val = extract_rows_from_sparse_tensor(coo_tensor, val_idx)
 
 train_dataset = SCDataset(data_train)
 val_dataset = SCDataset(data_val)
