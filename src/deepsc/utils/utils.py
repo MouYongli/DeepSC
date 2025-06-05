@@ -1,16 +1,9 @@
-# -*- coding: utf-8 -*-
-
 from __future__ import print_function
-import json
 import os
-import struct
-import sys
-import platform
-import re
-import time
-import traceback
-import requests
-import socket
+import logging
+from datetime import datetime
+import os.path as osp
+import os
 import random
 import math
 import numpy as np
@@ -21,8 +14,58 @@ from torch.optim.lr_scheduler import _LRScheduler
 from torch import nn
 import torch.nn.functional as F
 from torch.nn.modules.loss import _WeightedLoss
+from pathlib import Path
 
+def testPackage():
+    print("#############")
 
+def path_of_file(file_path, file_name):
+    if file_name == "cell":
+        searchKey1 = "cell"
+        searchKey2 = ".csv"
+
+    if file_name == "gene":
+        searchKey1 = "gene"
+        searchKey2 = ".txt"
+
+    files_in_directory = {
+        f.name.lower(): f.name for f in file_path.iterdir() if f.is_file()
+    }
+    lower_files = list(files_in_directory.keys())
+    search_file_path = Path("")
+
+    search_files = [
+        f for f in lower_files if f.startswith(searchKey1) and f.endswith(searchKey2)
+    ]
+    if search_files:
+        if not len(search_files) > 1:
+            # print(f"find {file_name} file: {search_files[0]} in path {file_path}")
+            original_file_name = files_in_directory[search_files[0]]
+            search_file_path = file_path / original_file_name
+            return search_file_path
+        else:
+            print(f"Multiple files found in path {file_path}")
+    else:
+        parent_folder = file_path.parent
+        files_in_parent_directory = {
+            f.name.lower(): f.name for f in parent_folder.iterdir() if f.is_file()
+        }
+        lower_files_in_parent_directory = list(files_in_parent_directory.keys())
+        search_files = [
+            f
+            for f in lower_files_in_parent_directory
+            if f.startswith(searchKey1) and f.endswith(searchKey2)
+        ]
+        if search_files:
+            if not len(search_files) > 1:
+                original_file_name = files_in_parent_directory[search_files[0]]
+                search_file_path = parent_folder / original_file_name
+                # print(f"find gene file: {search_files[0]} in path {parent_folder}")
+                return search_file_path
+            else:
+                print(f"Multiple files found in path {file_path}")
+        else:
+            print(f"Corresponding file not found in path {file_path}")
 
 def seed_all(seed_value, cuda_deterministic=False):
     """
@@ -42,7 +85,30 @@ def seed_all(seed_value, cuda_deterministic=False):
     else:  # faster, less reproducible
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
+        
+#TODO: Duplicated utils functions? refactor!
+def setup_logging(type, log_path):
+    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
 
+    # 生成带时间戳的日志文件名
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_file = osp.join(log_path, f"{type}_{timestamp}.log")
+
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filemode="w",
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    console.setFormatter(formatter)
+    logging.getLogger("").addHandler(console)
+
+    logging.info(f"日志文件: {log_file}")
+
+    return log_file
 
 def set_log(logfileName, rank=-1):
     """
@@ -125,6 +191,7 @@ def get_reduced(tensor, current_device, dest_device, world_size):
 def get_reduced_with_fabric(tensor, fabric):
     reduced_tensor = fabric.all_reduce(tensor, reduce_op="mean")
     return reduced_tensor.item()
+
 
 def get_ndtensor_reduced(tensor, current_device, dest_device, world_size):
     """
@@ -378,3 +445,24 @@ class LabelSmoothCrossEntropyLoss(_WeightedLoss):
             loss = loss.mean()
 
         return loss
+def setup_logging(type: str, log_path: str = "./logs") -> str:
+    os.makedirs(log_path, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = osp.join(log_path, f"pretrain_{type}_{timestamp}.log")
+
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        filemode="w",
+    )
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    console.setFormatter(formatter)
+    logging.getLogger("").addHandler(console)
+
+    logging.info(f"日志文件: {log_file}")
+    return log_file

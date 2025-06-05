@@ -10,7 +10,7 @@ from functools import partial
 from contextlib import contextmanager
 
 from local_attention import LocalAttention
-from performer_pytorch.reversible import ReversibleSequence, SequentialSequence
+from src.models.scbert.reversible import ReversibleSequence, SequentialSequence
 
 try:
     from apex import amp
@@ -439,7 +439,7 @@ def apply_rotary_pos_emb(q, k, sinu_pos):
 class Gene2VecPositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
-        gene2vec_weight = np.load('/hpcwork/p0021245/Data/gene60664.npy')
+        gene2vec_weight = np.load('/home/angli/scBERT/gene2vec_res_34683_200.npy')
         gene2vec_weight = np.concatenate((gene2vec_weight, np.zeros((1, gene2vec_weight.shape[1]))), axis=0)
         gene2vec_weight = torch.from_numpy(gene2vec_weight)
         self.emb = nn.Embedding.from_pretrained(gene2vec_weight)

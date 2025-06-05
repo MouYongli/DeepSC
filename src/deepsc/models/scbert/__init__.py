@@ -1,0 +1,1 @@
+from deepsc.models.scbert.scbert import *

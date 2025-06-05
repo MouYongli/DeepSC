@@ -1,7 +1,7 @@
 import csv
 import logging
 
-from scripts.utils.utils import setup_logging
+from deepsc.utils import setup_logging
 from .config import GENE_MAP_PATH, HGNC_DATABASE
 from .get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 
