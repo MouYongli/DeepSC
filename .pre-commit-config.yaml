@@ -32,6 +32,7 @@ repos:
     hooks:
       - id: run-pytest
         name: Run Pytest
-        entry: bash -c "cd /home/angli/DeepSC && pytest -s"
+        entry: bash -c "PYTHONPATH=. pytest tests"
         language: system
         always_run: true
+        files: ''

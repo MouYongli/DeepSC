@@ -1,0 +1,2 @@
+cellxgene所有数据集里的基因名称都相同，所以直接从它们的任意一个h5ad里面提取var部分的feature_name列表。
+cellxgene中包含重名基因，名称相同但是ENSGid不相同，这部分基因无法在3ca里面准确找到交集，因为3ca里面的基因只包含feature_name所以省略.
