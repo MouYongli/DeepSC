@@ -9,7 +9,6 @@ import math
 import numpy as np
 import torch
 import logging
-import datetime
 from torch.optim.lr_scheduler import _LRScheduler
 from torch import nn
 import torch.nn.functional as F
@@ -87,12 +86,12 @@ def seed_all(seed_value, cuda_deterministic=False):
         torch.backends.cudnn.benchmark = True
         
 #TODO: Duplicated utils functions? refactor!
-def setup_logging(type, log_path):
-    os.makedirs(log_path, exist_ok=True)  # 确保日志目录存在
 
-    # 生成带时间戳的日志文件名
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file = osp.join(log_path, f"{type}_{timestamp}.log")
+def setup_logging(type: str, log_path: str = "./logs") -> str:
+    os.makedirs(log_path, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = osp.join(log_path, f"pretrain_{type}_{timestamp}.log")
 
     logging.basicConfig(
         filename=log_file,
@@ -100,6 +99,7 @@ def setup_logging(type, log_path):
         format="%(asctime)s - %(levelname)s - %(message)s",
         filemode="w",
     )
+
     console = logging.StreamHandler()
     console.setLevel(logging.INFO)
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -107,7 +107,6 @@ def setup_logging(type, log_path):
     logging.getLogger("").addHandler(console)
 
     logging.info(f"日志文件: {log_file}")
-
     return log_file
 
 def set_log(logfileName, rank=-1):
@@ -445,24 +444,3 @@ class LabelSmoothCrossEntropyLoss(_WeightedLoss):
             loss = loss.mean()
 
         return loss
-def setup_logging(type: str, log_path: str = "./logs") -> str:
-    os.makedirs(log_path, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = osp.join(log_path, f"pretrain_{type}_{timestamp}.log")
-
-    logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        filemode="w",
-    )
-
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    console.setFormatter(formatter)
-    logging.getLogger("").addHandler(console)
-
-    logging.info(f"日志文件: {log_file}")
-    return log_file

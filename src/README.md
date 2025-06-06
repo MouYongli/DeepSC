@@ -3,7 +3,7 @@
     └── deepsc/
          ├── models/
          │      ├── deepsc/
-         │      └── scBERT/
+         │      └── scbert/
          │              ├── scbert.py
          │              └── reversible.py   
          ├── data/

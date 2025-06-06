@@ -10,7 +10,7 @@ from functools import partial
 from contextlib import contextmanager
 
 from local_attention import LocalAttention
-from src.models.scbert.reversible import ReversibleSequence, SequentialSequence
+from deepsc.models.scbert.reversible import ReversibleSequence, SequentialSequence
 
 try:
     from apex import amp
