@@ -8,7 +8,6 @@ from deepsc.utils.utils import setup_logging
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument("--bin_num", type=int, default=5, help="number of bins")
     parser.add_argument(
         "--model_type",
@@ -47,7 +46,7 @@ def parse_args():
     parser.add_argument(
         "--model_name",
         type=str,
-        default="llm_pretrained",
+        default="deepsc",
         help="Pretrained model name.",
     )
     parser.add_argument(

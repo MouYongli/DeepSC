@@ -17,3 +17,4 @@ PYTHONPATH=src torchrun \
   --gene_num 60664 \
   --bin_num 5 \
   --seed 42 \
+  --model_name "scbert"
