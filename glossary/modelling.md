@@ -203,11 +203,71 @@ $$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
 
 **_但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息，并且基因调控是一个稀疏的矩阵。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系，并且能够学习到基因调控的稀疏性。_**
 
+因此，我们特别设计了 L0 正则化 和 门控机制 能让模型表达“正/负/无调控”三种生物关系，并保证稀疏性。
+
 对于第 $( l )$ 层，基因编码的隐藏状态是 $\mathbf{H}_{gene}^{(l)}$，表达量编码的隐藏状态是 $\mathbf{H}_{expr}^{(l)}$。我们先计算基因编码的Q,K,V矩阵：
 
 $$\mathbf{Q}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{Q}_{gene}$$
 $$\mathbf{K}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{K}_{gene}$$
 $$\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
+
+一、L0 正则化和门控机制
+1. 什么是L0正则化？
+  L0范数($\|\theta\|_0$)代表一个参数向量（比如神经网络权重）中非零元素的个数，即有多少个参数是“起作用”的。
+  L0正则化就是鼓励参数中有尽可能多的元素是零，直接让网络变稀疏。
+  L0正则化损失函数如下，其中，$L\big(\cdot\big)$是常规的损失函数，$\lambda$ 是正则化系数：
+  $$
+  R(\theta) = \frac{1}{N} \sum_{i=1}^N L\big(f_{\theta}(x_i), y_i\big) + \lambda \|\theta\|_0
+  $$
+
+2. 门控机制
+  对每个参数$\theta_j$引入一个二值“门”$z_j$，只有门“开”时（$z_j=1$）参数才生效，否则为零：
+  $$
+  \theta_j = \hat{\theta}_j z_j, \quad z_j \in \{0,1\}
+  $$
+  将$z_j$视为伯努利分布（Bernoulli）的随机变量，使用参数化的概率$\pi_j$。
+  优化目标变成最小化所有门“开”的概率和，以及相应的损失, $\odot$代表逐元素相乘：
+
+  $$
+  R(\hat{\theta}, \pi) = \mathbb{E}_{q(z|\pi)}\left[\frac{1}{N} \sum_{i} L\big(f_{\hat{\theta} \odot z}(x_i), y_i\big)\right] + \lambda \sum_j \pi_j
+  $$
+
+
+
+3. 核心创新：可微的L0正则化
+
+由于伯努利分布的门不可微，作者使用了连续随机变量$s$，“门”$z$通过硬化的sigmoid变换得到，
+$s$来自某种可微分的分布$q(s|\phi)$，这样整个优化目标对分参数$\phi$可微：
+  $$
+  z = \min(1, \max(0, s))
+  $$
+
+  $$
+  q(z \neq 0|\phi) = 1 - Q(s \leq 0|\phi)
+  $$
+  
+  即门被激活的概率 = 随机变量大于0的概率（$Q$是累计分布函数）。
+  
+  新的损失近似目标，其中$g(\cdot)$是硬sigmoid函数：
+
+$$
+R(\hat{\theta}, \phi) = \mathbb{E}_{q(s|\phi)}\left[\frac{1}{N}\sum_i L\big(f_{\hat{\theta} \odot g(s)}(x_i), y_i\big)\right] + \lambda \sum_j (1 - Q(s_j \leq 0|\phi_j))
+$$
+  
+
+
+
+
+
+我们的设计：
+
+$$
+\mathbf{A}_{gene}^{i, j} = \text{softmax}\left(\frac{\mathbf{Q}_{gene, i} \mathbf{K}_{gene, j}^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
+$$
+
+其中，$\mathbf{Q}_{gene, i}$ 是第 $( i )$ 个基因的查询向量，$\mathbf{K}_{gene, j}$ 是第 $( j )$ 个基因的键向量。
+
+
 
 ```citation
 @article{louizos2017learning,
@@ -218,3 +278,32 @@ $$\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
 }
 ```
 
+$$
+\mathbf{Z}_{gene} = \mathbf{A}_{gene} \mathbf{V}_{gene} \in \mathbb{R}^{n \times d_k}
+$$
+
+## 3. 预训练
+
+多任务训练，包括：
+
+- 基因编码分支的预训练（Gene Embedding）
+- 表达量编码分支的预训练（Expression Embedding）
+- 基因编码分支和表达量编码分支的联合训练（Joint Training）
+
+### 3.1 基因编码分支的预训练
+
+通过对比学习的方法，学习表达的基因和为表达基因的语义表示。假设，同时表达的基因之间应该具有更多的相关性，而和未表达的基因应该具有更少的相关性，则可以表达的基因为正样本，未表达的基因为负样本。
+
+给定一个细胞，有表达的基因ID为 $\mathbf{G} = \{g_1, g_2, ..., g_N\}$，和表达量矩阵 $\mathbf{X} = \{x_1, x_2, ..., x_N\}$，我可以构造正样本和负样本。
+
+- 正样本
+
+随机采样 $k$ 个index $\mathbf{P} = \{p_1, p_2, ..., p_k\}$，然后将这个位置的基因ID替换成”【MASK】“ token。$\mathbf{G}_{+} = \{g_{p_1}, g_{p_2}, ..., g_{p_k}\}$，则 $\mathbf{G}_{+}$ 为正样本。
+
+随机采样 $b \times k$ 个index $\mathbf{G}_{-} = \{g_{n_1}, g_{n_2}, ..., g_{n_{b \times k}}\}$，则 $\mathbf{G}_{-}$ 为负样本。
+
+通过模型之后，我们可以通过"[CLS]" token的输出作为anchor，然后通过余弦相似度计算正样本和负样本的相似度，通过InfoNCE损失函数计算损失。
+
+$$
+\mathcal{L}_{gene} = \text{InfoNCE}(f_{gene}([\mathbf{G}, \mathbf{G}_{-}, \mathbf{G}_{+}])
+$$
