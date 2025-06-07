@@ -1,1 +1,1 @@
-from deepsc.models.scbert.scbert import *
+from deepsc.models.scbert.model import *
