@@ -72,6 +72,47 @@ pip install -e .
    * Collect information of data and metadata
 3.
 
+
+### Configuration Management with Hydra
+
+DeepSC uses [![Hydra](https://hydra.cc/docs/intro/)](https://hydra.cc/docs/intro/)for flexible and hierarchical configuration management. All experiment parameters, model settings, and data paths are managed via YAML config files, enabling easy reproducibility and parameter sweeping.
+
+Key benefits:
+ 1. Centralized experiment configuration (‎`config.yaml` and subfolders in ‎`configs/`)
+ 2. Override any parameter via command line, e.g. ‎`python main.py experiment.lr=0.001`
+ 3. Support for multi-run experiments and grouped configs and log
+
+Example config (config.yaml):
+
+```yaml
+num_gpus: 4
+master_port: 12625
+
+data_path: "/home/angli/baseline/DeepSC/data/3ac/mapped_batch_data/1d84333c-0327-4ad6-be02-94fee81154ff_sparse_preprocessed.pth"
+num_device: 4
+batch_size: 2
+epoch: 10
+model_type: "scbert"
+num_gene: 60664
+num_bin: 5
+seed: 42
+valid_every: 1
+pos_embed: true
+model_name: "scbert"
+mask_prob: 0.15
+replace_prob: 0.9
+ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
+grad_acc: 32
+learning_rate: 1e-4
+hidden_dim: 200
+```
+
+
+Running with custom config:python main.py experiment.model=vae experiment.lr=0.0005 data.path=./data/your_data.h5ad
+
+See ‎`configs/` ↗ for more config examples and documentation
+
+
 ### Environment Configuration
 
 Before running the scripts, make sure to configure your environment variables in a `.env` file located in the project root. Below is an example of what your `.env` file might look like:

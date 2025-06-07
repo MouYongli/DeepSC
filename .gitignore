@@ -187,3 +187,9 @@ data/.DS_Store
 glossary/*bk.md
 
 **/scBERT_old
+
+ckpts/
+configs/scbert_pretrain.yaml
+outputs/
+tests/outputs/
+tests/test_hydra.py
