@@ -9,7 +9,7 @@ from scipy.io import mmread
 
 import argparse
 import re
-from scripts.utils.utils import path_of_file
+from deepsc.utils import path_of_file
 
 
 def get_parse():

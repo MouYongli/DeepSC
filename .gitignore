@@ -185,3 +185,5 @@ data/.DS_Store
 
 .DS_Store
 glossary/*bk.md
+
+**/scBERT_old
