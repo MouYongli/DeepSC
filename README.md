@@ -73,44 +73,87 @@ pip install -e .
 3.
 
 
-### Configuration Management with Hydra
+## Configuration Management with Hydra
 
-DeepSC uses [![Hydra](https://hydra.cc/docs/intro/)](https://hydra.cc/docs/intro/)for flexible and hierarchical configuration management. All experiment parameters, model settings, and data paths are managed via YAML config files, enabling easy reproducibility and parameter sweeping.
+This project uses [Hydra](https://hydra.cc/) to manage configuration files in a hierarchical, modular, and override-friendly way. This allows for clean separation between datasets, model architecture, and training parameters, making experiments easy to reproduce and customize.
 
-Key benefits:
- 1. Centralized experiment configuration (‎`config.yaml` and subfolders in ‎`configs/`)
- 2. Override any parameter via command line, e.g. ‎`python main.py experiment.lr=0.001`
- 3. Support for multi-run experiments and grouped configs and log
+### Configuration Structure
 
-Example config (config.yaml):
+The main configuration directory is:
+<pre><code>
+configs/pretrain/
+├── pretrain.yaml           # Entry point config
+├── model/
+│   └── scbert.yaml         # Model configuration
+└── dataset/
+      └── tripleca.yaml       # Dataset configuration
+</code></pre>
+
+### Running with Config
+
+To run with the default configuration:
+
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain
+
+```
+To override parameters from the command line:
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain
+  epoch=20 model.dim=512 dataset.num_bin=7
+```
+Hydra will automatically merge the overrides and save the full resolved configuration and logs.
+
+### Configuration Breakdown (Examples):
+
+Define the base configuration and default components in [pretrain.yaml](configs/pretrain/pretrain.yaml)
+
+Define model architecture parameters (Example: [scbert.yaml](configs/pretrain/model/scbert.yaml))
+
+Define dataset loading configuration (Example: [tripleca.yaml](configs/pretrain/dataset/tripleca.yaml))
+
+### Instantiating Objects with Hydra
+
+This project uses Hydra's `_target_` mechanism and `hydra.utils.instantiate()` to construct Python objects directly from configuration files. This enables dynamic loading of models, datasets, and other components by simply editing YAML files — no code changes are needed.
+
+
+#### Example: Model Instantiation
+
+In [`configs/pretrain/model/scbert.yaml`](configs/pretrain/model/scbert.yaml):
 
 ```yaml
-num_gpus: 4
-master_port: 12625
-
-data_path: "/home/angli/baseline/DeepSC/data/3ac/mapped_batch_data/1d84333c-0327-4ad6-be02-94fee81154ff_sparse_preprocessed.pth"
-num_device: 4
-batch_size: 2
-epoch: 10
-model_type: "scbert"
-num_gene: 60664
-num_bin: 5
-seed: 42
-valid_every: 1
-pos_embed: true
-model_name: "scbert"
-mask_prob: 0.15
-replace_prob: 0.9
-ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
-grad_acc: 32
-learning_rate: 1e-4
-hidden_dim: 200
+_target_: deepsc.models.scbert.model.PerformerLM
+g2v_position_emb: true
+dim: 200
+num_tokens: 7
+max_seq_len: 60664
+depth: 6
+heads: 10
+local_attn_heads: 0
 ```
 
+This defines how to instantiate the PerformerLM model. The _target_ key points to the full Python path of the class, and the remaining keys are passed as constructor arguments.
 
-Running with custom config:python main.py experiment.model=vae experiment.lr=0.0005 data.path=./data/your_data.h5ad
+In [pretrain.py](src/deepsc/pretrain/pretrain.py), the model is created via:
 
-See ‎`configs/` ↗ for more config examples and documentation
+```python
+model: nn.Module = hydra.utils.instantiate(cfg.model)
+```
+
+###  Output & Logging:
+
+Hydra automatically logs each run to a timestamped directory under outputs/ (or as configured). Each run directory contains:
+
+1. config.yaml: the full merged config
+2. hydra.yaml: Hydra’s internal config
+3. overrides.yaml: CLI overrides
+4. <job_name>_0.log: stdout log file
 
 
 ### Environment Configuration

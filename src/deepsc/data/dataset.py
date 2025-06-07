@@ -17,7 +17,7 @@ class SCDataset(Dataset):
     def __getitem__(self, idx):
         rand_idx = random.randint(0, self.num_samples - 1)
         row = self.coo_tensor[rand_idx].to_dense()
-        row[row > self.num_bin] = self.num_bin  # 需要更改
+        row[row > self.num_bin] = self.num_bin
         row = row.long()
         # TODO: 这里去除了to device, 似乎用fabric的dataloader setup可以自动转移到device上面，还需要确认一下
         # TODO: 和yongli确认，如果在这里激normalization的话比较低效，会造成重复计算
