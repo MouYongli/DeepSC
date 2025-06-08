@@ -27,7 +27,7 @@
 <!-- [![Twitter](https://img.shields.io/twitter/follow/YOUR_TWITTER_HANDLE?style=social)](https://twitter.com/YOUR_TWITTER_HANDLE) -->
 
 This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data" by DBIS and LfB RWTH Aachen University and RWTH Universty Hosptial Aachen
-[Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Stefan Decker
+([Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Stefan Decker)
 
 ## Overview
 
@@ -67,10 +67,10 @@ pip install -e .
 
 ### Download datasets
 1. [Cellxgene Census](https://cellxgene.cziscience.com/datasets)
-2. [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA) 
+2. [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA)
    * Configure the organs in [organ_list.txt](./data/download/3ac/organ_list.txt)
    * Collect information of data and metadata
-3. 
+3.
 
 ## Usage
 

@@ -1,6 +1,6 @@
-# Makefile will include make test make clean make build make run 
+# Makefile will include make test make clean make build make run
 
-# specify desired location for adpy python binary 
+# specify desired location for adpy python binary
 VENV:= /home/$(USER)/anaconda3/envs/deepsc
 PYTHON:= ${VENV}/bin/python
 
@@ -11,5 +11,15 @@ clean:
 	find . | grep -E ".ipynb_checkpoints" | xargs rm -rf
 	find . | grep -E ".egg-info" | xargs rm -rf
 
-activate: 
+activate:
 	conda activate ${VENV}
+
+precommit:
+	$(PYTHON) -m pip install pre-commit && pre-commit install
+
+format:
+	pre-commit run --all-files
+
+sync:
+	git pull
+	git pull origin main
