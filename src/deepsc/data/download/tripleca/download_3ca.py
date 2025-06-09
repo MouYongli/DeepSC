@@ -11,7 +11,7 @@ from dask.diagnostics import ProgressBar
 import argparse
 import multiprocessing
 import time  # 用于延迟重试
-from scripts.utils.utils import setup_logging
+from deepsc.utils import setup_logging
 from .crawl_3ca import data_crawl
 
 

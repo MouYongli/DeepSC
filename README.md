@@ -72,6 +72,90 @@ pip install -e .
    * Collect information of data and metadata
 3.
 
+
+## Configuration Management with Hydra
+
+This project uses [Hydra](https://hydra.cc/) to manage configuration files in a hierarchical, modular, and override-friendly way. This allows for clean separation between datasets, model architecture, and training parameters, making experiments easy to reproduce and customize.
+
+### Configuration Structure
+
+The main configuration directory is:
+<pre><code>
+configs/pretrain/
+├── pretrain.yaml           # Entry point config
+├── model/
+│   └── scbert.yaml         # Model configuration
+└── dataset/
+      └── tripleca.yaml       # Dataset configuration
+</code></pre>
+
+### Running with Config
+
+To run with the default configuration:
+
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain
+
+```
+To override parameters from the command line:
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain
+  epoch=20 model.dim=512 dataset.num_bin=7
+```
+Hydra will automatically merge the overrides and save the full resolved configuration and logs.
+
+### Configuration Breakdown (Examples):
+
+Define the base configuration and default components in [pretrain.yaml](configs/pretrain/pretrain.yaml)
+
+Define model architecture parameters (Example: [scbert.yaml](configs/pretrain/model/scbert.yaml))
+
+Define dataset loading configuration (Example: [tripleca.yaml](configs/pretrain/dataset/tripleca.yaml))
+
+### Instantiating Objects with Hydra
+
+This project uses Hydra's `_target_` mechanism and `hydra.utils.instantiate()` to construct Python objects directly from configuration files. This enables dynamic loading of models, datasets, and other components by simply editing YAML files — no code changes are needed.
+
+
+#### Example: Model Instantiation
+
+In [`configs/pretrain/model/scbert.yaml`](configs/pretrain/model/scbert.yaml):
+
+```yaml
+_target_: deepsc.models.scbert.model.PerformerLM
+g2v_position_emb: true
+dim: 200
+num_tokens: 7
+max_seq_len: 60664
+depth: 6
+heads: 10
+local_attn_heads: 0
+```
+
+This defines how to instantiate the PerformerLM model. The _target_ key points to the full Python path of the class, and the remaining keys are passed as constructor arguments.
+
+In [pretrain.py](src/deepsc/pretrain/pretrain.py), the model is created via:
+
+```python
+model: nn.Module = hydra.utils.instantiate(cfg.model)
+```
+
+###  Output & Logging:
+
+Hydra automatically logs each run to a timestamped directory under outputs/ (or as configured). Each run directory contains:
+
+1. config.yaml: the full merged config
+2. hydra.yaml: Hydra’s internal config
+3. overrides.yaml: CLI overrides
+4. <job_name>_0.log: stdout log file
+
+
 ### Environment Configuration
 
 Before running the scripts, make sure to configure your environment variables in a `.env` file located in the project root. Below is an example of what your `.env` file might look like:

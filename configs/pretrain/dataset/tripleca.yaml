@@ -1,0 +1,3 @@
+_target_: deepsc.data.dataset.SCDataset
+num_bin: ${num_bin}
+coo_tensor: ???

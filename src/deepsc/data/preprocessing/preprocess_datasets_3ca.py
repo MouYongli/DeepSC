@@ -6,8 +6,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from multiprocessing import Pool, cpu_count
-from scripts.preprocessing.preprocess_datasets import process_h5ad_to_sparse_tensor
-from scripts.utils.utils import setup_logging
+from deepsc.data.preprocessing.preprocess_datasets import process_h5ad_to_sparse_tensor
+from deepsc.utils import setup_logging
 
 
 def process_one_sample(row_dict, output_dir):
