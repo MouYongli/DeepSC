@@ -8,6 +8,7 @@ from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 
 from deepsc.data.dataset import data_mask, extract_rows_from_sparse_tensor
 from deepsc.utils import *
@@ -25,16 +26,34 @@ class Trainer:
         self.load_data()
         self.prepare_model()
 
-    # 氛围
+    def load_all_sparse_tensors_from_folder(self, datapath):
+        tensors = []
+        for file in os.listdir(datapath):
+            if file.endswith(".pth"):
+                path = os.path.join(datapath, file)
+                logging.info(f"Loading sparse tensor from {path}")
+                tensor = torch.load(path)
+                if not tensor.is_coalesced():
+                    tensor = tensor.coalesce()
+                tensors.append(tensor)
+        logging.info(f"Loaded {len(tensors)} sparse tensors from {datapath}")
+        return torch.cat(tensors, dim=0)
+
     def load_data(self):
-        coo_tensor = torch.load(self.args.data_path)
-        # TODO: 需支持文件夹为路径传入
-        # TODO: 大数据量zai ru
+        if os.path.isdir(self.args.data_path):
+            coo_tensor = self.load_all_sparse_tensors_from_folder(self.args.data_path)
+        else:
+            coo_tensor = torch.load(self.args.data_path)
+
+        row_indices = np.arange(coo_tensor.shape[0])
+        # TODO: 大数据量载入的问题
         row_indices = np.arange(coo_tensor.shape[0])
         train_idx, val_idx = train_test_split(
             row_indices, test_size=0.05, random_state=self.args.seed
         )
+        # extract rows from sparse tensor
 
+        coo_tensor = coo_tensor.coalesce()
         data_train = extract_rows_from_sparse_tensor(coo_tensor, train_idx)
         data_val = extract_rows_from_sparse_tensor(coo_tensor, val_idx)
         # instantiate dataset
@@ -44,14 +63,13 @@ class Trainer:
         self.val_dataset: Dataset = hydra.utils.instantiate(
             self.args.dataset, coo_tensor=data_val
         )
-
+        # setup dataloader
         self.train_sampler = DistributedSampler(self.train_dataset)
         self.val_sampler = SequentialDistributedSampler(
             self.val_dataset,
             batch_size=self.args.batch_size,
             world_size=self.world_size,
         )
-
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
@@ -60,7 +78,6 @@ class Trainer:
         val_loader = DataLoader(
             self.val_dataset, batch_size=self.args.batch_size, sampler=self.val_sampler
         )
-
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
             train_loader, val_loader
         )
@@ -88,7 +105,12 @@ class Trainer:
         self.model.eval()
         running_loss, predictions, truths = 0.0, [], []
         with torch.no_grad():
-            for index, data in enumerate(self.val_loader):
+            data_iter = self.val_loader
+            if self.is_master:
+                data_iter = tqdm(
+                    self.val_loader, desc=f"Epoch {epoch} [val]", ncols=100
+                )
+            for index, data in enumerate(data_iter):
                 data, labels = data_mask(data)
                 logits = self.model(data)
                 loss = self.loss_fn(logits.transpose(1, 2), labels)
@@ -96,6 +118,8 @@ class Trainer:
                 final = self.softmax(logits)[..., 1:-1].argmax(dim=-1) + 1
                 predictions.append(final)
                 truths.append(labels)
+                if self.is_master:
+                    data_iter.set_postfix(loss=running_loss / (index + 1))
             predictions = distributed_concat(
                 torch.cat(predictions, dim=0),
                 len(self.val_sampler.dataset),
@@ -124,11 +148,13 @@ class Trainer:
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             running_loss, cum_acc = 0.0, 0.0
-            for index, data in enumerate(self.train_loader, start=1):
-                index += 1
-                logging.info(
-                    f"Accumulated gradient on rank:{self.fabric.global_rank} and in step {index}"
+            data_iter = self.train_loader
+            if self.is_master:
+                data_iter = tqdm(
+                    self.train_loader, desc=f"Epoch {epoch} [train]", ncols=100
                 )
+            for index, data in enumerate(data_iter, start=1):
+                index += 1
                 data, labels = data_mask(data)
                 if index % self.args.grad_acc != 0:
                     with self.fabric.no_backward_sync(self.model):
@@ -155,6 +181,10 @@ class Trainer:
                     (labels != self.args.num_bin + 1) * (final == labels)
                 ).sum(dim=-1)
                 cum_acc += torch.true_divide(correct_num, pred_num).mean().item()
+                if self.is_master:
+                    data_iter.set_postfix(
+                        loss=running_loss / index, acc=100 * cum_acc / index
+                    )
             epoch_loss = get_reduced_with_fabric(running_loss / index, self.fabric)
             epoch_acc = get_reduced_with_fabric(100 * cum_acc / index, self.fabric)
             if self.is_master:

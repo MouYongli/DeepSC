@@ -2,7 +2,7 @@ _target_: deepsc.models.scbert.model.PerformerLM
 g2v_position_emb: true
 dim: 200
 num_tokens: 7
-max_seq_len: 60664
+max_seq_len: 34684
 depth: 6
 heads: 10
 local_attn_heads: 0

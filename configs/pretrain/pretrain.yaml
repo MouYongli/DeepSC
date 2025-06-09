@@ -3,7 +3,7 @@ defaults:
   - model: scbert
   - dataset: tripleca
 
-data_path: "/home/angli/baseline/DeepSC/data/3ca/mapped_batch_data/1d84333c-0327-4ad6-be02-94fee81154ff_sparse_preprocessed.pth"
+data_path: "/home/angli/baseline/DeepSC/data/3ca/merged_batch_data_normalized/batch_0.pth"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
 num_device: 4
@@ -11,7 +11,7 @@ valid_every: 1
 model_name: "scbert"
 grad_acc: 32
 learning_rate: 1e-4
-epoch: 10
+epoch: 6
 batch_size: 2
 num_bin: 5
 

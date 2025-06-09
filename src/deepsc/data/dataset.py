@@ -1,5 +1,4 @@
 import math
-import random
 from functools import reduce
 
 import numpy as np
@@ -15,8 +14,9 @@ class SCDataset(Dataset):
         self.num_bin = num_bin
 
     def __getitem__(self, idx):
-        rand_idx = random.randint(0, self.num_samples - 1)
-        row = self.coo_tensor[rand_idx].to_dense()
+        # TODO:  check with yongli and jin er 这里需要确认一下，是否需要随机采样
+        # rand_idx = random.randint(0, self.num_samples - 1)
+        row = self.coo_tensor[idx].to_dense()
         row[row > self.num_bin] = self.num_bin
         row = row.long()
         # TODO: 这里去除了to device, 似乎用fabric的dataloader setup可以自动转移到device上面，还需要确认一下
@@ -70,25 +70,47 @@ def preprocess_sparse_tensor(pth_data_path, save_path=None):
 
 
 # 用于区分训练集和测试集，
-def extract_rows_from_sparse_tensor(tensor, row_ids):
+# TODO：这里耗时部较长，搞清楚如何优化
+def extract_rows_from_sparse_tensor_slow(tensor, row_ids):
     tensor = tensor.coalesce()
     idx = tensor.indices()
     val = tensor.values()
-
     # 找出属于目标 row 的位置
     mask = torch.isin(idx[0], torch.tensor(row_ids, device=idx.device))
     new_indices = idx[:, mask]
     new_values = val[mask]
-
     row_id_map = {orig: i for i, orig in enumerate(row_ids)}
     remapped_rows = torch.tensor(
         [row_id_map[int(r)] for r in new_indices[0].tolist()], device=idx.device
     )
     new_indices[0] = remapped_rows
-
     return torch.sparse_coo_tensor(
         new_indices, new_values, size=(len(row_ids), tensor.shape[1])
     )
+
+
+def extract_rows_from_sparse_tensor(tensor, row_ids):
+    """
+    更快的提取稀疏张量指定行的方法，利用scipy csr切片。
+    tensor: torch.sparse_coo_tensor
+    row_ids: list or np.ndarray of row indices
+    返回: torch.sparse_coo_tensor，shape=(len(row_ids), n_cols)
+    """
+    tensor = tensor.coalesce()
+    values = tensor.values().cpu().numpy()
+    indices = tensor.indices().cpu().numpy()
+    shape = tensor.shape
+    # 构建scipy csr
+    csr = sparse.coo_matrix((values, (indices[0], indices[1])), shape=shape).tocsr()
+    # 切片
+    sub_csr = csr[row_ids]
+    sub_coo = sub_csr.tocoo()
+    torch_sparse = torch.sparse_coo_tensor(
+        indices=np.vstack((sub_coo.row, sub_coo.col)),
+        values=sub_coo.data,
+        size=(len(row_ids), shape[1]),
+    ).coalesce()
+    return torch_sparse
 
 
 def data_mask(
