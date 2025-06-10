@@ -3,17 +3,20 @@ defaults:
   - model: scbert
   - dataset: tripleca
 
-data_path: "/home/angli/baseline/DeepSC/data/3ca/merged_batch_data_normalized/batch_0.pth"
+wandb_project: "DeepSC"
+
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_normalized"
 seed: 42
-ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
+ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 4
 valid_every: 1
 model_name: "scbert"
-grad_acc: 32
+grad_acc: 80
 learning_rate: 1e-4
 epoch: 6
-batch_size: 2
+batch_size: 7
 num_bin: 5
+save_ckpt_every: 100
 
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/

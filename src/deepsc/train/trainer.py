@@ -1,4 +1,5 @@
 import logging
+import os
 
 import hydra
 import numpy as np
@@ -10,8 +11,22 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+import time
+import wandb
 from deepsc.data.dataset import data_mask, extract_rows_from_sparse_tensor
 from deepsc.utils import *
+
+
+# timeit decorator
+def timeit(func):
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        print(f"Time taken: {end_time - start_time} seconds")
+        return result
+
+    return wrapper
 
 
 class Trainer:
@@ -31,14 +46,22 @@ class Trainer:
         for file in os.listdir(datapath):
             if file.endswith(".pth"):
                 path = os.path.join(datapath, file)
-                logging.info(f"Loading sparse tensor from {path}")
+                if self.is_master:
+                    wandb.alert(
+                        title="Data Loading", text=f"Loading sparse tensor from {path}"
+                    )
                 tensor = torch.load(path)
                 if not tensor.is_coalesced():
                     tensor = tensor.coalesce()
                 tensors.append(tensor)
-        logging.info(f"Loaded {len(tensors)} sparse tensors from {datapath}")
+        if self.is_master:
+            wandb.alert(
+                title="Data Loading",
+                text=f"Loaded {len(tensors)} sparse tensors from {datapath}",
+            )
         return torch.cat(tensors, dim=0)
 
+    @timeit
     def load_data(self):
         if os.path.isdir(self.args.data_path):
             coo_tensor = self.load_all_sparse_tensors_from_folder(self.args.data_path)
@@ -74,9 +97,13 @@ class Trainer:
             self.train_dataset,
             batch_size=self.args.batch_size,
             sampler=self.train_sampler,
+            num_workers=32,
         )
         val_loader = DataLoader(
-            self.val_dataset, batch_size=self.args.batch_size, sampler=self.val_sampler
+            self.val_dataset,
+            batch_size=self.args.batch_size,
+            sampler=self.val_sampler,
+            num_workers=8,
         )
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
             train_loader, val_loader
@@ -138,13 +165,40 @@ class Trainer:
                 running_loss / len(self.val_loader), self.fabric
             )
             val_acc = 100 * correct_num / val_num
-            logging.info(
-                f"Validation Epoch {epoch} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%"
-            )
+            if self.is_master:
+                wandb.log({"val/loss": val_loss, "val/acc": val_acc, "epoch": epoch})
+                wandb.alert(
+                    title="Validation",
+                    text=f"Validation Epoch {epoch} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%",
+                )
+
+    def checkpoint_reload(self):
+        print("loading checkpoint")
+        ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.pth")
+        self.last_epoch = 1
+        if os.path.exists(ckpt_file):
+            checkpoint = torch.load(ckpt_file, map_location="cpu")
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            if "epoch" in checkpoint:
+                self.last_epoch = checkpoint["epoch"]
+            if "optimizer_state_dict" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            if "scheduler_state_dict" in checkpoint:
+                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            if self.is_master:
+                print(
+                    f"Reloaded model, optimizer, and scheduler from {ckpt_file}, last_epoch={self.last_epoch}"
+                )
+        else:
+            if self.is_master:
+                print(f"No checkpoint found at {ckpt_file}, skipping reload.")
 
     def train(self):
         # 尽量不要在for循环内to device
-        for epoch in range(1, self.args.epoch + 1):
+        self.checkpoint_reload()  # 只在训练开始时reload一次
+        start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
+        self.model = torch.compile(self.model)
+        for epoch in range(start_epoch, self.args.epoch + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             running_loss, cum_acc = 0.0, 0.0
@@ -154,10 +208,12 @@ class Trainer:
                     self.train_loader, desc=f"Epoch {epoch} [train]", ncols=100
                 )
             for index, data in enumerate(data_iter, start=1):
-                index += 1
                 data, labels = data_mask(data)
-                if index % self.args.grad_acc != 0:
-                    with self.fabric.no_backward_sync(self.model):
+                is_accumulated = index % self.args.grad_acc != 0
+                if is_accumulated:
+                    with self.fabric.no_backward_sync(
+                        self.model, enabled=is_accumulated
+                    ):
                         logits = self.model(data)
                         loss = (
                             self.loss_fn(logits.transpose(1, 2), labels)
@@ -165,6 +221,11 @@ class Trainer:
                         )
                         self.fabric.backward(loss)
                 else:
+                    if self.is_master:
+                        logging.info(
+                            f"[Epoch {epoch}] Iter {index} | Loss: "
+                            f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
+                        )
                     logits = self.model(data)
                     loss = (
                         self.loss_fn(logits.transpose(1, 2), labels)
@@ -185,22 +246,39 @@ class Trainer:
                     data_iter.set_postfix(
                         loss=running_loss / index, acc=100 * cum_acc / index
                     )
+                # 每100步保存一次
+                if self.is_master and index % self.args.save_ckpt_every == 0:
+                    save_ckpt(
+                        epoch,
+                        self.model,
+                        self.optimizer,
+                        self.scheduler,
+                        running_loss / index,
+                        self.args.model_name,
+                        self.args.ckpt_dir,
+                        iteration=index,
+                    )
             epoch_loss = get_reduced_with_fabric(running_loss / index, self.fabric)
             epoch_acc = get_reduced_with_fabric(100 * cum_acc / index, self.fabric)
             if self.is_master:
-                logging.info(
-                    f"Epoch {epoch} | Loss: {epoch_loss:.6f} | Acc: {epoch_acc:.4f}%"
+                wandb.log(
+                    {"train/loss": epoch_loss, "train/acc": epoch_acc, "epoch": epoch}
+                )
+                wandb.alert(
+                    title="Training",
+                    text=f"Epoch {epoch} | Loss: {epoch_loss:.6f} | Acc: {epoch_acc:.4f}%",
                 )
             self.scheduler.step()
             if epoch % self.args.valid_every == 0:
                 self.validate(epoch)
-            if self.is_master:
+            if self.is_master and index % 100 == 0:
                 save_ckpt(
                     epoch,
                     self.model,
                     self.optimizer,
                     self.scheduler,
-                    epoch_loss,
+                    running_loss / index,
                     self.args.model_name,
                     self.args.ckpt_dir,
+                    iteration=index,
                 )

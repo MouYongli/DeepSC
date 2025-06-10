@@ -156,6 +156,22 @@ Hydra automatically logs each run to a timestamped directory under outputs/ (or 
 4. <job_name>_0.log: stdout log file
 
 
+## Setup Instructions for Weights & Biases (wandb)
+
+### 1. Get your wandb API token
+
+Visit [https://wandb.ai/authorize](https://wandb.ai/authorize) and log into your wandb account. Your API key (token) will be displayed on the page.
+
+### 2. Set your token (Recommended: via CLI)
+
+Run the following command in your terminal, replacing `<YOUR_TOKEN>` with your actual token:
+
+```bash
+wandb login <YOUR_TOKEN>
+````
+
+This command will automatically store your token in the ~/.netrc file. All subsequent wandb scripts will be able to read it without requiring manual setup each time.
+
 ### Environment Configuration
 
 Before running the scripts, make sure to configure your environment variables in a `.env` file located in the project root. Below is an example of what your `.env` file might look like:

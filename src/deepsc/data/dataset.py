@@ -35,7 +35,7 @@ def normalize_tensor(csr):
     csr = csr[valid_cells]
     row_sums = np.array(csr.sum(axis=1)).flatten()
     row_scales = np.divide(
-        1e4, row_sums, out=np.zeros_like(row_sums, dtype=np.float64), where=row_sums > 0
+        1e4, row_sums, out=np.zeros_like(row_sums, dtype=np.float32), where=row_sums > 0
     )
     csr = csr.multiply(row_scales[:, None])
     csr.data = np.log2(1 + csr.data)
