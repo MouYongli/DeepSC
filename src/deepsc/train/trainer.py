@@ -173,31 +173,29 @@ class Trainer:
                 )
 
     def checkpoint_reload(self):
-        print("loading checkpoint")
-        ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.pth")
+        ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.ckpt")
         self.last_epoch = 1
+        self.iteration = 1
         if os.path.exists(ckpt_file):
-            checkpoint = torch.load(ckpt_file, map_location="cpu")
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-            if "epoch" in checkpoint:
-                self.last_epoch = checkpoint["epoch"]
-            if "optimizer_state_dict" in checkpoint:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            if "scheduler_state_dict" in checkpoint:
-                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            state = {
+                "model": self.model,
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+                "iteration": self.iteration,
+                "epoch": self.last_epoch,
+            }
+            self.fabric.load(ckpt_file, state)
             if self.is_master:
                 print(
                     f"Reloaded model, optimizer, and scheduler from {ckpt_file}, last_epoch={self.last_epoch}"
                 )
-        else:
-            if self.is_master:
-                print(f"No checkpoint found at {ckpt_file}, skipping reload.")
 
     def train(self):
         # 尽量不要在for循环内to device
         self.checkpoint_reload()  # 只在训练开始时reload一次
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
-        self.model = torch.compile(self.model)
+        if self.args.model_name == "DeepSC":
+            self.model = torch.compile(self.model)
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
@@ -246,9 +244,8 @@ class Trainer:
                     data_iter.set_postfix(
                         loss=running_loss / index, acc=100 * cum_acc / index
                     )
-                # 每100步保存一次
-                if self.is_master and index % self.args.save_ckpt_every == 0:
-                    save_ckpt(
+                if index % self.args.save_ckpt_every == 0:
+                    save_ckpt_fabric(
                         epoch,
                         self.model,
                         self.optimizer,
@@ -256,6 +253,7 @@ class Trainer:
                         running_loss / index,
                         self.args.model_name,
                         self.args.ckpt_dir,
+                        self.fabric,
                         iteration=index,
                     )
             epoch_loss = get_reduced_with_fabric(running_loss / index, self.fabric)
@@ -271,14 +269,14 @@ class Trainer:
             self.scheduler.step()
             if epoch % self.args.valid_every == 0:
                 self.validate(epoch)
-            if self.is_master and index % 100 == 0:
-                save_ckpt(
-                    epoch,
-                    self.model,
-                    self.optimizer,
-                    self.scheduler,
-                    running_loss / index,
-                    self.args.model_name,
-                    self.args.ckpt_dir,
-                    iteration=index,
-                )
+            save_ckpt_fabric(
+                epoch,
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                running_loss / index,
+                self.args.model_name,
+                self.args.ckpt_dir,
+                self.fabric,
+                iteration=index,
+            )

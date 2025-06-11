@@ -162,34 +162,33 @@ def save_ckpt(
     torch.save(ckpt, os.path.join(ckpt_folder, filename))
 
 
-def save_simple_ckpt(model, model_name, ckpt_folder):
-    """
-    save checkpoint
-    """
+def save_ckpt_fabric(
+    epoch,
+    model,
+    optimizer,
+    scheduler,
+    losses,
+    model_name,
+    ckpt_folder,
+    fabric,
+    iteration=None,
+):
     if not os.path.exists(ckpt_folder):
         os.makedirs(ckpt_folder)
-    torch.save(
-        {"model_state_dict": model.module.state_dict()},
-        f"{ckpt_folder}{model_name}.pth",
-    )
-
-
-def save_best_ckpt(epoch, model, optimizer, scheduler, losses, model_name, ckpt_folder):
-    """
-    save checkpoint
-    """
-    if not os.path.exists(ckpt_folder):
-        os.makedirs(ckpt_folder)
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state_dict": model.module.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "losses": losses,
-        },
-        f"{ckpt_folder}{model_name}_best.pth",
-    )
+    state = {
+        "model": model,
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "iteration": iteration,
+        "epoch": epoch,
+    }
+    print(f"Saving checkpoint to {os.path.join(ckpt_folder, 'latest_checkpoint.ckpt')}")
+    fabric.save(os.path.join(ckpt_folder, "latest_checkpoint.ckpt"), state)
+    if iteration is not None:
+        filename = f"{model_name}_{epoch}_{iteration}.ckpt"
+    else:
+        filename = f"{model_name}_{epoch}.ckpt"
+    fabric.save(os.path.join(ckpt_folder, filename), state)
 
 
 def get_reduced(tensor, current_device, dest_device, world_size):

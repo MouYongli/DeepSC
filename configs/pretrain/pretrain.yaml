@@ -5,18 +5,18 @@ defaults:
 
 wandb_project: "DeepSC"
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_normalized"
+data_path: "/home/angli/baseline/DeepSC/data/3ca/mapped_batch_data/1d84333c-0327-4ad6-be02-94fee81154ff_sparse_preprocessed.pth"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 4
+num_device: 2
 valid_every: 1
 model_name: "scbert"
 grad_acc: 80
 learning_rate: 1e-4
 epoch: 6
-batch_size: 7
+batch_size: 5
 num_bin: 5
-save_ckpt_every: 100
+save_ckpt_every: 4000
 
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
