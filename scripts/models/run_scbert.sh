@@ -1,10 +1,11 @@
 #!/usr/bin/zsh
 
-# 启动参数配置
-NUM_GPUS=4 #是否必须喝num_device相同
-MASTER_PORT=12625  # 通信端口，这个必须要有，要不然会在默认端口上交换数据，容易导致冲突
+# 使用物理编号为 2 和 3 的 GPU
+export CUDA_VISIBLE_DEVICES=2,3
+export OMP_NUM_THREADS=32
 
-export OMP_NUM_THREADS=4
+NUM_GPUS=2  # ✅ 实际你要用的 GPU 数量
+MASTER_PORT=12625
 
 PYTHONPATH=src torchrun \
   --nproc_per_node=$NUM_GPUS \
