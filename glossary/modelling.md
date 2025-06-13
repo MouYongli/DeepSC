@@ -98,13 +98,61 @@ $$
 
 我们通过Gumbel-Softmax技巧，通过$\mathbf{M} \in \{-1,0,+1\}^{n \times n}$门控机制，让模型能够表达“正/负/无调控”三种生物关系，并保证稀疏性。
 
+原始的注意力权重矩阵计算如下：
+
 $$
 \mathbf{A}_{gene}^{i, j} = \text{softmax}\left(\frac{\mathbf{Q}_{gene, i} \mathbf{K}_{gene, j}^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
 $$
 
 其中，$\mathbf{Q}_{gene, i}$ 是第 $( i )$ 个基因的查询向量，$\mathbf{K}_{gene, j}$ 是第 $( j )$ 个基因的键向量。
 
+对我们将注意力权重矩阵与稀疏性门控矩阵进行逐元素相乘，可以得到一个稀疏化之后的注意权重矩阵$\mathbf{A}_{sparse} $，从而实现对调控关系的约束。
 
+$$
+\mathbf{A}_{sparse} = \mathbf{A}_{gene} \odot \mathbf{M}
+$$
+
+然而，由于 $\mathbf{A}_{\text{gene}}$ 是经过 softmax 归一化的，其值域较小，在门控稀疏化后可能进一步压缩有效信号，在某些情况下会使得其值域更小，影响后续信息传递。
+
+### 归一化版本1
+
+为了应对该问题，我们对得到的稀疏注意力权重矩阵进一步进行Min-Max归一化，将其映射至区间 $[-1, 1]$，以增强正负调控信号的区分度。此外，无调控的信号保持为0
+$$
+\mathbf{A}_{\text{norm}}^{i,j} = \frac{\mathbf{A}_{sparse}^{i,j} - \min_i(\mathbf{A}_{sparse}^{i,j})}{\max_i(\mathbf{A}_{sparse}^{i,j}) - \min_i(\mathbf{A}_{sparse}^{i,j}) + \epsilon} -1
+$$
+
+其中：
+
+- $\mathbf{A}_{sparse}$ 是稀疏化之后的注意力权重矩阵；
+- $\min_i(\mathbf{A}^{i,j})$ 表示对第 $i$ 行取最小值；
+- $\max_i(\mathbf{A}^{i,j})$ 表示对第 $i$ 行取最大值；
+- $\epsilon$ 是一个很小的常数，用于防止0为除数。
+
+### 归一化版本2
+
+为了应对该问题，我们将稀疏注意力权重矩阵中的正调控与负调控信号分别处理。具体地：
+
+1. **提取正值部分**，对每一行中大于 0 的元素执行 Softmax 操作；
+2. **提取负值部分**，对每一行中小于 0 的元素取其绝对值，再执行 Softmax 操作，最后恢复负号；
+3. **无调控信号** 保持为 0。
+
+最终的归一化注意力权重矩阵定义如下：
+
+$$
+\mathbf{A}_{\text{norm}}^{i,j} =
+\begin{cases}
+\frac{\exp(\mathbf{A}_{sparse}^{i,j})}{\sum\limits_{k: \mathbf{A}_{sparse}^{i,k} > 0} \exp(\mathbf{A}_{sparse}^{i,k})}, & \text{if } \mathbf{A}_{sparse}^{i,j} > 0 \\\\
+-\frac{\exp(-\mathbf{A}_{sparse}^{i,j})}{\sum\limits_{k: \mathbf{A}_{sparse}^{i,k} < 0} \exp(-\mathbf{A}_{sparse}^{i,k})}, & \text{if } \mathbf{A}_{sparse}^{i,j} < 0 \\\\
+0, & \text{if } \mathbf{A}_{sparse}^{i,j} = 0
+\end{cases}
+$$
+
+其中：
+
+- $\mathbf{A}_{sparse}$ 表示稀疏化之后的注意力权重矩阵；
+- $\exp(\cdot)$ 是指数函数；
+- Softmax 操作分别作用于每一行的正值与负值；
+- 归一化后正调控值仍为正，负调控值仍为负，无调控值为 0。
 
 
 
