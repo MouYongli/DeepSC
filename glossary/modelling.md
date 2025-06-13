@@ -61,11 +61,157 @@ $$\mathbf{e}^{expr}_{j} = \mathbf{W}_{bin} \cdot \text{OneHot}_{N}(b_{j}) + \alp
 - $\alpha$ 是平衡离散和连续特征的权重参数
 - $N$ 是离散化的bin数量
 
-## 2.2 双分支Transformer架构
 
-### 2.2.1 传统的Transformer架构
+### 2.2 双分支Transformer架构
 
-#### 2.2.1.1 传统的Transformer Block
+我们将采样Multi-Head Latent-Attention (MHLA)的机制，来实现基因编码分支和表达量编码分支的注意力机制。
+
+#### 2.2.1 初始化基因和表达的编码
+
+结合生物学背景，我们考虑基因编码信息和表达量编码信息的双分支的注意力机制，并引入生物学约束的注意力权重。其中，基因编码分支的注意力机制只考虑基因编码信息，表达量编码分支的注意力机制表达量编码信息以外还考虑基因调控信息（从基因编码分支的注意力机制中提取）。
+
+首先，我们初始化基因编码分支和表达量编码分支的隐藏状态：
+
+$$\mathbf{H}_{gene}^{(0)} = \mathbf{E}_{gene}$$ 
+
+$$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
+
+然后，新基因编码分支和表达量编码分支的隐藏状态，多头注意力机制的计算过程如下：
+
+#### 2.2.2 基因编码分支注意力机制
+
+对于第 $( l )$ 层，基因编码的隐藏状态是 $\mathbf{H}_{gene}^{(l)}$，表达量编码的隐藏状态是 $\mathbf{H}_{expr}^{(l)}$。我们先计算基因编码的Q,K,V矩阵：
+
+$$\mathbf{Q}_{gene}^{(l)} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{Q}_{gene}$$
+$$\mathbf{K}_{gene}^{(l)} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{K}_{gene}$$
+$$\mathbf{V}_{gene}^{(l)} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
+
+$$
+\mathbf{H}_{gene}^{(l+1)} = \mathbf{\hat{A}}_{gene}^{(l)} \mathbf{V}_{gene}^{(l)} \in \mathbb{R}^{n \times d_k}
+$$
+
+在模型训练时，Attention 矩阵 $\mathbf{A}$ 学习token之间的注意力权重，可以看作隐式学习到的基因调控关系的近似。
+
+**_但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息，并且基因调控是一个稀疏的矩阵。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系，并且能够学习到基因调控的稀疏性。_**
+
+因此，我们特别设计了 L0 正则化 和 门控机制 能让模型表达“正/负/无调控”三种生物关系，并保证稀疏性。
+
+$$
+\mathbf{A}_{gene}^{i, j} = \text{softmax}\left(\frac{\mathbf{Q}_{gene, i} \mathbf{K}_{gene, j}^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
+$$
+
+其中，$\mathbf{Q}_{gene, i}$ 是第 $( i )$ 个基因的查询向量，$\mathbf{K}_{gene, j}$ 是第 $( j )$ 个基因的键向量。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 3. 预训练
+
+多任务训练，包括：
+
+- 基因编码分支的预训练（Gene Embedding）
+- 表达量编码分支的预训练（Expression Embedding）
+- 基因编码分支和表达量编码分支的联合训练（Joint Training）
+
+### 3.1 基因编码分支的预训练
+
+通过对比学习的方法，学习表达的基因和为表达基因的语义表示。假设，同时表达的基因之间应该具有更多的相关性，而和未表达的基因应该具有更少的相关性，则可以表达的基因为正样本，未表达的基因为负样本。
+
+给定一个细胞，有表达的基因ID为 $\mathbf{G} = \{g_1, g_2, ..., g_N\}$，和表达量矩阵 $\mathbf{X} = \{x_1, x_2, ..., x_N\}$，我可以构造正样本和负样本。
+
+- 正样本
+
+随机采样 $k$ 个index $\mathbf{P} = \{p_1, p_2, ..., p_k\}$，然后将这个位置的基因ID替换成”【MASK】“ token。$\mathbf{G}_{+} = \{g_{p_1}, g_{p_2}, ..., g_{p_k}\}$，则 $\mathbf{G}_{+}$ 为正样本。
+
+随机采样 $b \times k$ 个index $\mathbf{G}_{-} = \{g_{n_1}, g_{n_2}, ..., g_{n_{b \times k}}\}$，则 $\mathbf{G}_{-}$ 为负样本。
+
+通过模型之后，我们可以通过"[CLS]" token的输出作为anchor，然后通过余弦相似度计算正样本和负样本的相似度，通过InfoNCE损失函数计算损失。
+
+$$
+\mathcal{L}_{gene} = \text{InfoNCE}(f_{gene}([\mathbf{G}, \mathbf{G}_{-}, \mathbf{G}_{+}])
+$$
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Appendix
+
+### A.1 传统的Transformer
+
+#### A.1.1 传统的Transformer Block
 
 传统的，标准的Transformer Block包括：
 
@@ -126,7 +272,7 @@ $( d_{ff} )$ 通常比 $( d )$ 大，比如4倍。
 
 
 
-#### 2.2.1.2 多头自注意力机制 Multi-Head Self-Attention (MHSA)
+#### A.1.2 多头自注意力机制 Multi-Head Self-Attention (MHSA)
 
 多头自注意力机制 Multi-Head Self-Attention (MHSA)的核心思想是将输入映射为多组查询（Query）、键（Key）、值（Value），分别计算注意力，然后拼接输出。
 
@@ -181,38 +327,11 @@ $$
 \text{MHSA}(\mathbf{X}) = \mathbf{Z} \mathbf{W}^O, \quad \mathbf{W}^O \in \mathbb{R}^{d \times d}
 $$
 
-### 2.3 双分支Transformer架构
 
-我们将采样Multi-Head Latent-Attention (MHLA)的机制，来实现基因编码分支和表达量编码分支的注意力机制。但是，为了简化建模描述，我们只讨论其中的Attention机制。
+### A.2 L0 正则化和门控机制
 
-#### 2.3.1 初始化基因和表达的编码
+#### A.2.1 什么是L0正则化？
 
-结合生物学背景，我们考虑基因编码信息和表达量编码信息的双分支的注意力机制，并引入生物学约束的注意力权重。其中，基因编码分支的注意力机制只考虑基因编码信息，表达量编码分支的注意力机制表达量编码信息以外还考虑基因调控信息（从基因编码分支的注意力机制中提取）。
-
-首先，我们初始化基因编码分支和表达量编码分支的隐藏状态：
-
-$$\mathbf{H}_{gene}^{(0)} = \mathbf{E}_{gene}$$ 
-
-$$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
-
-然后，新基因编码分支和表达量编码分支的隐藏状态，多头注意力机制的计算过程如下：
-
-#### 2.2.2 基因编码分支
-
-在模型训练时，Attention 矩阵 $\mathbf{A}$ 学习token之间的注意力权重，可以看作隐式学习到的基因调控关系的近似。
-
-**_但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息，并且基因调控是一个稀疏的矩阵。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系，并且能够学习到基因调控的稀疏性。_**
-
-因此，我们特别设计了 L0 正则化 和 门控机制 能让模型表达“正/负/无调控”三种生物关系，并保证稀疏性。
-
-对于第 $( l )$ 层，基因编码的隐藏状态是 $\mathbf{H}_{gene}^{(l)}$，表达量编码的隐藏状态是 $\mathbf{H}_{expr}^{(l)}$。我们先计算基因编码的Q,K,V矩阵：
-
-$$\mathbf{Q}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{Q}_{gene}$$
-$$\mathbf{K}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{K}_{gene}$$
-$$\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
-
-一、L0 正则化和门控机制
-1. 什么是L0正则化？
   L0范数($\|\theta\|_0$)代表一个参数向量（比如神经网络权重）中非零元素的个数，即有多少个参数是“起作用”的。
   L0正则化就是鼓励参数中有尽可能多的元素是零，直接让网络变稀疏。
   L0正则化损失函数如下，其中，$L\big(\cdot\big)$是常规的损失函数，$\lambda$ 是正则化系数：
@@ -220,7 +339,8 @@ $$\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
   R(\theta) = \frac{1}{N} \sum_{i=1}^N L\big(f_{\theta}(x_i), y_i\big) + \lambda \|\theta\|_0
   $$
 
-2. 门控机制
+#### A.2.2 门控机制
+
   对每个参数$\theta_j$引入一个二值“门”$z_j$，只有门“开”时（$z_j=1$）参数才生效，否则为零：
   $$
   \theta_j = \hat{\theta}_j z_j, \quad z_j \in \{0,1\}
@@ -232,12 +352,9 @@ $$\mathbf{V}_{gene} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
   R(\hat{\theta}, \pi) = \mathbb{E}_{q(z|\pi)}\left[\frac{1}{N} \sum_{i} L\big(f_{\hat{\theta} \odot z}(x_i), y_i\big)\right] + \lambda \sum_j \pi_j
   $$
 
+#### A.2.3 可微的L0正则化
 
-
-3. 核心创新：可微的L0正则化
-
-由于伯努利分布的门不可微，作者使用了连续随机变量$s$，“门”$z$通过硬化的sigmoid变换得到，
-$s$来自某种可微分的分布$q(s|\phi)$，这样整个优化目标对分参数$\phi$可微：
+由于伯努利分布的门不可微，作者使用了连续随机变量$s$，“门”$z$通过硬化的sigmoid变换得到，$s$来自某种可微分的分布$q(s|\phi)$，这样整个优化目标对分参数$\phi$可微：
   $$
   z = \min(1, \max(0, s))
   $$
@@ -254,21 +371,6 @@ $$
 R(\hat{\theta}, \phi) = \mathbb{E}_{q(s|\phi)}\left[\frac{1}{N}\sum_i L\big(f_{\hat{\theta} \odot g(s)}(x_i), y_i\big)\right] + \lambda \sum_j (1 - Q(s_j \leq 0|\phi_j))
 $$
   
-
-
-
-
-
-我们的设计：
-
-$$
-\mathbf{A}_{gene}^{i, j} = \text{softmax}\left(\frac{\mathbf{Q}_{gene, i} \mathbf{K}_{gene, j}^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
-$$
-
-其中，$\mathbf{Q}_{gene, i}$ 是第 $( i )$ 个基因的查询向量，$\mathbf{K}_{gene, j}$ 是第 $( j )$ 个基因的键向量。
-
-
-
 ```citation
 @article{louizos2017learning,
   title={Learning sparse neural networks through $ L\_0 $ regularization},
@@ -277,33 +379,3 @@ $$
   year={2017}
 }
 ```
-
-$$
-\mathbf{Z}_{gene} = \mathbf{A}_{gene} \mathbf{V}_{gene} \in \mathbb{R}^{n \times d_k}
-$$
-
-## 3. 预训练
-
-多任务训练，包括：
-
-- 基因编码分支的预训练（Gene Embedding）
-- 表达量编码分支的预训练（Expression Embedding）
-- 基因编码分支和表达量编码分支的联合训练（Joint Training）
-
-### 3.1 基因编码分支的预训练
-
-通过对比学习的方法，学习表达的基因和为表达基因的语义表示。假设，同时表达的基因之间应该具有更多的相关性，而和未表达的基因应该具有更少的相关性，则可以表达的基因为正样本，未表达的基因为负样本。
-
-给定一个细胞，有表达的基因ID为 $\mathbf{G} = \{g_1, g_2, ..., g_N\}$，和表达量矩阵 $\mathbf{X} = \{x_1, x_2, ..., x_N\}$，我可以构造正样本和负样本。
-
-- 正样本
-
-随机采样 $k$ 个index $\mathbf{P} = \{p_1, p_2, ..., p_k\}$，然后将这个位置的基因ID替换成”【MASK】“ token。$\mathbf{G}_{+} = \{g_{p_1}, g_{p_2}, ..., g_{p_k}\}$，则 $\mathbf{G}_{+}$ 为正样本。
-
-随机采样 $b \times k$ 个index $\mathbf{G}_{-} = \{g_{n_1}, g_{n_2}, ..., g_{n_{b \times k}}\}$，则 $\mathbf{G}_{-}$ 为负样本。
-
-通过模型之后，我们可以通过"[CLS]" token的输出作为anchor，然后通过余弦相似度计算正样本和负样本的相似度，通过InfoNCE损失函数计算损失。
-
-$$
-\mathcal{L}_{gene} = \text{InfoNCE}(f_{gene}([\mathbf{G}, \mathbf{G}_{-}, \mathbf{G}_{+}])
-$$
