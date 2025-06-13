@@ -114,49 +114,24 @@ $$
 
 然而，由于 $\mathbf{A}_{\text{gene}}$ 是经过 softmax 归一化的，其值域较小，在门控稀疏化后可能进一步压缩有效信号，在某些情况下会使得其值域更小，影响后续信息传递。
 
-### 归一化版本1
+为了应对该问题，我们对得到的稀疏注意力权重矩阵进一步进行带符号的加权归一化（weighted normalization），以增强正负调控信号的区分度，并考虑其在归一化中的贡献权重。此外，无调控的信号保持为0：
 
-为了应对该问题，我们对得到的稀疏注意力权重矩阵进一步进行Min-Max归一化，将其映射至区间 $[-1, 1]$，以增强正负调控信号的区分度。此外，无调控的信号保持为0
 $$
-\mathbf{A}_{\text{norm}}^{i,j} = \frac{\mathbf{A}_{sparse}^{i,j} - \min_i(\mathbf{A}_{sparse}^{i,j})}{\max_i(\mathbf{A}_{sparse}^{i,j}) - \min_i(\mathbf{A}_{sparse}^{i,j}) + \epsilon} -1
+\mathbf{A}_{norm}^{i,j} = \frac{\mathbf{A}_{sparse}^{i,j}}{\sum\limits_{k \in \mathcal{N}i} \left| \mathbf{A}_{sparse}^{i,k} \right| + \epsilon}
 $$
 
 其中：
 
 - $\mathbf{A}_{sparse}$ 是稀疏化之后的注意力权重矩阵；
-- $\min_i(\mathbf{A}^{i,j})$ 表示对第 $i$ 行取最小值；
-- $\max_i(\mathbf{A}^{i,j})$ 表示对第 $i$ 行取最大值；
-- $\epsilon$ 是一个很小的常数，用于防止0为除数。
+- $\mathcal{N}_i$ 表示第 $i$ 个基因的邻接基因集合；
+- 分母中的绝对值确保了所有调控信号（不论正负）均被考虑用于归一化；
+- $\epsilon$ 是一个很小的常数，用于防止除以 0 的数值不稳定。
 
-### 归一化版本2
 
-为了应对该问题，我们将稀疏注意力权重矩阵中的正调控与负调控信号分别处理。具体地：
-
-1. **提取正值部分**，对每一行中大于 0 的元素执行 Softmax 操作；
-2. **提取负值部分**，对每一行中小于 0 的元素取其绝对值，再执行 Softmax 操作，最后恢复负号；
-3. **无调控信号** 保持为 0。
-
-最终的归一化注意力权重矩阵定义如下：
-
+通过将归一化后的稀疏注意力权重矩阵 $\mathbf{A}{\text{norm}} \in \mathbb{R}^{N \times N}$ 与值矩阵 $\mathbf{V}_{gene} \in \mathbb{R}^{N \times D}$ 相乘，可以得到注意力输出 $\mathbf{O} \in \mathbb{R}^{N \times D}$：
 $$
-\mathbf{A}_{\text{norm}}^{i,j} =
-\begin{cases}
-\frac{\exp(\mathbf{A}_{sparse}^{i,j})}{\sum\limits_{k: \mathbf{A}_{sparse}^{i,k} > 0} \exp(\mathbf{A}_{sparse}^{i,k})}, & \text{if } \mathbf{A}_{sparse}^{i,j} > 0 \\\\
--\frac{\exp(-\mathbf{A}_{sparse}^{i,j})}{\sum\limits_{k: \mathbf{A}_{sparse}^{i,k} < 0} \exp(-\mathbf{A}_{sparse}^{i,k})}, & \text{if } \mathbf{A}_{sparse}^{i,j} < 0 \\\\
-0, & \text{if } \mathbf{A}_{sparse}^{i,j} = 0
-\end{cases}
+\mathbf{O} = \mathbf{A}_{norm} \cdot \mathbf{V}_{gene}
 $$
-
-其中：
-
-- $\mathbf{A}_{sparse}$ 表示稀疏化之后的注意力权重矩阵；
-- $\exp(\cdot)$ 是指数函数；
-- Softmax 操作分别作用于每一行的正值与负值；
-- 归一化后正调控值仍为正，负调控值仍为负，无调控值为 0。
-
-
-
-
 
 
 
