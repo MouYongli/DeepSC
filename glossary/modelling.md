@@ -87,7 +87,7 @@ $$\mathbf{K}_{gene}^{(l)} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{K}_{gene}$
 $$\mathbf{V}_{gene}^{(l)} = \mathbf{H}_{gene}^{(l)} \cdot \mathbf{W}^{V}_{gene}$$
 
 $$
-\mathbf{H}_{gene}^{(l+1)} = \mathbf{\hat{A}}_{gene}^{(l)} \mathbf{V}_{gene}^{(l)} \in \mathbb{R}^{n \times d_k}
+\mathbf{H}_{gene}^{(l+1)} = \mathbf{\hat{A}}_{gene}^{(l)} \mathbf{V}_{gene}^{(l)} \in \mathbb{R}^{n \times d}
 $$
 
 在模型训练时，Attention 矩阵 $\mathbf{A}$ 学习token之间的注意力权重，可以看作隐式学习到的基因调控关系的近似。
@@ -95,6 +95,8 @@ $$
 **_但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息，并且基因调控是一个稀疏的矩阵。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系，并且能够学习到基因调控的稀疏性。_**
 
 因此，我们特别设计了 L0 正则化 和 门控机制 能让模型表达“正/负/无调控”三种生物关系，并保证稀疏性。
+
+我们通过Gumbel-Softmax技巧，通过$\mathbf{M} \in \{-1,0,+1\}^{n \times n}$门控机制，让模型能够表达“正/负/无调控”三种生物关系，并保证稀疏性。
 
 $$
 \mathbf{A}_{gene}^{i, j} = \text{softmax}\left(\frac{\mathbf{Q}_{gene, i} \mathbf{K}_{gene, j}^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
