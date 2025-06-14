@@ -230,7 +230,7 @@ $$
 
 - 正样本
 
-随机采样 $k$ 个index $\mathbf{P} = \{p_1, p_2, ..., p_k\}$，然后将这个位置的基因ID替换成”【MASK】“ token。$\mathbf{G}_{+} = \{g_{p_1}, g_{p_2}, ..., g_{p_k}\}$，则 $\mathbf{G}_{+}$ 为正样本。
+随机采样 $k$ 个index $\mathbf{P} = \{p_1, p_2, ..., p_k\}$，然后将这个位置的基因ID替换成”[MASK]“ token。$\mathbf{G}_{+} = \{g_{p_1}, g_{p_2}, ..., g_{p_k}\}$，则 $\mathbf{G}_{+}$ 为正样本。
 
 随机采样 $b \times k$ 个index $\mathbf{G}_{-} = \{g_{n_1}, g_{n_2}, ..., g_{n_{b \times k}}\}$，则 $\mathbf{G}_{-}$ 为负样本。
 
