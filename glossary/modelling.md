@@ -176,11 +176,120 @@ $$
 - $\epsilon$ 是一个很小的常数，用于防止除以 0 的数值不稳定。
 
 
-通过将归一化后的稀疏注意力权重矩阵 $\mathbf{A}{\text{norm}} \in \mathbb{R}^{N \times N}$ 与值矩阵 $\mathbf{V}_{gene} \in \mathbb{R}^{N \times D}$ 相乘，可以得到注意力输出 $\mathbf{O} \in \mathbb{R}^{N \times D}$：
+通过将归一化后的稀疏注意力权重矩阵 $\mathbf{A}_{\text{norm}} \in \mathbb{R}^{N \times N}$ 与值矩阵 $\mathbf{V}_{gene} \in \mathbb{R}^{N \times D}$ 相乘，可以得到注意力输出 $\mathbf{O} \in \mathbb{R}^{N \times D}$：
 $$
-\mathbf{O} = \mathbf{A}_{norm} \cdot \mathbf{V}_{gene}
+\mathbf{O}_{gene} = \mathbf{A}_{norm} \cdot \mathbf{V}_{gene}
 $$
 
+#### 2.2.4 将基因编码分支与表达值编码分支进行融合
+1. 已经得到的是基因编码分支的注意力权重和注意力输出。在此我们可以对将二者的注意力输出叠加。得到一个BxNx2D的tensor，接下来。我们通过一个2DxD的矩阵，将其变换会BxNxD的形式。
+benefit: scgpt用的是直接将基因编码和表达值编码叠加，而我们有一个矩阵能够学习如何将二者叠加。
+
+$$
+\mathbf O_{\text{cat}}
+  = \text{Concat}\!\bigl(\mathbf O_{\text{gene}}, \mathbf O_{\text{expr}}\bigr)
+  \;\in\;\mathbb R^{B\times N\times 2D}
+$$
+$$
+\mathbf W_{\text{fuse}} \in \mathbb R^{2D \times D}
+$$
+$$
+\mathbf O_{\text{fused}}
+  = \mathbf O_{\text{cat}} \;\mathbf W_{\text{fuse}}
+  \;\in\;\mathbb R^{B\times N\times D}
+$$
+
+2. 将二者的attention weight。elementwise multiplication, 在此之前先乘以个 $\alpha$ 和 $1- \alpha$ 系数，得到BxNxD的tensor，然后直接乘以 $V_{expression}$
+$$
+\alpha \in (0,1)
+$$
+
+$$
+\mathbf A_{\text{mix}}^{\text{sum}}
+  = \alpha\,\mathbf A_{\text{gene}} \;+\; (1-\alpha)\,\mathbf A_{\text{expr}}
+$$
+
+$$
+\mathbf O_{\text{fused}}
+  = \mathbf A_{\text{mix}} \;\mathbf V_{\text{expr}}
+  \;\in\;\mathbb R^{B\times N\times D}
+$$
+
+3. 
+
+## 融合策略概述
+
+在获得 **基因编码分支** 与 **表达量编码分支** 的注意力权重  
+\(\mathbf A_{\text{gene}},\;\mathbf A_{\text{expr}}\)  
+以及对应的注意力输出  
+\(\mathbf O_{\text{gene}},\;\mathbf O_{\text{expr}}\)  
+之后，本文提出两种融合思路：
+
+---
+
+### 方案 A · 输出级拼接 ➜ 线性映射
+
+1. **拼接输出**  
+   \[
+   \mathbf O_{\text{cat}}
+     \;=\;
+     \operatorname{Concat}
+     \bigl(
+       \mathbf O_{\text{gene}},\;
+       \mathbf O_{\text{expr}}
+     \bigr)
+     \;\in\;
+     \mathbb R^{B \times N \times 2D}
+   \]
+
+2. **可学习映射**  
+   \[
+   \mathbf O_{\text{fused}}
+     \;=\;
+     \mathbf O_{\text{cat}}
+     \,\mathbf W_{\text{fuse}}
+     \;\in\;
+     \mathbb R^{B \times N \times D},
+     \quad
+     \mathbf W_{\text{fuse}}
+     \in
+     \mathbb R^{2D \times D}
+   \]
+
+> **优势**：不同于 scGPT 直接相加，这里通过  
+> \(\mathbf W_{\text{fuse}}\) 自适应学习两类表征的最优线性组合。
+
+---
+
+### 方案 B · 注意力级加权叠加
+
+1. **门控加权**  
+   \[
+   \mathbf A_{\text{mix}}
+     \;=\;
+     \alpha\,\mathbf A_{\text{norm}}
+     \;+\;
+     (1-\alpha)\,\mathbf A_{\text{expr}},
+     \qquad
+     \alpha \in (0,1)
+   \]
+
+2. **作用于值向量**  
+   \[
+   \mathbf O_{\text{fused}}
+     \;=\;
+     \mathbf A_{\text{mix}}
+     \,\mathbf V_{\text{expr}}
+     \;\in\;
+     \mathbb R^{B \times N \times D}
+   \]
+
+> **优势**：在注意力层面即完成融合，  
+>  \(\alpha\) 可学习地平衡两分支的重要性，粒度更细。
+
+---
+
+两种策略各有千秋，可视任务需求与资源条件灵活选用，亦可在多头层面交替或并行实现，以提升模型鲁棒性。
 
 
 
@@ -188,15 +297,107 @@ $$
 
 
 
+## 其他融合策略
 
+设批量 **B**、序列长度 **N**、隐藏维度 **D**，已知  
+\(\mathbf A_{\text{gene}}, \mathbf A_{\text{expr}} \in \mathbb R^{B\times N\times N}\)  
+\(\mathbf V_{\text{gene}}, \mathbf V_{\text{expr}} \in \mathbb R^{B\times N\times D}\)  
+\(\mathbf O_{\text{gene}}, \mathbf O_{\text{expr}} \in \mathbb R^{B\times N\times D}\)。
 
+---
 
+### 方案 C · 双向交互注意力 (Cross-Attention)
 
+> 让 **基因分支** 查询 **表达分支**，反之亦然，以捕获跨模态依赖。
 
+\[
+\begin{aligned}
+\mathbf O_{\text{g}\leftarrow\text{e}}
+  &= \operatorname{softmax}\!\Bigl(
+       \frac{\mathbf Q_{\text{gene}}\,
+             \mathbf K_{\text{expr}}^\top}
+            {\sqrt{D}}
+     \Bigr)\,
+     \mathbf V_{\text{expr}} \\[4pt]
+\mathbf O_{\text{e}\leftarrow\text{g}}
+  &= \operatorname{softmax}\!\Bigl(
+       \frac{\mathbf Q_{\text{expr}}\,
+             \mathbf K_{\text{gene}}^\top}
+            {\sqrt{D}}
+     \Bigr)\,
+     \mathbf V_{\text{gene}} \\[6pt]
+\mathbf O_{\text{fused}}
+  &= \operatorname{Concat}\bigl(
+       \mathbf O_{\text{g}\leftarrow\text{e}},
+       \mathbf O_{\text{e}\leftarrow\text{g}}
+     \bigr)\,
+     \mathbf W_{\text{fuse}}
+     \in \mathbb R^{B\times N\times D}
+\end{aligned}
+\]
 
+---
 
+### 方案 D · Hadamard 交互 + 残差门控
 
+> 用逐元素乘捕获二阶交互，再与残差相加；**β, γ** 为可学习标量/向量。
 
+\[
+\begin{aligned}
+\mathbf O_{\text{fused}}
+  &= \beta\,
+     (\mathbf O_{\text{gene}} \odot \mathbf O_{\text{expr}})
+     \;+\;
+     \gamma\,
+     (\mathbf O_{\text{gene}} + \mathbf O_{\text{expr}})
+     \quad\in\mathbb R^{B\times N\times D} \\[2pt]
+\beta,\;\gamma &\in (0,1)\quad\text{或}\quad
+\beta,\gamma \in \mathbb R^{D}
+\end{aligned}
+\]
+
+---
+
+### 方案 E · Squeeze-Excitation 动态权重
+
+> 先对每个分支做全局池化获得 “摘要”，再经门控决定融合比例，细粒度到 **D** 维。
+
+1. **全局摘要**  
+   \[
+   \mathbf s_{\text{gene}}
+     = \frac1N \sum_{i=1}^{N} \mathbf O_{\text{gene}}[:,i,:]
+     \in \mathbb R^{B\times D},
+   \quad
+   \mathbf s_{\text{expr}}
+     = \frac1N \sum_{i=1}^{N} \mathbf O_{\text{expr}}[:,i,:]
+   \]
+
+2. **门控权重**  
+   \[
+   \boldsymbol\alpha
+     = \sigma\!\bigl(
+         \operatorname{MLP}\bigl(
+           [\mathbf s_{\text{gene}};\mathbf s_{\text{expr}}]
+         \bigr)
+       \bigr)
+     \in (0,1)^{B\times D}
+   \]
+
+3. **加权融合**  
+   \[
+   \mathbf O_{\text{fused}}
+     = \boldsymbol\alpha \odot \mathbf O_{\text{gene}}
+     \;+\;
+       (1-\boldsymbol\alpha) \odot \mathbf O_{\text{expr}}
+     \;\in\; \mathbb R^{B\times N\times D}
+   \]
+
+---
+
+> **小贴士**  
+> - 三种策略可与您已实现的 A/B 方案 **并行做消融**，评估在细胞类型识别、基因表达预测等任务中的增益。  
+> - 方案 C 计算量略高，可先在高变基因 (HVG) 子集上验证；  
+> - 方案 E 对批量归一化 (BatchNorm) 友好，适合深层堆叠。  
 
 
 
