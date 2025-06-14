@@ -78,7 +78,7 @@ $$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
 
 然后，新基因编码分支和表达量编码分支的隐藏状态，多头注意力机制的计算过程如下：
 
-#### 2.2.2 基因编码分支注意力机制
+#### 2.2.2 基因调控网络的稀疏性约束
 
 对于第 $( l )$ 层，基因编码的隐藏状态是 $\mathbf{H}_{gene}^{(l)}$，表达量编码的隐藏状态是 $\mathbf{H}_{expr}^{(l)}$。我们先计算基因编码的Q,K,V矩阵：
 
@@ -94,17 +94,67 @@ $$
 
 **_但 $\mathbf{A}$ 是经过 Softmax 归一化且非负的，不直接包含负调控信息，并且基因调控是一个稀疏的矩阵。因此，需要设计方法让模型能够表达激活（正调控）与抑制（负调控）两类关系，并且能够学习到基因调控的稀疏性。_**
 
-因此，我们特别设计了 L0 正则化 和 门控机制 能让模型表达“正/负/无调控”三种生物关系，并保证稀疏性。
+因此，我们特别设计了 L0 正则化 和 门控机制 能让模型表达“正/负/无调控”三种生物关系，并保证稀疏性。我们通过Gumbel-Softmax技巧，通过$\mathbf{M} \in \{-1,0,+1\}^{n \times n}$门控机制，让模型能够表达“正/负/无调控”三种生物关系，并保证稀疏性。
 
-我们通过Gumbel-Softmax技巧，通过$\mathbf{M} \in \{-1,0,+1\}^{n \times n}$门控机制，让模型能够表达“正/负/无调控”三种生物关系，并保证稀疏性。
+##### 基因对门控的参数化
+
+我们使用MLP对每一对基因$(i, j)$的编码向量进行特征交互，产生Gumbel-Softmax分布参数，三分类概率分别对应上述三种调控类型：
+
+$$
+\phi_{i,j} =\text{MLP}([\mathcal{E}_i; \mathcal{E}_j]) \in \mathbb{R}^3
+$$
+
+##### Gumbel-Softmax采样
+然后我们进行Gumbel-Softmax采样，得到门控矩阵$\mathbf{M}$：
+
+首先，我们采样一个噪声向量$\mathbf{g}_{i,j}$：$\mathbf{g}_{i,j} = -\log(-\log(u_{i,j}))$，其中$u_{i,j} \sim \text{Uniform}(0,1)$。
+
+然后，我们通过上面得到的可学习的参数$\phi_{i,j}$，对Gumbel Softmax重参数化，得到门控矩阵$\mathbf{M}$：($\pi_{i,j}, \tau_{i, j}) = \phi_{i,j}$。
+
+然后，利用Gumbel-Softmax重参数化技巧近似采样出一个“门控”向量，产生近似one-hot的可微分输出：
+
+$$
+y_{i,j} = \frac{\exp((\log \pi_{i,j} + g_{i,j})/\tau_{i,j})}{\sum_{k=1}^3 \exp((\log \pi_{i,j} + g_{i,j})/\tau_{i,j})}
+$$
+
+其中，$\tau_{i,j}$是温度参数，$\tau_{i,j} \to 0$ 时输出趋近one-hot。
+
+$$
+\mathbf{M}_{i,j} = y_{i,j}[0] \cdot (-1) + y_{i,j}[1] \cdot 0 + y_{i,j}[2] \cdot (+1)
+$$
+
+##### 稀疏性约束
+
+为了让基因调控网络更符合生物学实际的稀疏性，我们在损失函数中加入L0正则化项：
+
+$$
+\mathcal{L}_{\text{L0}} = \lambda \sum_{i, j} |\mathbf{y}_{i,j}[0]| + |\mathbf{y}_{i,j}[2]|
+$$
+
+其中$\lambda$是稀疏性调节系数，鼓励大部分门控为0（无调控）。
+
+
+#### 2.2.3 基因编码的注意力机制
+
+我们首先计算原始的K，Q，V矩阵：
+
+$$
+\mathbf{Q}_{gene} = \mathbf{H}_{gene} \cdot \mathbf{W}^{Q}_{gene}
+$$
+
+$$
+\mathbf{K}_{gene} = \mathbf{H}_{gene} \cdot \mathbf{W}^{K}_{gene}
+$$
+
+$$
+\mathbf{V}_{gene} = \mathbf{H}_{gene} \cdot \mathbf{W}^{V}_{gene}
+$$
 
 原始的注意力权重矩阵计算如下：
 
 $$
-\mathbf{A}_{gene}^{i, j} = \text{softmax}\left(\frac{\mathbf{Q}_{gene, i} \mathbf{K}_{gene, j}^\top}{\sqrt{d_k}}\right) \in \mathbb{R}^{n \times n}
+\mathbf{A}_{gene} = \text{softmax}\left(\frac{\mathbf{Q}_{gene} \mathbf{K}_{gene}^\top}{\sqrt{d}}\right) \in \mathbb{R}^{n \times n}
 $$
-
-其中，$\mathbf{Q}_{gene, i}$ 是第 $( i )$ 个基因的查询向量，$\mathbf{K}_{gene, j}$ 是第 $( j )$ 个基因的键向量。
 
 对我们将注意力权重矩阵与稀疏性门控矩阵进行逐元素相乘，可以得到一个稀疏化之后的注意权重矩阵$\mathbf{A}_{sparse} $，从而实现对调控关系的约束。
 
@@ -117,13 +167,11 @@ $$
 为了应对该问题，我们对得到的稀疏注意力权重矩阵进一步进行带符号的加权归一化（weighted normalization），以增强正负调控信号的区分度，并考虑其在归一化中的贡献权重。此外，无调控的信号保持为0：
 
 $$
-\mathbf{A}_{norm}^{i,j} = \frac{\mathbf{A}_{sparse}^{i,j}}{\sum\limits_{k \in \mathcal{N}i} \left| \mathbf{A}_{sparse}^{i,k} \right| + \epsilon}
+\mathbf{A}_{norm}^{i,j} = \frac{\mathbf{A}_{sparse}^{i,j}}{\sum_{k}^{N} \left| \mathbf{A}_{sparse}^{i,k} \right| + \epsilon}
 $$
 
 其中：
-
 - $\mathbf{A}_{sparse}$ 是稀疏化之后的注意力权重矩阵；
-- $\mathcal{N}_i$ 表示第 $i$ 个基因的邻接基因集合；
 - 分母中的绝对值确保了所有调控信号（不论正负）均被考虑用于归一化；
 - $\epsilon$ 是一个很小的常数，用于防止除以 0 的数值不稳定。
 
@@ -404,3 +452,24 @@ $$
   year={2017}
 }
 ```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

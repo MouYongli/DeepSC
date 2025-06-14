@@ -193,3 +193,5 @@ configs/scbert_pretrain.yaml
 outputs/
 tests/outputs/
 tests/test_hydra.py
+
+*bk.md
