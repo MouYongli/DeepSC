@@ -27,7 +27,7 @@
 <!-- [![Twitter](https://img.shields.io/twitter/follow/YOUR_TWITTER_HANDLE?style=social)](https://twitter.com/YOUR_TWITTER_HANDLE) -->
 
 This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data" by DBIS and LfB RWTH Aachen University and RWTH Universty Hosptial Aachen
-[Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Stefan Decker
+([Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Stefan Decker)
 
 ## Overview
 
@@ -45,7 +45,7 @@ This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell
 #### Anaconda
 1. create conda environment
 ```
-conda create --name deepsc python=3.11
+conda create --name deepsc python=3.10
 conda activate deepsc
 ```
 
@@ -57,10 +57,8 @@ conda install ipykernel
 
 3. Install dependencies
 ```
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 # torch==2.5.1, torchvision==0.20.1, torchaudio==2.5.1
-pip install torch_geometric
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
-pip install -r requirements.txt
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 # torch==2.6.0+cu126, torchvision==0.21.0+cu126, torchaudio==2.6.0+cu126
+# pip install torch_geometric # torch-geometric==2.6.1
 pip install -e .
 ```
 #### Docker
@@ -73,6 +71,106 @@ pip install -e .
    * Configure the organs in [organ_list.txt](./data/download/3ac/organ_list.txt)
    * Collect information of data and metadata
 3.
+
+
+## Configuration Management with Hydra
+
+This project uses [Hydra](https://hydra.cc/) to manage configuration files in a hierarchical, modular, and override-friendly way. This allows for clean separation between datasets, model architecture, and training parameters, making experiments easy to reproduce and customize.
+
+### Configuration Structure
+
+The main configuration directory is:
+<pre><code>
+configs/pretrain/
+├── pretrain.yaml           # Entry point config
+├── model/
+│   └── scbert.yaml         # Model configuration
+└── dataset/
+      └── tripleca.yaml       # Dataset configuration
+</code></pre>
+
+### Running with Config
+
+To run with the default configuration:
+
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain
+
+```
+To override parameters from the command line:
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain
+  epoch=20 model.dim=512 dataset.num_bin=7
+```
+Hydra will automatically merge the overrides and save the full resolved configuration and logs.
+
+### Configuration Breakdown (Examples):
+
+Define the base configuration and default components in [pretrain.yaml](configs/pretrain/pretrain.yaml)
+
+Define model architecture parameters (Example: [scbert.yaml](configs/pretrain/model/scbert.yaml))
+
+Define dataset loading configuration (Example: [tripleca.yaml](configs/pretrain/dataset/tripleca.yaml))
+
+### Instantiating Objects with Hydra
+
+This project uses Hydra's `_target_` mechanism and `hydra.utils.instantiate()` to construct Python objects directly from configuration files. This enables dynamic loading of models, datasets, and other components by simply editing YAML files — no code changes are needed.
+
+
+#### Example: Model Instantiation
+
+In [`configs/pretrain/model/scbert.yaml`](configs/pretrain/model/scbert.yaml):
+
+```yaml
+_target_: deepsc.models.scbert.model.PerformerLM
+g2v_position_emb: true
+dim: 200
+num_tokens: 7
+max_seq_len: 60664
+depth: 6
+heads: 10
+local_attn_heads: 0
+```
+
+This defines how to instantiate the PerformerLM model. The _target_ key points to the full Python path of the class, and the remaining keys are passed as constructor arguments.
+
+In [pretrain.py](src/deepsc/pretrain/pretrain.py), the model is created via:
+
+```python
+model: nn.Module = hydra.utils.instantiate(cfg.model)
+```
+
+###  Output & Logging:
+
+Hydra automatically logs each run to a timestamped directory under outputs/ (or as configured). Each run directory contains:
+
+1. config.yaml: the full merged config
+2. hydra.yaml: Hydra’s internal config
+3. overrides.yaml: CLI overrides
+4. <job_name>_0.log: stdout log file
+
+
+## Setup Instructions for Weights & Biases (wandb)
+
+### 1. Get your wandb API token
+
+Visit [https://wandb.ai/authorize](https://wandb.ai/authorize) and log into your wandb account. Your API key (token) will be displayed on the page.
+
+### 2. Set your token (Recommended: via CLI)
+
+Run the following command in your terminal, replacing `<YOUR_TOKEN>` with your actual token:
+
+```bash
+wandb login <YOUR_TOKEN>
+````
+
+This command will automatically store your token in the ~/.netrc file. All subsequent wandb scripts will be able to read it without requiring manual setup each time.
 
 ### Environment Configuration
 

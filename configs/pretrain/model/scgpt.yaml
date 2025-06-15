@@ -1,0 +1,26 @@
+_target_: deepsc.models.scgpt.model.TransformerModel
+ntoken: 34500
+d_model: 64
+nhead: 4
+d_hid: 64
+nlayers: 4
+nlayers_cls: 3
+n_cls: 1
+vocab: None
+dropout: 0.5
+pad_token: "<pad>"
+pad_value: 0
+do_mvc: false
+do_dab: false
+use_batch_labels: false
+num_batch_labels: false
+domain_spec_batchnorm: false
+input_emb_style: "continuous"
+n_input_bins: None
+cell_emb_style: "cls"
+mvc_decoder_style: "inner product"
+ecs_threshold: 0.3
+explicit_zero_prob: false
+use_fast_transformer: false
+fast_transformer_backend: "flash"
+pre_norm: false
