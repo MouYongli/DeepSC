@@ -31,6 +31,9 @@ class GeneEmbedding(nn.Module):
         return self.gene_embedding(gene_ids)
 
 
+# 需修改，有问题： 归一化和分箱应该放到data_collator里面，这里只做embedding
+# 其次：在data_collator里面还要做好trunctuation和padding以及mask.
+# 这里没有mask直接做normalization肯定会有问题
 class ExpressionEmbedding(nn.Module):
     """
     Expression Embedding分支：专注于捕捉表达量的数值特征和上下文依赖
@@ -189,136 +192,171 @@ class CategoricalGumbelSoftmax(nn.Module):
 
 class GeneAttentionLayer(nn.Module):
     """
-    基因编码分支的注意力机制，支持门控稀疏化和带符号归一化。
+    基因编码分支的多头注意力机制，支持门控稀疏化和带符号归一化。
     """
 
-    def __init__(self):
+    def __init__(self, d, num_heads, attn_dropout=0.1):
         super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = d // num_heads
+        self.dropout = nn.Dropout(attn_dropout)
+        self.out_proj = nn.Linear(d, d)
 
     def forward(
         self,
-        Q: torch.Tensor,
-        K: torch.Tensor,
-        V: torch.Tensor,
-        M: torch.Tensor,
+        Q: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        K: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        V: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        M: torch.Tensor,  # (batch, num_heads, g, g) or (batch, g, g)
         eps: float = 1e-8,
     ) -> torch.Tensor:
-        """
-        Args:
-            Q: (batch, g, d)
-            K: (batch, g, d)
-            V: (batch, g, d)
-            M: (batch, g, g) 门控矩阵
-            eps: 防止除零
-        Returns:
-             output: (batch, g, d) 稀疏归一化注意力输出
-        """
-        d = Q.size(-1)
-        # 计算原始注意力权重
-        attn_logits = torch.matmul(Q, K.transpose(-2, -1)) / (d**0.5)  # (batch, g, g)
-        A = F.softmax(attn_logits, dim=-1)  # (batch, g, g)
-        # 稀疏化：逐元素乘以门控矩阵
-        A_sparse = A * M  # (batch, g, g)
+        # 自动扩展M到多头
+        if M.dim() == 3:
+            M = M.unsqueeze(1).expand(
+                -1, self.num_heads, -1, -1
+            )  # (batch, num_heads, g, g)
+        # 转换为 (batch, num_heads, g, head_dim)
+        Q = Q.permute(0, 2, 1, 3)
+        K = K.permute(0, 2, 1, 3)
+        V = V.permute(0, 2, 1, 3)
+        # Q, K, V: (batch, num_heads, g, head_dim)
+        # 计算注意力分数
+        attn_logits = torch.matmul(Q, K.transpose(-2, -1)) / (
+            self.head_dim**0.5
+        )  # (batch, num_heads, g, g)
+        A = F.softmax(attn_logits, dim=-1)  # (batch, num_heads, g, g)
+        A = self.dropout(A)  # 注意力dropout
+        # 稀疏化
+        A_sparse = A * M  # (batch, num_heads, g, g)
         # 带符号归一化
         norm = (
             torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
-        )  # (batch, g, 1)
-        A_bar = A_sparse / norm  # (batch, g, g)
+        )  # (batch, num_heads, g, 1)
+        A_bar = A_sparse / norm  # (batch, num_heads, g, g)
         # 注意力输出
-        output = torch.matmul(A_bar, V)  # (batch, g, d)
-        return output
+        output = torch.matmul(A_bar, V)  # (batch, num_heads, g, head_dim)
+        # 转回 (batch, g, num_heads, head_dim)
+        output = output.permute(0, 2, 1, 3)
+        output = output.reshape(output.shape[0], output.shape[1], -1)  # (batch, g, d)
+        output = self.out_proj(output)
+        return output  # (batch, g, d)
 
 
 class ExpressionAttentionLayer(nn.Module):
     """
-    表达值编码分支的注意力机制，融合基因和表达的K/Q，支持门控稀疏化。
+    表达值编码分支的多头注意力机制，融合基因和表达的K/Q，支持门控稀疏化。
     """
 
-    def __init__(self, d, fused: bool = True):
+    def __init__(self, d, num_heads, fused: bool = True, attn_dropout=0.1):
         super().__init__()
         self.fused = fused
+        self.num_heads = num_heads
+        self.head_dim = d // num_heads
+        self.dropout = nn.Dropout(attn_dropout)
         if fused:
-            self.W_K_fused = nn.Linear(2 * d, d)
-            self.W_Q_fused = nn.Linear(2 * d, d)
+            self.W_K_fused = nn.Linear(2 * self.head_dim, self.head_dim)
+            self.W_Q_fused = nn.Linear(2 * self.head_dim, self.head_dim)
+        self.out_proj = nn.Linear(d, d)
 
     def forward(
         self,
-        Q_gene: torch.Tensor,
-        K_gene: torch.Tensor,
-        Q_expr: torch.Tensor,
-        K_expr: torch.Tensor,
-        V_expr: torch.Tensor,
-        M: torch.Tensor,
+        Q_gene: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        K_gene: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        Q_expr: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        K_expr: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        V_expr: torch.Tensor,  # (batch, g, num_heads, head_dim)
+        M: torch.Tensor,  # (batch, num_heads, g, g) or (batch, g, g)
     ) -> torch.Tensor:
-        """
-        Args:
-            Q_gene, K_gene: (batch, g, d)
-            Q_expr, K_expr, V_expr: (batch, g, d)
-            M: (batch, g, g)
-        Returns:
-            output: (batch, g, d)
-        """
-        d = Q_gene.size(-1)
+        # 自动扩展M到多头
+        if M.dim() == 3:
+            M = M.unsqueeze(1).expand(
+                -1, self.num_heads, -1, -1
+            )  # (batch, num_heads, g, g)
+        # 转换为 (batch, num_heads, g, head_dim)
+        Q_gene = Q_gene.permute(0, 2, 1, 3)
+        K_gene = K_gene.permute(0, 2, 1, 3)
+        Q_expr = Q_expr.permute(0, 2, 1, 3)
+        K_expr = K_expr.permute(0, 2, 1, 3)
+        V_expr = V_expr.permute(0, 2, 1, 3)
+        # 融合K/Q
         if self.fused:
-            # 融合K/Q
             K_fused = self.W_K_fused(
                 torch.cat([K_gene, K_expr], dim=-1)
-            )  # (batch, g, d)
+            )  # (batch, num_heads, g, head_dim)
             Q_fused = self.W_Q_fused(
                 torch.cat([Q_gene, Q_expr], dim=-1)
-            )  # (batch, g, d)
+            )  # (batch, num_heads, g, head_dim)
         else:
             K_fused = K_expr
             Q_fused = Q_expr
         # 注意力
         attn_logits = torch.matmul(Q_fused, K_fused.transpose(-2, -1)) / (
-            d**0.5
-        )  # (batch, g, g)
-        A = F.softmax(attn_logits, dim=-1)  # (batch, g, g)
+            self.head_dim**0.5
+        )  # (batch, num_heads, g, g)
+        A = F.softmax(attn_logits, dim=-1)  # (batch, num_heads, g, g)
+        A = self.dropout(A)  # 注意力dropout
         # 稀疏化
-        A_sparse = A * M  # (batch, g, g)
+        A_sparse = A * M  # (batch, num_heads, g, g)
         # 注意力输出
-        output = torch.matmul(A_sparse, V_expr)  # (batch, g, d)
-        return output
+        output = torch.matmul(A_sparse, V_expr)  # (batch, num_heads, g, head_dim)
+        # 转回 (batch, g, num_heads, head_dim)
+        output = output.permute(0, 2, 1, 3)
+        output = output.reshape(output.shape[0], output.shape[1], -1)  # (batch, g, d)
+        output = self.out_proj(output)
+        return output  # (batch, g, d)
 
 
 class GeneBranchQKV(nn.Module):
     """
-    基因编码分支的 Q/K/V 计算模块
+    基因编码分支的 Q/K/V 计算模块，支持多头
     输入: 基因嵌入 (batch, g, embedding_dim)
-    输出: Q_gene, K_gene, V_gene (batch, g, embedding_dim)
+    输出: Q_gene, K_gene, V_gene (batch, g, num_heads, head_dim)
     """
 
-    def __init__(self, embedding_dim):
+    def __init__(self, embedding_dim, num_heads):
         super().__init__()
+        assert (
+            embedding_dim % num_heads == 0
+        ), "embedding_dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = embedding_dim // num_heads
         self.W_Q = nn.Linear(embedding_dim, embedding_dim)
         self.W_K = nn.Linear(embedding_dim, embedding_dim)
         self.W_V = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, gene_emb: torch.Tensor) -> tuple:
-        Q = self.W_Q(gene_emb)
-        K = self.W_K(gene_emb)
-        V = self.W_V(gene_emb)
+        # gene_emb: (batch, g, embedding_dim)
+        batch, g, _ = gene_emb.shape
+        Q = self.W_Q(gene_emb).view(batch, g, self.num_heads, self.head_dim)
+        K = self.W_K(gene_emb).view(batch, g, self.num_heads, self.head_dim)
+        V = self.W_V(gene_emb).view(batch, g, self.num_heads, self.head_dim)
         return Q, K, V
 
 
 class ExpressionBranchQKV(nn.Module):
     """
-    表达值编码分支的 Q/K/V 计算模块
+    表达值编码分支的 Q/K/V 计算模块，支持多头
     输入: 表达嵌入 (batch, g, embedding_dim)
-    输出: Q_expr, K_expr, V_expr (batch, g, embedding_dim)
+    输出: Q_expr, K_expr, V_expr (batch, g, num_heads, head_dim)
     """
 
-    def __init__(self, embedding_dim):
+    def __init__(self, embedding_dim, num_heads):
         super().__init__()
+        assert (
+            embedding_dim % num_heads == 0
+        ), "embedding_dim must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = embedding_dim // num_heads
         self.W_Q = nn.Linear(embedding_dim, embedding_dim)
         self.W_K = nn.Linear(embedding_dim, embedding_dim)
         self.W_V = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, expr_emb: torch.Tensor) -> tuple:
-        Q = self.W_Q(expr_emb)
-        K = self.W_K(expr_emb)
-        V = self.W_V(expr_emb)
+        # expr_emb: (batch, g, embedding_dim)
+        batch, g, _ = expr_emb.shape
+        Q = self.W_Q(expr_emb).view(batch, g, self.num_heads, self.head_dim)
+        K = self.W_K(expr_emb).view(batch, g, self.num_heads, self.head_dim)
+        V = self.W_V(expr_emb).view(batch, g, self.num_heads, self.head_dim)
         return Q, K, V
 
 
@@ -351,45 +389,72 @@ class FeedForward(nn.Module):
 
 
 class DeepSCTransformerBlock(nn.Module):
-    def __init__(self, embedding_dim, dropout=0.1, fused=True):
+    def __init__(self, embedding_dim, num_heads, attn_dropout, ffn_dropout, fused):
         super().__init__()
-        self.gene_qkv = GeneBranchQKV(embedding_dim)
-        self.expr_qkv = ExpressionBranchQKV(embedding_dim)
-        self.gene_attn = GeneAttentionLayer()
-        self.expr_attn = ExpressionAttentionLayer(embedding_dim, fused=fused)
+        self.num_heads = num_heads
+        self.embedding_dim = embedding_dim
+        self.gene_qkv = GeneBranchQKV(embedding_dim, num_heads)
+        self.expr_qkv = ExpressionBranchQKV(embedding_dim, num_heads)
+        self.gene_attn = GeneAttentionLayer(embedding_dim, num_heads, attn_dropout)
+        self.expr_attn = ExpressionAttentionLayer(
+            embedding_dim, num_heads, fused, attn_dropout
+        )
         # Norm
         self.norm_gene1 = nn.LayerNorm(embedding_dim)
         self.norm_gene2 = nn.LayerNorm(embedding_dim)
         self.norm_expr1 = nn.LayerNorm(embedding_dim)
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
         # FFN
-        self.ffn_gene = FeedForward(embedding_dim, dropout=dropout)
-        self.ffn_expr = FeedForward(embedding_dim, dropout=dropout)
+        self.ffn_gene = FeedForward(embedding_dim, dropout=ffn_dropout)
+        self.ffn_expr = FeedForward(embedding_dim, dropout=ffn_dropout)
 
     def forward(self, gene_emb, expr_emb, M):
-        Q_gene, K_gene, V_gene = self.gene_qkv(gene_emb)
-        attn_gene = self.gene_attn(Q_gene, K_gene, V_gene, M)
-        h_gene = self.norm_gene1(attn_gene)
-        ffn_gene = self.ffn_gene(h_gene)
-        out_gene = self.norm_gene2(h_gene + ffn_gene)
-
+        # 和金尔确认这里是否可以这样改写？把layer norm放到前面? 我没见过
+        #         # QKV: (batch, g, num_heads, head_dim)
+        # Q_gene, K_gene, V_gene = self.gene_qkv(gene_emb)
+        # attn_gene = self.gene_attn(Q_gene, K_gene, V_gene, M)  # (batch, g, d)
+        # # 合并多头（已在注意力层完成，无需reshape）
+        # h_gene = self.norm_gene1(gene_emb + attn_gene)
+        # ffn_gene = self.ffn_gene(h_gene)
+        # out_gene = self.norm_gene2(h_gene + ffn_gene)
+        # Pre-LN for gene branch
+        h_gene = gene_emb + self.gene_attn(
+            self.gene_qkv(self.norm_gene1(gene_emb))[0],
+            self.gene_qkv(self.norm_gene1(gene_emb))[1],
+            self.gene_qkv(self.norm_gene1(gene_emb))[2],
+            M,
+        )
+        out_gene = h_gene + self.ffn_gene(self.norm_gene2(h_gene))
         # Expression branch: 融合 gene 的 Q/K 参与注意力
-        Q_expr, K_expr, V_expr = self.expr_qkv(expr_emb)
-        attn_expr = self.expr_attn(Q_gene, K_gene, Q_expr, K_expr, V_expr, M)
-        h_expr = self.norm_expr1(expr_emb + attn_expr)
-        ffn_expr = self.ffn_expr(h_expr)
-        out_expr = self.norm_expr2(h_expr + ffn_expr)
+        # Q_expr, K_expr, V_expr = self.expr_qkv(expr_emb)
+        # attn_expr = self.expr_attn(Q_gene, K_gene, Q_expr, K_expr, V_expr, M)  # (batch, g, d)
+        # # 合并多头（已在注意力层完成，无需reshape）
+        # h_expr = self.norm_expr1(expr_emb + attn_expr)
+        # ffn_expr = self.ffn_expr(h_expr)
+        # out_expr = self.norm_expr2(h_expr + ffn_expr)
+        # Pre-LN for expression branch
+        h_expr = expr_emb + self.expr_attn(
+            self.gene_qkv(self.norm_expr1(gene_emb))[0],
+            self.gene_qkv(self.norm_expr1(gene_emb))[1],
+            self.expr_qkv(self.norm_expr1(expr_emb))[0],
+            self.expr_qkv(self.norm_expr1(expr_emb))[1],
+            self.expr_qkv(self.norm_expr1(expr_emb))[2],
+            M,
+        )
+        out_expr = h_expr + self.ffn_expr(self.norm_expr2(h_expr))
 
         return out_gene, out_expr
 
 
-class DeepSCTransformer(nn.Module):
+class DeepSC(nn.Module):
     def __init__(
         self,
         embedding_dim,
         num_genes,
         num_layers=4,
-        dropout=0.1,
+        num_heads=8,
+        attn_dropout=0.1,
+        ffn_dropout=0.1,
         fused=True,
         num_bins=50,
         alpha=0.1,
@@ -399,21 +464,27 @@ class DeepSCTransformer(nn.Module):
         self.expr_embedding = ExpressionEmbedding(
             embedding_dim, num_bins=num_bins, alpha=alpha
         )
+        self.num_heads = num_heads
         self.layers = nn.ModuleList(
             [
-                DeepSCTransformerBlock(embedding_dim, dropout, fused)
+                DeepSCTransformerBlock(
+                    embedding_dim, num_heads, attn_dropout, ffn_dropout, fused
+                )
                 for _ in range(num_layers)
             ]
         )
+        self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
 
-    def forward(self, gene_ids, expression, M):
+    def forward(self, gene_ids, expression):
         """
         gene_ids: (batch, g)  # 基因ID序列
         expression: (batch, g)  # 表达量
-        M: (batch, g, g)  # 门控矩阵
+        M: (batch, num_heads, g, g) 门控矩阵
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression)  # (batch, g, d)
+        # 问题：是否需要M是每层独立的？
+        M = self.gumbel_softmax(gene_emb)  # (batch, g, g)
         for layer in self.layers:
             gene_emb, expr_emb = layer(gene_emb, expr_emb, M)
         return gene_emb, expr_emb

@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - model: scbert
+  - model: deepsc
   - dataset: tripleca
 
 wandb_project: "DeepSC"

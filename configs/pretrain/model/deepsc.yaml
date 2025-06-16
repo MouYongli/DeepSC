@@ -1,0 +1,10 @@
+_target_: src.deepsc.models.deepsc.model.DeepSC
+embedding_dim: 200
+num_genes: 1000
+num_layers: 4
+attn_dropout: 0.1
+ffn_dropout: 0.1
+fused: true
+num_bins: 50
+alpha: 0.1
+num_heads: 8
