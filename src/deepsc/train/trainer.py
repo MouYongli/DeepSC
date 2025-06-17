@@ -13,7 +13,8 @@ from tqdm import tqdm
 
 import time
 import wandb
-from deepsc.data.dataset import data_mask, extract_rows_from_sparse_tensor
+from deepsc.data.dataset import extract_rows_from_sparse_tensor
+from deepsc.data_collator import DataCollator
 from deepsc.utils import *
 
 
@@ -98,16 +99,48 @@ class Trainer:
             batch_size=self.args.batch_size,
             sampler=self.train_sampler,
             num_workers=32,
+            collate_fn=DataCollator(
+                do_padding=True,
+                pad_token_id=0,
+                pad_value=0,
+                do_mlm=True,
+                do_binning=True,
+                max_length=1000,
+            ),
         )
         val_loader = DataLoader(
             self.val_dataset,
             batch_size=self.args.batch_size,
             sampler=self.val_sampler,
             num_workers=8,
+            collate_fn=DataCollator(
+                do_padding=True,
+                pad_token_id=0,
+                pad_value=0,
+                do_mlm=True,
+                do_binning=True,
+                max_length=1000,
+            ),
         )
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
             train_loader, val_loader
         )
+
+    def pad_for_val(self, seq):
+        max_len = max(p.size(1) for p in seq)
+        padded_preds = []
+        for p in seq:
+            seq_len = p.size(1)
+            if seq_len < max_len:
+                # 在第1维末尾填充 (padding_value 可自定义)
+                pad_amount = max_len - seq_len
+                # F.pad 参数：(左边填充, 右边填充)，这里对 dim=1 右侧填充 pad_amount
+                p = F.pad(p, (0, pad_amount), value=0)
+            else:
+                # 如果超过 max_len，就截断（truncate）
+                p = p[:, :max_len]
+            padded_preds.append(p)
+        return padded_preds
 
     def prepare_model(self):
         args = self.args
@@ -138,15 +171,21 @@ class Trainer:
                     self.val_loader, desc=f"Epoch {epoch} [val]", ncols=100
                 )
             for index, data in enumerate(data_iter):
-                data, labels = data_mask(data)
-                logits = self.model(data)
-                loss = self.loss_fn(logits.transpose(1, 2), labels)
+                gene = data["gene"]
+                labels = data["expr"]
+                masked_expr = data["masked_expr"]
+                gene_emb, expr_emb = self.model(gene, masked_expr)
+                logits = expr_emb
+                loss = self.loss_fn(logits.transpose(1, 2), labels.long())
                 running_loss += loss.item()
-                final = self.softmax(logits)[..., 1:-1].argmax(dim=-1) + 1
+                final = self.softmax(logits).argmax(dim=-1)
                 predictions.append(final)
                 truths.append(labels)
                 if self.is_master:
                     data_iter.set_postfix(loss=running_loss / (index + 1))
+
+            predictions = self.pad_for_val(predictions)
+            truths = self.pad_for_val(truths)
             predictions = distributed_concat(
                 torch.cat(predictions, dim=0),
                 len(self.val_sampler.dataset),
@@ -172,23 +211,31 @@ class Trainer:
                     text=f"Validation Epoch {epoch} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%",
                 )
 
-    def checkpoint_reload(self):
+    def checkpoint_reload(self) -> bool:
         ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.ckpt")
-        self.last_epoch = 1
-        self.iteration = 1
-        if os.path.exists(ckpt_file):
-            state = {
-                "model": self.model,
-                "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
-                "iteration": self.iteration,
-                "epoch": self.last_epoch,
-            }
-            self.fabric.load(ckpt_file, state)
+        if not os.path.exists(ckpt_file):
             if self.is_master:
-                print(
-                    f"Reloaded model, optimizer, and scheduler from {ckpt_file}, last_epoch={self.last_epoch}"
-                )
+                print(f"[WARN] 未找到检查点 {ckpt_file}")
+            return False
+
+        # 只传可 in-place 恢复的对象
+        state = {
+            "model": self.model,
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+        }
+        remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
+
+        # 手动恢复不可变计数器
+        self.iteration = remainder.get("iteration", 1)
+        self.last_epoch = remainder.get("epoch", 1)
+
+        if self.is_master:
+            print(
+                f"[INFO] 成功恢复到 epoch={self.last_epoch}, iter={self.iteration} "
+                f"from {ckpt_file}"
+            )
+        return True
 
     def train(self):
         # 尽量不要在for循环内to device
@@ -206,15 +253,21 @@ class Trainer:
                     self.train_loader, desc=f"Epoch {epoch} [train]", ncols=100
                 )
             for index, data in enumerate(data_iter, start=1):
-                data, labels = data_mask(data)
+                # 跳过已完成的iteration
+                if epoch == start_epoch and index < getattr(self, "iteration", 1):
+                    continue
+                gene = data["gene"]
+                labels = data["expr"]
+                masked_expr = data["masked_expr"]
                 is_accumulated = index % self.args.grad_acc != 0
                 if is_accumulated:
                     with self.fabric.no_backward_sync(
                         self.model, enabled=is_accumulated
                     ):
-                        logits = self.model(data)
+                        gene_emb, expr_emb = self.model(gene, masked_expr)
+                        logits = expr_emb
                         loss = (
-                            self.loss_fn(logits.transpose(1, 2), labels)
+                            self.loss_fn(logits.transpose(1, 2), labels.long())
                             / self.args.grad_acc
                         )
                         self.fabric.backward(loss)
@@ -224,9 +277,11 @@ class Trainer:
                             f"[Epoch {epoch}] Iter {index} | Loss: "
                             f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
                         )
-                    logits = self.model(data)
+                    logits = self.model(gene, masked_expr)
+                    if isinstance(logits, tuple):
+                        logits = logits[0]
                     loss = (
-                        self.loss_fn(logits.transpose(1, 2), labels)
+                        self.loss_fn(logits.transpose(1, 2), labels.long())
                         / self.args.grad_acc
                     )
                     self.fabric.backward(loss)
@@ -234,7 +289,7 @@ class Trainer:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                 running_loss += loss.item()
-                final = self.softmax(logits)[..., 1:-1].argmax(dim=-1) + 1
+                final = self.softmax(logits).argmax(dim=-1)
                 pred_num = (labels != self.args.num_bin + 1).sum(dim=-1)
                 correct_num = (
                     (labels != self.args.num_bin + 1) * (final == labels)
@@ -256,6 +311,8 @@ class Trainer:
                         self.fabric,
                         iteration=index,
                     )
+            # 每个epoch结束后重置iteration
+            self.iteration = 1
             epoch_loss = get_reduced_with_fabric(running_loss / index, self.fabric)
             epoch_acc = get_reduced_with_fabric(100 * cum_acc / index, self.fabric)
             if self.is_master:

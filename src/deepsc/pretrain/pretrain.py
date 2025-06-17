@@ -36,8 +36,6 @@ def pretrain(cfg: DictConfig):
     trainer = Trainer(cfg, fabric=fabric, model=model)
     trainer.train()
 
-    print(f"run in {cfg.fabric.global_rank}")
-
 
 if __name__ == "__main__":
     pretrain()
