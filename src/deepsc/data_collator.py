@@ -31,18 +31,24 @@ class DataCollator:
             of the sequence to keep unchanged from sampling. This is useful when
             special tokens have been added to the beginning of the sequence.
             Default to 1.
+        gene_from_zero (:obj:`bool`): whether to add 1 to gene tokens and set pad_token_id to 0.
     """
 
+    num_genes: int = 34682
     do_padding: bool = True
-    pad_token_id: Optional[int] = None
+    num_bins: int = 50
+    pad_token_id: int = 0
     pad_value: int = 0
+    mask_value: int = num_bins + 2
+    cls_token_id: int = num_genes + 1
+    cls_value: int = num_bins + 1
     do_mlm: bool = True
     do_binning: bool = True
     mlm_probability: float = 0.15
-    mask_value: int = 0
     max_length: Optional[int] = None
     sampling: bool = True
     keep_first_n_tokens: int = 1
+    gene_from_zero: bool = True
 
     def __post_init__(self):
         if self.do_padding:
@@ -50,7 +56,6 @@ class DataCollator:
                 raise ValueError("`pad_token_id` is required if `do_padding`.")
             if self.max_length is None:
                 raise ValueError("`max_length` is required if `do_padding`.")
-
         if self.mlm_probability <= 0 or self.mlm_probability >= 1:
             raise ValueError("`mlm_probability` must be between 0 and 1.")
 
@@ -79,12 +84,33 @@ class DataCollator:
         for i in range(len(examples)):
             genes = examples[i]["genes"]
             expressions = examples[i]["expressions"]
+            if self.gene_from_zero:
+                genes = genes + 1
             if self.do_binning:
                 expressions[self.keep_first_n_tokens :] = binning(
                     row=expressions[self.keep_first_n_tokens :],
-                    n_bins=50,
+                    n_bins=self.num_bins,
                 )
+                expressions = expressions + 1
                 expressions = expressions.long()
+            genes = torch.cat(
+                [
+                    torch.tensor(
+                        [self.cls_token_id], dtype=genes.dtype, device=genes.device
+                    ),
+                    genes,
+                ]
+            )
+            expressions = torch.cat(
+                [
+                    torch.tensor(
+                        [self.cls_value],
+                        dtype=expressions.dtype,
+                        device=expressions.device,
+                    ),
+                    expressions,
+                ]
+            )
             genes, expressions = self._sample_or_truncate_plus_pad(
                 genes, expressions, _max_length
             )  # torch tensors of length _max_length
@@ -100,14 +126,31 @@ class DataCollator:
 
         # mask
         if self.do_mlm:
-            masked_expressions = self._mask(padded_expressions)
+            masked_expressions, mask = self._mask(padded_expressions, return_mask=True)
         else:
             masked_expressions = padded_expressions
+            mask = torch.zeros_like(padded_expressions, dtype=torch.bool)
         data_dict["masked_expr"] = masked_expressions
+
+        # 检查 masked_expr 的第二维的第一个数是否为 51
+        if (
+            data_dict["masked_expr"].shape[1] == 0
+            or data_dict["masked_expr"][0, 0].item() != 51
+        ):
+            raise ValueError(
+                f"masked_expr 的第二维的第一个数不是 51，而是 {data_dict['masked_expr'][0, 0].item()}"
+            )
+
+        # 新增 label: mask 位置为原始 expression，其他为 -100
+        label = torch.full_like(padded_expressions, -100)
+        label[mask] = padded_expressions[mask]
+        data_dict["label"] = label
 
         return data_dict
 
-    def _mask(self, expressions: torch.Tensor) -> torch.Tensor:
+    def _mask(
+        self, expressions: torch.Tensor, return_mask: bool = False
+    ) -> torch.Tensor:
         """
         Mask the expression values with MLM.
         """
@@ -124,6 +167,8 @@ class DataCollator:
         mask = mask.to(device)
 
         masked_expressions = expressions.masked_fill(mask, self.mask_value)
+        if return_mask:
+            return masked_expressions, mask
         return masked_expressions
 
     def _sample_or_truncate_plus_pad(

@@ -20,10 +20,6 @@ def main(cfg):
     gene_ids = torch.randint(0, cfg.model.num_genes, (batch_size, g))
     expression = torch.rand(batch_size, g)
 
-    gene_emb, expr_emb = model(gene_ids, expression)
-    print(f"gene_emb shape: {gene_emb.shape}")
-    print(f"expr_emb shape: {expr_emb.shape}")
-
     # 统计可学习参数数量
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total number of learnable parameters: {total_params}")

@@ -14,11 +14,12 @@ class GeneEmbedding(nn.Module):
     - 调控关系：转录因子与其靶基因之间的关系
     """
 
+    # num_genes 是基因数量，包括<cls>和<pad>
     def __init__(self, embedding_dim: int, num_genes: int):
         super(GeneEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.gene_embedding = nn.Embedding(
-            num_embeddings=num_genes, embedding_dim=embedding_dim
+            num_embeddings=num_genes + 2, embedding_dim=embedding_dim
         )
 
     def forward(self, gene_ids: torch.Tensor) -> torch.Tensor:
@@ -43,7 +44,8 @@ class ExpressionEmbedding(nn.Module):
     2. 分层表达嵌入
     """
 
-    def __init__(self, embedding_dim: int, num_bins: int = 50, alpha: float = 0.1):
+    # num_bins 是bin数量，包括<cls>和<pad>以及<mask>
+    def __init__(self, embedding_dim: int, num_bins: int = 53, alpha: float = 0.1):
         """
         Args:
             embedding_dim: 嵌入维度 d
@@ -56,7 +58,7 @@ class ExpressionEmbedding(nn.Module):
 
         # 离散表达水平的嵌入矩阵 W_bin ∈ R^{d×N}
         self.bin_embedding = nn.Embedding(
-            num_embeddings=num_bins, embedding_dim=embedding_dim
+            num_embeddings=num_bins + 3, embedding_dim=embedding_dim
         )
 
     def forward(self, expression: torch.Tensor) -> torch.Tensor:
@@ -325,8 +327,9 @@ class DeepSC(nn.Module):
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
+        self.classifier = nn.Linear(embedding_dim, num_bins)  # 新增分类头
 
-    def forward(self, gene_ids, expression):
+    def forward(self, gene_ids, expression, return_encodings=False):
         """
         gene_ids: (batch, g)  # 基因ID序列
         expression: (batch, g)  # 表达量
@@ -341,4 +344,8 @@ class DeepSC(nn.Module):
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, M)
             else:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
-        return gene_emb, expr_emb
+        if return_encodings:
+            return gene_emb, expr_emb
+        logits = expr_emb @ self.expr_embedding.bin_embedding.weight.t()
+        # 暂时只有mlm任务，所以直接返回logits
+        return logits

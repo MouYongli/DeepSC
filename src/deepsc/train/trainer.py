@@ -98,7 +98,7 @@ class Trainer:
             self.train_dataset,
             batch_size=self.args.batch_size,
             sampler=self.train_sampler,
-            num_workers=32,
+            num_workers=64,
             collate_fn=DataCollator(
                 do_padding=True,
                 pad_token_id=0,
@@ -106,6 +106,7 @@ class Trainer:
                 do_mlm=True,
                 do_binning=True,
                 max_length=1000,
+                num_genes=self.args.model.num_genes,
             ),
         )
         val_loader = DataLoader(
@@ -120,6 +121,7 @@ class Trainer:
                 do_mlm=True,
                 do_binning=True,
                 max_length=1000,
+                num_genes=self.args.model.num_genes,
             ),
         )
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
@@ -155,27 +157,26 @@ class Trainer:
             warmup_steps=5,
             gamma=0.9,
         )
-        self.loss_fn = nn.CrossEntropyLoss(
-            ignore_index=args.num_bin + 1, reduction="mean"
-        )
+        self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100, reduction="mean")
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
-    def validate(self, epoch):
+    def validate(self, epoch, iteration=0):
         self.model.eval()
         running_loss, predictions, truths = 0.0, [], []
         with torch.no_grad():
             data_iter = self.val_loader
             if self.is_master:
                 data_iter = tqdm(
-                    self.val_loader, desc=f"Epoch {epoch} [val]", ncols=100
+                    self.val_loader,
+                    desc=f"Epoch {epoch} [val] Iter {iteration}",
+                    ncols=100,
                 )
             for index, data in enumerate(data_iter):
                 gene = data["gene"]
                 labels = data["expr"]
                 masked_expr = data["masked_expr"]
-                gene_emb, expr_emb = self.model(gene, masked_expr)
-                logits = expr_emb
+                logits = self.model(gene, masked_expr)
                 loss = self.loss_fn(logits.transpose(1, 2), labels.long())
                 running_loss += loss.item()
                 final = self.softmax(logits).argmax(dim=-1)
@@ -208,7 +209,7 @@ class Trainer:
                 wandb.log({"val/loss": val_loss, "val/acc": val_acc, "epoch": epoch})
                 wandb.alert(
                     title="Validation",
-                    text=f"Validation Epoch {epoch} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%",
+                    text=f"Validation Epoch {epoch} Iter {iteration} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%",
                 )
 
     def checkpoint_reload(self) -> bool:
@@ -257,20 +258,26 @@ class Trainer:
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
                 gene = data["gene"]
-                labels = data["expr"]
+                labels = data["label"]
                 masked_expr = data["masked_expr"]
                 is_accumulated = index % self.args.grad_acc != 0
                 if is_accumulated:
                     with self.fabric.no_backward_sync(
                         self.model, enabled=is_accumulated
                     ):
-                        gene_emb, expr_emb = self.model(gene, masked_expr)
-                        logits = expr_emb
+                        logits = self.model(gene, masked_expr)
                         loss = (
                             self.loss_fn(logits.transpose(1, 2), labels.long())
                             / self.args.grad_acc
                         )
                         self.fabric.backward(loss)
+                    # if self.is_master:
+                    #     for name, param in self.model.named_parameters():
+                    #         if param.grad is not None:
+                    #             print(f"{name} grad mean: {param.grad.mean().item()}
+                    # , grad std: {param.grad.std().item()}")
+                    #         else:
+                    #             print(f"{name} grad is None")
                 else:
                     if self.is_master:
                         logging.info(
@@ -278,8 +285,6 @@ class Trainer:
                             f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
                         )
                     logits = self.model(gene, masked_expr)
-                    if isinstance(logits, tuple):
-                        logits = logits[0]
                     loss = (
                         self.loss_fn(logits.transpose(1, 2), labels.long())
                         / self.args.grad_acc
@@ -300,6 +305,7 @@ class Trainer:
                         loss=running_loss / index, acc=100 * cum_acc / index
                     )
                 if index % self.args.save_ckpt_every == 0:
+                    self.validate(epoch, index)
                     save_ckpt_fabric(
                         epoch,
                         self.model,
