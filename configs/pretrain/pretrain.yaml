@@ -8,15 +8,15 @@ wandb_project: "DeepSC"
 data_path: "/home/angli/baseline/DeepSC/data/cellxgene/intestine_partition_0_sparse.pth"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 4
+num_device: 2
 valid_every: 1
 model_name: "scbert"
 grad_acc: 20
-learning_rate: 1e-1
-epoch: 8
+learning_rate: 5e-4
+epoch: 20
 batch_size: 10
-num_bin: 5
-save_ckpt_every: 100
+num_bin: 8
+save_ckpt_every: 1000
 
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/

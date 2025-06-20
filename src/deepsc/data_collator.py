@@ -34,14 +34,11 @@ class DataCollator:
         gene_from_zero (:obj:`bool`): whether to add 1 to gene tokens and set pad_token_id to 0.
     """
 
+    num_bins: int
     num_genes: int = 34682
     do_padding: bool = True
-    num_bins: int = 50
     pad_token_id: int = 0
     pad_value: int = 0
-    mask_value: int = num_bins + 2
-    cls_token_id: int = num_genes + 1
-    cls_value: int = num_bins + 1
     do_mlm: bool = True
     do_binning: bool = True
     mlm_probability: float = 0.15
@@ -51,6 +48,9 @@ class DataCollator:
     gene_from_zero: bool = True
 
     def __post_init__(self):
+        self.mask_value = self.num_bins + 2
+        self.cls_token_id = self.num_genes + 1
+        self.cls_value = self.num_bins + 1
         if self.do_padding:
             if self.pad_token_id is None:
                 raise ValueError("`pad_token_id` is required if `do_padding`.")
@@ -87,12 +87,12 @@ class DataCollator:
             if self.gene_from_zero:
                 genes = genes + 1
             if self.do_binning:
-                expressions[self.keep_first_n_tokens :] = binning(
-                    row=expressions[self.keep_first_n_tokens :],
+                expressions = binning(
+                    row=expressions,
                     n_bins=self.num_bins,
                 )
-                expressions = expressions + 1
                 expressions = expressions.long()
+                expressions = expressions + 1
             genes = torch.cat(
                 [
                     torch.tensor(
@@ -118,7 +118,6 @@ class DataCollator:
             padded_expressions.append(expressions)
         padded_genes = torch.stack(padded_genes, dim=0)
         padded_expressions = torch.stack(padded_expressions, dim=0)
-
         data_dict = {
             "gene": padded_genes,
             "expr": padded_expressions,
@@ -135,10 +134,10 @@ class DataCollator:
         # 检查 masked_expr 的第二维的第一个数是否为 51
         if (
             data_dict["masked_expr"].shape[1] == 0
-            or data_dict["masked_expr"][0, 0].item() != 51
+            or data_dict["masked_expr"][0, 0].item() != self.num_bins + 1
         ):
             raise ValueError(
-                f"masked_expr 的第二维的第一个数不是 51，而是 {data_dict['masked_expr'][0, 0].item()}"
+                f"masked_expr 的第二维的第一个数不是 {self.num_bins+1}，而是 {data_dict['masked_expr'][0, 0].item()}"
             )
 
         # 新增 label: mask 位置为原始 expression，其他为 -100

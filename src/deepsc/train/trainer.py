@@ -107,6 +107,7 @@ class Trainer:
                 do_binning=True,
                 max_length=1000,
                 num_genes=self.args.model.num_genes,
+                num_bins=self.args.model.num_bins,
             ),
         )
         val_loader = DataLoader(
@@ -122,6 +123,7 @@ class Trainer:
                 do_binning=True,
                 max_length=1000,
                 num_genes=self.args.model.num_genes,
+                num_bins=self.args.model.num_bins,
             ),
         )
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
@@ -157,7 +159,7 @@ class Trainer:
             warmup_steps=5,
             gamma=0.9,
         )
-        self.loss_fn = nn.CrossEntropyLoss(ignore_index=-100, reduction="mean")
+        self.loss_fn = nn.CrossEntropyLoss(reduction="mean")
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
@@ -174,10 +176,17 @@ class Trainer:
                 )
             for index, data in enumerate(data_iter):
                 gene = data["gene"]
-                labels = data["expr"]
+                labels = data["label"]
                 masked_expr = data["masked_expr"]
-                logits = self.model(gene, masked_expr)
-                loss = self.loss_fn(logits.transpose(1, 2), labels.long())
+                logits, y = self.model(gene, masked_expr, return_mask_prob=True)
+                loss = self.loss_fn(logits.transpose(1, 2), labels)
+                lambda_ = 1e-4
+                l0_loss = (
+                    lambda_
+                    * (y[..., 0].abs().sum() + y[..., 2].abs().sum())
+                    / y.numel()
+                )
+                loss = loss + l0_loss
                 running_loss += loss.item()
                 final = self.softmax(logits).argmax(dim=-1)
                 predictions.append(final)
@@ -192,19 +201,19 @@ class Trainer:
                 len(self.val_sampler.dataset),
                 self.world_size,
             )
+
             truths = distributed_concat(
                 torch.cat(truths, dim=0), len(self.val_sampler.dataset), self.world_size
             )
-            correct_num = (
-                ((truths != self.args.num_bin + 1) * (predictions == truths))
-                .sum()
-                .item()
-            )
-            val_num = (truths != self.args.num_bin + 1).sum().item()
+            correct_num = ((truths != -100) * (predictions == truths)).sum().item()
+            val_num = (truths != -100).sum().item()
             val_loss = get_reduced_with_fabric(
                 running_loss / len(self.val_loader), self.fabric
             )
             val_acc = 100 * correct_num / val_num
+            logging.info(
+                f"Validation Epoch {epoch} Iter {iteration} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%"
+            )
             if self.is_master:
                 wandb.log({"val/loss": val_loss, "val/acc": val_acc, "epoch": epoch})
                 wandb.alert(
@@ -265,40 +274,41 @@ class Trainer:
                     with self.fabric.no_backward_sync(
                         self.model, enabled=is_accumulated
                     ):
-                        logits = self.model(gene, masked_expr)
+                        logits, y = self.model(gene, masked_expr, return_mask_prob=True)
                         loss = (
-                            self.loss_fn(logits.transpose(1, 2), labels.long())
+                            self.loss_fn(logits.transpose(1, 2), labels)
                             / self.args.grad_acc
                         )
+                        lambda_ = 1e-3
+                        l0_loss = (
+                            y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                        ) / y.numel()
+                        loss = (1 - lambda_) * loss + lambda_ * l0_loss
                         self.fabric.backward(loss)
-                    # if self.is_master:
-                    #     for name, param in self.model.named_parameters():
-                    #         if param.grad is not None:
-                    #             print(f"{name} grad mean: {param.grad.mean().item()}
-                    # , grad std: {param.grad.std().item()}")
-                    #         else:
-                    #             print(f"{name} grad is None")
                 else:
                     if self.is_master:
                         logging.info(
                             f"[Epoch {epoch}] Iter {index} | Loss: "
                             f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
                         )
-                    logits = self.model(gene, masked_expr)
+                    logits, y = self.model(gene, masked_expr, return_mask_prob=True)
                     loss = (
-                        self.loss_fn(logits.transpose(1, 2), labels.long())
+                        self.loss_fn(logits.transpose(1, 2), labels)
                         / self.args.grad_acc
                     )
+                    lambda_ = 1e-3
+                    l0_loss = (
+                        y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                    ) / y.numel()
+                    loss = (1 - lambda_) * loss + lambda_ * l0_loss
                     self.fabric.backward(loss)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                 running_loss += loss.item()
                 final = self.softmax(logits).argmax(dim=-1)
-                pred_num = (labels != self.args.num_bin + 1).sum(dim=-1)
-                correct_num = (
-                    (labels != self.args.num_bin + 1) * (final == labels)
-                ).sum(dim=-1)
+                pred_num = (labels != -100).sum(dim=-1)
+                correct_num = ((labels != -100) * (final == labels)).sum(dim=-1)
                 cum_acc += torch.true_divide(correct_num, pred_num).mean().item()
                 if self.is_master:
                     data_iter.set_postfix(

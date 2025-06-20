@@ -19,7 +19,7 @@ class GeneEmbedding(nn.Module):
         super(GeneEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.gene_embedding = nn.Embedding(
-            num_embeddings=num_genes + 2, embedding_dim=embedding_dim
+            num_embeddings=num_genes + 2, embedding_dim=embedding_dim, padding_idx=0
         )
 
     def forward(self, gene_ids: torch.Tensor) -> torch.Tensor:
@@ -45,7 +45,7 @@ class ExpressionEmbedding(nn.Module):
     """
 
     # num_bins 是bin数量，包括<cls>和<pad>以及<mask>
-    def __init__(self, embedding_dim: int, num_bins: int = 53, alpha: float = 0.1):
+    def __init__(self, embedding_dim: int, num_bins: int = 50, alpha: float = 0.1):
         """
         Args:
             embedding_dim: 嵌入维度 d
@@ -55,10 +55,9 @@ class ExpressionEmbedding(nn.Module):
         super(ExpressionEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.num_bins = num_bins
-
         # 离散表达水平的嵌入矩阵 W_bin ∈ R^{d×N}
         self.bin_embedding = nn.Embedding(
-            num_embeddings=num_bins + 3, embedding_dim=embedding_dim
+            num_embeddings=num_bins + 3, embedding_dim=embedding_dim, padding_idx=0
         )
 
     def forward(self, expression: torch.Tensor) -> torch.Tensor:
@@ -72,7 +71,6 @@ class ExpressionEmbedding(nn.Module):
             expr_embeddings: 表达量嵌入 E_expr ∈ R^{g×d}, shape: (batch_size, g, d)
         """
         expr_embeddings = self.bin_embedding(expression)
-
         return expr_embeddings
 
 
@@ -101,11 +99,13 @@ class CategoricalGumbelSoftmax(nn.Module):
         self.hard = hard
         self.temperature = temperature
         # 只保留MLP
-        self.gumbel_softmax_reparametrization = nn.Linear(
-            2 * embedding_dim, num_categories
+        self.gumbel_softmax_reparametrization = nn.Sequential(
+            nn.Linear(2 * embedding_dim, embedding_dim),
+            nn.ReLU(),
+            nn.Linear(embedding_dim, num_categories),
         )
 
-    def forward(self, gene_emb: torch.Tensor) -> torch.Tensor:
+    def forward(self, gene_emb: torch.Tensor):
         """
         Args:
             gene_emb: 基因嵌入, shape: (batch, g, d)
@@ -127,9 +127,10 @@ class CategoricalGumbelSoftmax(nn.Module):
             logits, tau=self.temperature, hard=self.hard, dim=-1
         )  # (batch, g, g, 3)
         M = y[..., 0] * (-1) + y[..., 1] * 0 + y[..., 2] * (+1)  # (batch, g, g)
-        return M
+        return M, y
 
 
+# TODO： 这里对V的操作有些冗余，其实可以直接用multi_head_attention_forward这个函数，虽然复杂了些，但是能够减少一个V的计算。稍后再做
 class GeneAttentionLayer(nn.Module):
     def __init__(self, d, num_heads, attn_dropout=0.1):
         super().__init__()
@@ -305,7 +306,7 @@ class DeepSC(nn.Module):
         attn_dropout=0.1,
         ffn_dropout=0.1,
         fused=True,
-        num_bins=50,
+        num_bins=8,
         alpha=0.1,
         mask_layer_start=None,
     ):
@@ -327,9 +328,12 @@ class DeepSC(nn.Module):
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
-        self.classifier = nn.Linear(embedding_dim, num_bins)  # 新增分类头
+        self.classifier = nn.Linear(embedding_dim, num_bins + 1)
+        self.regressor = nn.Linear(embedding_dim, 1)
 
-    def forward(self, gene_ids, expression, return_encodings=False):
+    def forward(
+        self, gene_ids, expression, return_encodings=False, return_mask_prob=True
+    ):
         """
         gene_ids: (batch, g)  # 基因ID序列
         expression: (batch, g)  # 表达量
@@ -337,7 +341,7 @@ class DeepSC(nn.Module):
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression)  # (batch, g, d)
-        M = self.gumbel_softmax(gene_emb)  # (batch, g, g)
+        M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
         num_layers = len(self.layers)
         for i, layer in enumerate(self.layers):
             if i >= self.mask_layer_start:
@@ -346,6 +350,7 @@ class DeepSC(nn.Module):
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
         if return_encodings:
             return gene_emb, expr_emb
-        logits = expr_emb @ self.expr_embedding.bin_embedding.weight.t()
-        # 暂时只有mlm任务，所以直接返回logits
-        return logits
+        # TODO: 是否需要去掉CLS token？ 我这里没有去掉，因为在它label里面是-100，所以被loss函数忽略了
+        logits = self.classifier(expr_emb)
+        regression_output = self.regressor(expr_emb)
+        return logits, regression_output, y

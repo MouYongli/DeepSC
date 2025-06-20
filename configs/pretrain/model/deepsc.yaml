@@ -5,7 +5,7 @@ num_layers: 10
 attn_dropout: 0.1
 ffn_dropout: 0.1
 fused: true
-num_bins: 50
+num_bins: 20
 alpha: 0.1
 num_heads: 8
-mask_layer_start: 10
+mask_layer_start: 9
