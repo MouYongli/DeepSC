@@ -29,6 +29,28 @@ class SCDataset(Dataset):
         return self.num_samples
 
 
+class GeneExpressionDataset(Dataset):
+    def __init__(self, coo_tensor, num_bin=50):
+        assert (
+            coo_tensor.layout == torch.sparse_coo
+        ), "Input must be a sparse COO tensor"
+        self.coo_tensor = coo_tensor.coalesce()
+        self.num_samples = coo_tensor.shape[0]
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        # 获取所有非零元素的索引和数值
+        indices = self.coo_tensor.indices()
+        values = self.coo_tensor.values()
+        # 找到属于第idx行的元素
+        mask = indices[0] == idx
+        gene_indices = indices[1, mask]
+        expression_values = values[mask]
+        return {"genes": gene_indices, "expressions": expression_values}
+
+
 # 直接将gene count 进行normalize, 避免转成anndata然后再转回去
 def normalize_tensor(csr):
     valid_cells = np.diff(csr.indptr) >= 200

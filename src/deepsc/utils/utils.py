@@ -514,3 +514,36 @@ class LabelSmoothCrossEntropyLoss(_WeightedLoss):
             loss = loss.mean()
 
         return loss
+
+
+def masked_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    reduction: str = "mean",
+):
+    """
+    计算只在 mask=True 的位置上的 MSE Loss。
+
+    Args:
+        pred (Tensor): 模型输出，shape = (B, T)
+        target (Tensor): 目标值，shape = (B, T)
+        mask (BoolTensor): 掩码，True 表示需要计算的位置
+        reduction (str): "mean"、"sum" 或 "none"
+
+    Returns:
+        Tensor: loss 值
+    """
+    loss_fn = nn.MSELoss(reduction="none")
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    masked_loss = elementwise_loss[mask]  # 只取被掩码的部分
+
+    if reduction == "mean":
+        return masked_loss.mean()
+    elif reduction == "sum":
+        return masked_loss.sum()
+    elif reduction == "none":
+        return masked_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
