@@ -166,6 +166,10 @@ class Trainer:
     def validate(self, epoch, iteration=0):
         self.model.eval()
         running_loss, predictions, truths = 0.0, [], []
+        batch_accs = []  # 新增：用于存储每个batch的mean acc
+        l0_lambda = self.args.l0_lambda
+        ce_loss_weight = self.args.ce_loss_weight
+        mse_loss_weight = self.args.mse_loss_weight
         with torch.no_grad():
             data_iter = self.val_loader
             if self.is_master:
@@ -178,19 +182,29 @@ class Trainer:
                 gene = data["gene"]
                 labels = data["label"]
                 masked_expr = data["masked_expr"]
-                logits, y = self.model(gene, masked_expr, return_mask_prob=True)
-                loss = self.loss_fn(logits.transpose(1, 2), labels)
-                lambda_ = 1e-4
-                l0_loss = (
-                    lambda_
-                    * (y[..., 0].abs().sum() + y[..., 2].abs().sum())
-                    / y.numel()
+                expression_label = data["expression_label"]
+                logits, regression_output, y = self.model(
+                    gene, masked_expr, return_mask_prob=True
                 )
-                loss = loss + l0_loss
+                cross_entropy_loss = self.loss_fn(logits.transpose(1, 2), labels)
+                l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
+                mse_loss = masked_mse_loss(
+                    regression_output, expression_label, data["mask"], reduction="mean"
+                )
+                loss = (
+                    ce_loss_weight * cross_entropy_loss
+                    + mse_loss_weight * mse_loss
+                    + l0_lambda * l0_loss
+                )
                 running_loss += loss.item()
                 final = self.softmax(logits).argmax(dim=-1)
                 predictions.append(final)
                 truths.append(labels)
+                # 统计 batch mean acc
+                pred_num = (labels != -100).sum(dim=-1)
+                correct_num = ((labels != -100) * (final == labels)).sum(dim=-1)
+                batch_acc = torch.true_divide(correct_num, pred_num).mean().item()
+                batch_accs.append(batch_acc)
                 if self.is_master:
                     data_iter.set_postfix(loss=running_loss / (index + 1))
 
@@ -205,12 +219,11 @@ class Trainer:
             truths = distributed_concat(
                 torch.cat(truths, dim=0), len(self.val_sampler.dataset), self.world_size
             )
-            correct_num = ((truths != -100) * (predictions == truths)).sum().item()
-            val_num = (truths != -100).sum().item()
+            # 不再用全局统计acc，改为batch mean
             val_loss = get_reduced_with_fabric(
                 running_loss / len(self.val_loader), self.fabric
             )
-            val_acc = 100 * correct_num / val_num
+            val_acc = 100 * np.mean(batch_accs)
             logging.info(
                 f"Validation Epoch {epoch} Iter {iteration} | Loss: {val_loss:.6f} | Acc: {val_acc:.4f}%"
             )
@@ -249,10 +262,13 @@ class Trainer:
 
     def train(self):
         # 尽量不要在for循环内to device
-        self.checkpoint_reload()  # 只在训练开始时reload一次
+        # self.checkpoint_reload()  # 只在训练开始时reload一次
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         if self.args.model_name == "DeepSC":
             self.model = torch.compile(self.model)
+        l0_lambda = self.args.l0_lambda
+        ce_loss_weight = self.args.ce_loss_weight
+        mse_loss_weight = self.args.mse_loss_weight
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
@@ -269,39 +285,58 @@ class Trainer:
                 gene = data["gene"]
                 labels = data["label"]
                 masked_expr = data["masked_expr"]
+                expression_label = data["expression_label"]
                 is_accumulated = index % self.args.grad_acc != 0
                 if is_accumulated:
                     with self.fabric.no_backward_sync(
                         self.model, enabled=is_accumulated
                     ):
-                        logits, y = self.model(gene, masked_expr, return_mask_prob=True)
-                        loss = (
-                            self.loss_fn(logits.transpose(1, 2), labels)
-                            / self.args.grad_acc
+                        logits, regression_output, y = self.model(
+                            gene, masked_expr, return_mask_prob=True
                         )
-                        lambda_ = 1e-3
+                        cross_entropy_loss = self.loss_fn(
+                            logits.transpose(1, 2), labels
+                        )
                         l0_loss = (
                             y[..., 0].abs().sum() + y[..., 2].abs().sum()
                         ) / y.numel()
-                        loss = (1 - lambda_) * loss + lambda_ * l0_loss
-                        self.fabric.backward(loss)
+                        mse_loss = masked_mse_loss(
+                            regression_output,
+                            expression_label,
+                            data["mask"],
+                            reduction="mean",
+                        )
+                        loss = (
+                            ce_loss_weight * cross_entropy_loss
+                            + mse_loss_weight * mse_loss
+                            + l0_lambda * l0_loss
+                        )
+                        self.fabric.backward(loss / self.args.grad_acc)
                 else:
                     if self.is_master:
                         logging.info(
                             f"[Epoch {epoch}] Iter {index} | Loss: "
                             f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
                         )
-                    logits, y = self.model(gene, masked_expr, return_mask_prob=True)
-                    loss = (
-                        self.loss_fn(logits.transpose(1, 2), labels)
-                        / self.args.grad_acc
+                    logits, regression_output, y = self.model(
+                        gene, masked_expr, return_mask_prob=True
                     )
-                    lambda_ = 1e-3
+                    cross_entropy_loss = self.loss_fn(logits.transpose(1, 2), labels)
                     l0_loss = (
                         y[..., 0].abs().sum() + y[..., 2].abs().sum()
                     ) / y.numel()
-                    loss = (1 - lambda_) * loss + lambda_ * l0_loss
-                    self.fabric.backward(loss)
+                    mse_loss = masked_mse_loss(
+                        regression_output,
+                        expression_label,
+                        data["mask"],
+                        reduction="mean",
+                    )
+                    loss = (
+                        ce_loss_weight * cross_entropy_loss
+                        + mse_loss_weight * mse_loss
+                        + l0_lambda * l0_loss
+                    )
+                    self.fabric.backward(loss / self.args.grad_acc)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
@@ -315,6 +350,15 @@ class Trainer:
                         loss=running_loss / index, acc=100 * cum_acc / index
                     )
                 if index % self.args.save_ckpt_every == 0:
+                    if self.is_master:
+                        wandb.log(
+                            {
+                                "train/loss": running_loss / index,
+                                "train/acc": 100 * cum_acc / index,
+                                "epoch": epoch,
+                                "iteration": index,
+                            }
+                        )
                     self.validate(epoch, index)
                     save_ckpt_fabric(
                         epoch,

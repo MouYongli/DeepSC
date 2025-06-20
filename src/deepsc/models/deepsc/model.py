@@ -353,4 +353,5 @@ class DeepSC(nn.Module):
         # TODO: 是否需要去掉CLS token？ 我这里没有去掉，因为在它label里面是-100，所以被loss函数忽略了
         logits = self.classifier(expr_emb)
         regression_output = self.regressor(expr_emb)
+        regression_output = regression_output.squeeze(-1)
         return logits, regression_output, y

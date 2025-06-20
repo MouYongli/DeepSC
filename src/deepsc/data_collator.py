@@ -80,10 +80,11 @@ class DataCollator:
         _max_length = self.max_length if max_ori_len >= self.max_length else max_ori_len
         padded_genes = []
         padded_expressions = []
-
+        padded_expression_label = []
         for i in range(len(examples)):
             genes = examples[i]["genes"]
             expressions = examples[i]["expressions"]
+            expression_label = expressions.clone().float()
             if self.gene_from_zero:
                 genes = genes + 1
             if self.do_binning:
@@ -111,16 +112,29 @@ class DataCollator:
                     expressions,
                 ]
             )
-            genes, expressions = self._sample_or_truncate_plus_pad(
-                genes, expressions, _max_length
+            expression_label = torch.cat(
+                [
+                    torch.tensor(
+                        [self.cls_value],
+                        dtype=expression_label.dtype,
+                        device=expression_label.device,
+                    ),
+                    expression_label,
+                ]
+            )
+            genes, expressions, expression_label = self._sample_or_truncate_plus_pad(
+                genes, expressions, expression_label, _max_length
             )  # torch tensors of length _max_length
             padded_genes.append(genes)
             padded_expressions.append(expressions)
+            padded_expression_label.append(expression_label)
         padded_genes = torch.stack(padded_genes, dim=0)
         padded_expressions = torch.stack(padded_expressions, dim=0)
+        padded_expression_label = torch.stack(padded_expression_label, dim=0)
         data_dict = {
             "gene": padded_genes,
             "expr": padded_expressions,
+            "expression_label": padded_expression_label,
         }
 
         # mask
@@ -144,7 +158,7 @@ class DataCollator:
         label = torch.full_like(padded_expressions, -100)
         label[mask] = padded_expressions[mask]
         data_dict["label"] = label
-
+        data_dict["mask"] = mask
         return data_dict
 
     def _mask(
@@ -174,23 +188,29 @@ class DataCollator:
         self,
         genes: torch.LongTensor,
         expressions: torch.Tensor,
+        expression_label: torch.Tensor,
         max_length: int,
     ) -> Tuple[torch.LongTensor, torch.Tensor]:
         assert len(genes) == len(expressions)
         if len(genes) == max_length:
-            return genes, expressions
+            return genes, expressions, expression_label
         if len(genes) > max_length:  # sample or truncate
             if self.sampling:
-                return self._sample(genes, expressions, max_length)
+                return self._sample(genes, expressions, expression_label, max_length)
             else:
-                return genes[:max_length], expressions[:max_length]
+                return (
+                    genes[:max_length],
+                    expressions[:max_length],
+                    expression_label[:max_length],
+                )
         else:  # pad
-            return self._pad(genes, expressions, max_length)
+            return self._pad(genes, expressions, expression_label, max_length)
 
     def _sample(
         self,
         genes: torch.LongTensor,
         expressions: torch.Tensor,
+        expression_label: torch.Tensor,
         max_length: int,
     ) -> Tuple[torch.LongTensor, torch.Tensor]:
         # NOTE: the fastest way to sample in torch has been benchmarked here
@@ -201,18 +221,19 @@ class DataCollator:
         device = genes.device
         if self.keep_first_n_tokens == 0:
             indices = torch.randperm(len(genes), device=device)[:max_length]
-            return genes[indices], expressions[indices]
+            return genes[indices], expressions[indices], expression_label[indices]
 
         # keep the first n tokens unchanged
         _n = self.keep_first_n_tokens
         indices = torch.randperm(len(genes) - _n, device=device)[: max_length - _n]
         indices = torch.cat([torch.arange(_n), indices + _n], dim=0)
-        return genes[indices], expressions[indices]
+        return genes[indices], expressions[indices], expression_label[indices]
 
     def _pad(
         self,
         genes: torch.LongTensor,
         expressions: torch.Tensor,
+        expression_label: torch.Tensor,
         max_length: int,
     ):
         device = genes.device
@@ -238,7 +259,18 @@ class DataCollator:
                 ),
             ]
         )
-        return genes, expressions
+        expression_label = torch.cat(
+            [
+                expression_label,
+                torch.full(
+                    (max_length - len(expression_label),),
+                    self.pad_value,
+                    dtype=expression_label.dtype,
+                    device=device,
+                ),
+            ]
+        )
+        return genes, expressions, expression_label
 
     def _truncate_by_expression(
         self,

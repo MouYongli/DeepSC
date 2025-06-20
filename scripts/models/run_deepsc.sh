@@ -1,13 +1,22 @@
-#!/usr/bin/zsh
+#!/usr/bin/env bash
 
-# 使用物理编号为 2 和 3 的 GPU
-export CUDA_VISIBLE_DEVICES=2,3
-export OMP_NUM_THREADS=64
+GPUS=(1 2 3)
+LEARNING_RATES=(0.0001 0.0005 0.001 0.005 0.01 0.05 0.1)
 
-NUM_GPUS=2 # ✅ 实际你要用的 GPU 数量
-MASTER_PORT=12625
+NUM_GPUS=${#GPUS[@]}
+NUM_LR=${#LEARNING_RATES[@]}
 
-PYTHONPATH=src torchrun \
-  --nproc_per_node=$NUM_GPUS \
-  --master_port=$MASTER_PORT \
-  -m deepsc.pretrain.pretrain
+for ((idx=0; idx<NUM_LR; idx++)); do
+  lr=${LEARNING_RATES[$idx]}
+  gpu_idx=$(( idx % NUM_GPUS ))
+  gpu=${GPUS[$gpu_idx]}
+  echo "Running lr=$lr on GPU $gpu"
+  CUDA_VISIBLE_DEVICES=$gpu \
+    PYTHONPATH=src python -m deepsc.pretrain.pretrain learning_rate=$lr &
+  # 控制并发数为GPU数
+  while [ $(jobs -r | wc -l) -ge $NUM_GPUS ]; do
+    sleep 1
+  done
+done
+
+wait

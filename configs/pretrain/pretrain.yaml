@@ -5,15 +5,20 @@ defaults:
 
 wandb_project: "DeepSC"
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/intestine_partition_0_sparse.pth"
+# Loss weights
+l0_lambda: 0.01
+ce_loss_weight: 1.0
+mse_loss_weight: 0.1
+
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_normalized/intestine_partition_0_sparse.pth"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 2
+num_device: 1
 valid_every: 1
 model_name: "scbert"
 grad_acc: 20
 learning_rate: 5e-4
-epoch: 20
+epoch: 8
 batch_size: 10
 num_bin: 8
 save_ckpt_every: 1000
