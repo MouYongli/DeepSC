@@ -309,6 +309,9 @@ class DeepSC(nn.Module):
         num_bins=8,
         alpha=0.1,
         mask_layer_start=None,
+        enable_l0=True,
+        enable_mse=True,
+        enable_ce=True,
     ):
         super().__init__()
         self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
@@ -328,8 +331,13 @@ class DeepSC(nn.Module):
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
-        self.classifier = nn.Linear(embedding_dim, num_bins + 1)
+        self.classifier = nn.Linear(embedding_dim, num_bins)
         self.regressor = nn.Linear(embedding_dim, 1)
+        self.enable_l0 = enable_l0
+        self.enable_mse = enable_mse
+        self.enable_ce = enable_ce
+        nn.init.xavier_uniform_(self.classifier.weight)
+        nn.init.zeros_(self.classifier.bias)
 
     def forward(
         self, gene_ids, expression, return_encodings=False, return_mask_prob=True
@@ -352,6 +360,9 @@ class DeepSC(nn.Module):
             return gene_emb, expr_emb
         # TODO: 是否需要去掉CLS token？ 我这里没有去掉，因为在它label里面是-100，所以被loss函数忽略了
         logits = self.classifier(expr_emb)
-        regression_output = self.regressor(expr_emb)
-        regression_output = regression_output.squeeze(-1)
-        return logits, regression_output, y
+        if self.enable_ce and self.enable_mse and self.enable_l0:
+            regression_output = self.regressor(expr_emb)
+            regression_output = regression_output.squeeze(-1)
+            return logits, regression_output, y
+        elif self.enable_ce:
+            return logits, y

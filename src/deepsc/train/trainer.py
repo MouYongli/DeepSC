@@ -98,7 +98,7 @@ class Trainer:
             self.train_dataset,
             batch_size=self.args.batch_size,
             sampler=self.train_sampler,
-            num_workers=64,
+            num_workers=8,
             collate_fn=DataCollator(
                 do_padding=True,
                 pad_token_id=0,
@@ -114,7 +114,7 @@ class Trainer:
             self.val_dataset,
             batch_size=self.args.batch_size,
             sampler=self.val_sampler,
-            num_workers=8,
+            num_workers=4,
             collate_fn=DataCollator(
                 do_padding=True,
                 pad_token_id=0,
@@ -180,29 +180,48 @@ class Trainer:
                 )
             for index, data in enumerate(data_iter):
                 gene = data["gene"]
-                labels = data["label"]
-                masked_expr = data["masked_expr"]
-                expression_label = data["expression_label"]
-                logits, regression_output, y = self.model(
-                    gene, masked_expr, return_mask_prob=True
-                )
-                cross_entropy_loss = self.loss_fn(logits.transpose(1, 2), labels)
-                l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
-                mse_loss = masked_mse_loss(
-                    regression_output, expression_label, data["mask"], reduction="mean"
-                )
-                loss = (
-                    ce_loss_weight * cross_entropy_loss
-                    + mse_loss_weight * mse_loss
-                    + l0_lambda * l0_loss
-                )
+                discrete_expr_label = data["discrete_expr_label"]
+                masked_expr = data["masked_discrete_expr"]
+                expression_label = data["continuous_expr_label"]
+                if self.args.enable_ce and self.args.enable_mse and self.args.enable_l0:
+                    logits, regression_output, y = self.model(
+                        gene, masked_expr, return_mask_prob=True
+                    )
+                    cross_entropy_loss = self.loss_fn(
+                        logits.transpose(1, 2), discrete_expr_label
+                    )
+                    l0_loss = (
+                        y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                    ) / y.numel()
+                    mse_loss = masked_mse_loss(
+                        regression_output,
+                        expression_label,
+                        data["mask"],
+                        reduction="mean",
+                    )
+                    loss = (
+                        ce_loss_weight * cross_entropy_loss
+                        + mse_loss_weight * mse_loss
+                        + l0_lambda * l0_loss
+                    )
+                elif self.args.enable_ce:
+                    logits, y = self.model(gene, masked_expr, return_mask_prob=True)
+                    cross_entropy_loss = self.loss_fn(
+                        logits.transpose(1, 2), discrete_expr_label
+                    )
+                    l0_loss = (
+                        y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                    ) / y.numel()
+                    loss = ce_loss_weight * cross_entropy_loss + l0_lambda * l0_loss
                 running_loss += loss.item()
                 final = self.softmax(logits).argmax(dim=-1)
                 predictions.append(final)
-                truths.append(labels)
+                truths.append(discrete_expr_label)
                 # 统计 batch mean acc
-                pred_num = (labels != -100).sum(dim=-1)
-                correct_num = ((labels != -100) * (final == labels)).sum(dim=-1)
+                pred_num = (discrete_expr_label != -100).sum(dim=-1)
+                correct_num = (
+                    (discrete_expr_label != -100) * (final == discrete_expr_label)
+                ).sum(dim=-1)
                 batch_acc = torch.true_divide(correct_num, pred_num).mean().item()
                 batch_accs.append(batch_acc)
                 if self.is_master:
@@ -279,30 +298,91 @@ class Trainer:
                     self.train_loader, desc=f"Epoch {epoch} [train]", ncols=100
                 )
             for index, data in enumerate(data_iter, start=1):
+
+                # 每个data包含以下key：
+                # gene: 基因id
+                # masked_discrete_expr: 离散表达值掩码 (输入模型)
+                # masked_continuous_expr: 连续表达值掩码 (输入模型)
+                # discrete_expr_label: 离散表达值label （和模型的输出比较）(添加了-100,表明这些位置不参加cross entropy loss)
+                # continuous_expr_label: 连续表达值label （和模型的输出比较）（未添加-100）
+                # mask: 掩码的位置 （用于计算MSE的label，continuous_expr_label使用，在masked_mse函数中使用）
+
                 # 跳过已完成的iteration
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
                 gene = data["gene"]
-                labels = data["label"]
-                masked_expr = data["masked_expr"]
-                expression_label = data["expression_label"]
+                discrete_expr_label = data["discrete_expr_label"]
+                continuous_expr_label = data["continuous_expr_label"]
+                masked_expr = data["masked_discrete_expr"]
                 is_accumulated = index % self.args.grad_acc != 0
                 if is_accumulated:
                     with self.fabric.no_backward_sync(
                         self.model, enabled=is_accumulated
                     ):
+                        if (
+                            self.args.enable_ce
+                            and self.args.enable_mse
+                            and self.args.enable_l0
+                        ):
+                            logits, regression_output, y = self.model(
+                                gene, masked_expr, return_mask_prob=True
+                            )
+                            cross_entropy_loss = self.loss_fn(
+                                logits.transpose(1, 2), discrete_expr_label
+                            )
+                            l0_loss = (
+                                y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                            ) / y.numel()
+                            mse_loss = masked_mse_loss(
+                                regression_output,
+                                continuous_expr_label,
+                                data["mask"],
+                                reduction="mean",
+                            )
+                            loss = (
+                                ce_loss_weight * cross_entropy_loss
+                                + mse_loss_weight * mse_loss
+                                + l0_lambda * l0_loss
+                            )
+                            self.fabric.backward(loss / self.args.grad_acc)
+                        elif self.args.enable_ce:
+                            logits, y = self.model(
+                                gene, masked_expr, return_mask_prob=True
+                            )
+                            cross_entropy_loss = self.loss_fn(
+                                logits.transpose(1, 2), discrete_expr_label
+                            )
+                            l0_loss = (
+                                y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                            ) / y.numel()
+                            loss = (
+                                ce_loss_weight * cross_entropy_loss
+                                + l0_lambda * l0_loss
+                            )
+                            self.fabric.backward(loss / self.args.grad_acc)
+                else:
+                    if self.is_master:
+                        logging.info(
+                            f"[Epoch {epoch}] Iter {index} | Loss: "
+                            f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
+                        )
+                    if (
+                        self.args.enable_ce
+                        and self.args.enable_mse
+                        and self.args.enable_l0
+                    ):
                         logits, regression_output, y = self.model(
                             gene, masked_expr, return_mask_prob=True
                         )
                         cross_entropy_loss = self.loss_fn(
-                            logits.transpose(1, 2), labels
+                            logits.transpose(1, 2), discrete_expr_label
                         )
                         l0_loss = (
                             y[..., 0].abs().sum() + y[..., 2].abs().sum()
                         ) / y.numel()
                         mse_loss = masked_mse_loss(
                             regression_output,
-                            expression_label,
+                            continuous_expr_label,
                             data["mask"],
                             reduction="mean",
                         )
@@ -312,43 +392,33 @@ class Trainer:
                             + l0_lambda * l0_loss
                         )
                         self.fabric.backward(loss / self.args.grad_acc)
-                else:
-                    if self.is_master:
-                        logging.info(
-                            f"[Epoch {epoch}] Iter {index} | Loss: "
-                            f"{running_loss / index:.4f} | Acc: {100 * cum_acc / index:.2f}%"
+                    elif self.args.enable_ce:
+                        logits, y = self.model(gene, masked_expr, return_mask_prob=True)
+                        cross_entropy_loss = self.loss_fn(
+                            logits.transpose(1, 2), discrete_expr_label
                         )
-                    logits, regression_output, y = self.model(
-                        gene, masked_expr, return_mask_prob=True
-                    )
-                    cross_entropy_loss = self.loss_fn(logits.transpose(1, 2), labels)
-                    l0_loss = (
-                        y[..., 0].abs().sum() + y[..., 2].abs().sum()
-                    ) / y.numel()
-                    mse_loss = masked_mse_loss(
-                        regression_output,
-                        expression_label,
-                        data["mask"],
-                        reduction="mean",
-                    )
-                    loss = (
-                        ce_loss_weight * cross_entropy_loss
-                        + mse_loss_weight * mse_loss
-                        + l0_lambda * l0_loss
-                    )
-                    self.fabric.backward(loss / self.args.grad_acc)
+                        l0_loss = (
+                            y[..., 0].abs().sum() + y[..., 2].abs().sum()
+                        ) / y.numel()
+                        loss = ce_loss_weight * cross_entropy_loss + l0_lambda * l0_loss
+                        self.fabric.backward(loss / self.args.grad_acc)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                 running_loss += loss.item()
                 final = self.softmax(logits).argmax(dim=-1)
-                pred_num = (labels != -100).sum(dim=-1)
-                correct_num = ((labels != -100) * (final == labels)).sum(dim=-1)
+                pred_num = (discrete_expr_label != -100).sum(dim=-1)
+                correct_num = (
+                    (discrete_expr_label != -100) * (final == discrete_expr_label)
+                ).sum(dim=-1)
                 cum_acc += torch.true_divide(correct_num, pred_num).mean().item()
                 if self.is_master:
                     data_iter.set_postfix(
                         loss=running_loss / index, acc=100 * cum_acc / index
                     )
+                self._log_stats(
+                    final, discrete_expr_label, epoch, index, print_pred_dist=True
+                )
                 if index % self.args.save_ckpt_every == 0:
                     if self.is_master:
                         wandb.log(
@@ -359,7 +429,15 @@ class Trainer:
                                 "iteration": index,
                             }
                         )
+                    self._log_stats(
+                        final,
+                        discrete_expr_label,
+                        epoch,
+                        index,
+                        print_detailed_stats=True,
+                    )
                     self.validate(epoch, index)
+                    self.model.train()
                     save_ckpt_fabric(
                         epoch,
                         self.model,
@@ -397,3 +475,106 @@ class Trainer:
                 self.fabric,
                 iteration=index,
             )
+
+    def _log_stats(
+        self,
+        final,
+        labels,
+        epoch,
+        index,
+        print_detailed_stats=False,
+        print_pred_dist=False,
+    ):
+        if not self.is_master:
+            return
+
+        non_padded_mask = labels != -100
+        valid_labels = labels[non_padded_mask]
+        valid_preds = final[non_padded_mask]
+        non_padded_count = valid_preds.numel()
+        num_classes = self.args.model.num_bins + 1
+
+        if non_padded_count == 0:
+            return
+
+        if print_pred_dist:
+            pred_counts = torch.bincount(
+                valid_preds.to(torch.int), minlength=num_classes
+            )
+            pred_dist = pred_counts.float() / non_padded_count
+            print(f"--- Epoch {epoch} Iteration {index} Prediction Distribution ---")
+            for i, p in enumerate(pred_dist):
+                if p > 0:
+                    print(f"  Bin {i}: {p.item():.2%}")
+            print("---------------------------------------------")
+
+        if print_detailed_stats:
+            # 1. Label distribution
+            label_counts = torch.bincount(
+                valid_labels.to(torch.int), minlength=num_classes
+            )
+            label_dist = label_counts.float() / non_padded_count
+
+            # 2. Prediction distribution
+            pred_counts = torch.bincount(
+                valid_preds.to(torch.int), minlength=num_classes
+            )
+            pred_dist = pred_counts.float() / non_padded_count
+
+            # 5. Correct prediction distribution
+            correct_mask = valid_preds == valid_labels
+            correct_preds = valid_preds[correct_mask]
+            num_correct = correct_preds.numel()
+            if num_correct > 0:
+                correct_pred_counts = torch.bincount(
+                    correct_preds.to(torch.int), minlength=num_classes
+                )
+                correct_pred_dist = correct_pred_counts.float() / num_correct
+            else:
+                correct_pred_dist = torch.zeros(num_classes, device=labels.device)
+
+            # 6. Incorrect prediction distribution
+            incorrect_mask = ~correct_mask
+            incorrect_preds = valid_preds[incorrect_mask]
+            num_incorrect = incorrect_preds.numel()
+            if num_incorrect > 0:
+                incorrect_pred_counts = torch.bincount(
+                    incorrect_preds.to(torch.int), minlength=num_classes
+                )
+                incorrect_pred_dist = incorrect_pred_counts.float() / num_incorrect
+            else:
+                incorrect_pred_dist = torch.zeros(num_classes, device=labels.device)
+
+            # 7. Labels for incorrect predictions
+            incorrect_labels = valid_labels[incorrect_mask]
+            if num_incorrect > 0:
+                incorrect_label_counts = torch.bincount(
+                    incorrect_labels.to(torch.int), minlength=num_classes
+                )
+                incorrect_label_dist = incorrect_label_counts.float() / num_incorrect
+            else:
+                incorrect_label_dist = torch.zeros(num_classes, device=labels.device)
+
+            def print_dist(dist_tensor, name):
+                print(f"--- {name} Distribution ---")
+                for i, p in enumerate(dist_tensor):
+                    if p > 0:
+                        print(f"  Bin {i}: {p:.2%}")
+
+            print(f"\n===== Epoch {epoch} Iteration {index} Stats =====")
+            # 3 & 4. Total non-padded count
+            print(f"Total non-padded labels (predictions): {non_padded_count}")
+
+            # 1. Label distribution
+            print_dist(label_dist, "Label")
+            # 2. Prediction distribution
+            print_dist(pred_dist, "Prediction")
+            # 5. Correct prediction distribution
+            print(f"Total correct predictions: {num_correct}")
+            print_dist(correct_pred_dist, "Correct Predictions")
+            # 6. Incorrect prediction distribution
+            print(f"Total incorrect predictions: {num_incorrect}")
+            print_dist(incorrect_pred_dist, "Incorrect Predictions")
+            # 7. Labels for incorrect predictions
+            print_dist(incorrect_label_dist, "Labels of Incorrect Predictions")
+            print("================================\n")

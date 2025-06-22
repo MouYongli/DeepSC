@@ -35,10 +35,10 @@ class DataCollator:
     """
 
     num_bins: int
-    num_genes: int = 34682
-    do_padding: bool = True
     pad_token_id: int = 0
     pad_value: int = 0
+    num_genes: int = 34682
+    do_padding: bool = True
     do_mlm: bool = True
     do_binning: bool = True
     mlm_probability: float = 0.15
@@ -48,9 +48,9 @@ class DataCollator:
     gene_from_zero: bool = True
 
     def __post_init__(self):
-        self.mask_value = self.num_bins + 2
         self.cls_token_id = self.num_genes + 1
         self.cls_value = self.num_bins + 1
+        self.mask_value = self.num_bins + 2
         if self.do_padding:
             if self.pad_token_id is None:
                 raise ValueError("`pad_token_id` is required if `do_padding`.")
@@ -69,31 +69,37 @@ class DataCollator:
         self, examples: List[Dict[str, torch.Tensor]]
     ) -> Dict[str, torch.Tensor]:
         """
-        Each example is like:
-            {'id': tensor(184117),
-            'genes': tensor([36572, 17868, ..., 17072]),
-            'expressions': tensor([ 0.,  2., ..., 18.])}
+        该函数的输出为 data_dict 包括以下key：
+        gene: 基因id
+        masked_discrete_expr: 离散表达值掩码 (输入模型)
+        masked_continuous_expr: 连续表达值掩码 (输入模型)
+        discrete_expr_label: 离散表达值label （和模型的输出比较）(添加了-100,表明这些位置不参加cross entropy loss)
+        continuous_expr_label: 连续表达值label （和模型的输出比较）（未添加-100）
+        mask: 掩码的位置 （用于计算MSE的label，continuous_expr_label使用，在masked_mse函数中使用）
         """
         if not isinstance(examples[0], Mapping):
             return NotImplementedError
         max_ori_len = max(len(example["genes"]) for example in examples)
         _max_length = self.max_length if max_ori_len >= self.max_length else max_ori_len
         padded_genes = []
-        padded_expressions = []
-        padded_expression_label = []
+        padded_discrete_expr = []
+        padded_continuous_expr = []
         for i in range(len(examples)):
             genes = examples[i]["genes"]
             expressions = examples[i]["expressions"]
             expression_label = expressions.clone().float()
+            # 如果gene_from_zero为True，则将gene加1 为pad_token_id留出位置
             if self.gene_from_zero:
                 genes = genes + 1
+            # 做binning
             if self.do_binning:
                 expressions = binning(
                     row=expressions,
                     n_bins=self.num_bins,
                 )
+                # TODO: 这里需要检查一下，是否需要long (我猜应该不需要了，之前需要他是因为没找出bug)
                 expressions = expressions.long()
-                expressions = expressions + 1
+            # 添加cls token
             genes = torch.cat(
                 [
                     torch.tensor(
@@ -122,43 +128,54 @@ class DataCollator:
                     expression_label,
                 ]
             )
+            # 对gene, expressions, expression_label进行采样或截断并填充
             genes, expressions, expression_label = self._sample_or_truncate_plus_pad(
                 genes, expressions, expression_label, _max_length
             )  # torch tensors of length _max_length
             padded_genes.append(genes)
-            padded_expressions.append(expressions)
-            padded_expression_label.append(expression_label)
+            padded_discrete_expr.append(expressions)
+            padded_continuous_expr.append(expression_label)
+        # 对padded_genes, padded_discrete_expr, padded_continuous_expr进行stack
         padded_genes = torch.stack(padded_genes, dim=0)
-        padded_expressions = torch.stack(padded_expressions, dim=0)
-        padded_expression_label = torch.stack(padded_expression_label, dim=0)
+        padded_discrete_expr = torch.stack(padded_discrete_expr, dim=0)
+        padded_continuous_expr = torch.stack(padded_continuous_expr, dim=0)
+        continuous_expr_label = padded_continuous_expr.clone().float()
+
+        # 这两个添加完cls之后即可加入data_dict
         data_dict = {
             "gene": padded_genes,
-            "expr": padded_expressions,
-            "expression_label": padded_expression_label,
+            "continuous_expr_label": continuous_expr_label,
         }
 
-        # mask
+        # 为padded_continuous_expr添加mask 以及为padded_discrete_expr添加mask
         if self.do_mlm:
-            masked_expressions, mask = self._mask(padded_expressions, return_mask=True)
+            masked_discrete_expressions, mask = self._mask(
+                padded_discrete_expr, return_mask=True
+            )
+            masked_continuous_expressions, _ = self._mask(
+                padded_continuous_expr, return_mask=True
+            )
         else:
-            masked_expressions = padded_expressions
-            mask = torch.zeros_like(padded_expressions, dtype=torch.bool)
-        data_dict["masked_expr"] = masked_expressions
-
-        # 检查 masked_expr 的第二维的第一个数是否为 51
+            masked_discrete_expressions = padded_discrete_expr
+            mask = torch.zeros_like(padded_discrete_expr, dtype=torch.bool)
+        data_dict["masked_discrete_expr"] = masked_discrete_expressions
+        data_dict["masked_continuous_expr"] = masked_continuous_expressions
+        # 检查masked_discrete_expr的第二维的第一个数是否为cls
         if (
-            data_dict["masked_expr"].shape[1] == 0
-            or data_dict["masked_expr"][0, 0].item() != self.num_bins + 1
+            data_dict["masked_discrete_expr"].shape[1] == 0
+            or data_dict["masked_discrete_expr"][0, 0].item() != self.num_bins + 1
         ):
             raise ValueError(
-                f"masked_expr 的第二维的第一个数不是 {self.num_bins+1}，而是 {data_dict['masked_expr'][0, 0].item()}"
+                f"离散mask 的第二维的第一个数不是 {self.num_bins}，而是 {data_dict['masked_discrete_expr'][0, 0].item()}"
             )
 
         # 新增 label: mask 位置为原始 expression，其他为 -100
-        label = torch.full_like(padded_expressions, -100)
-        label[mask] = padded_expressions[mask]
-        data_dict["label"] = label
+        # discrete_expr_label可以在这里做掩码，然而continuous_expr_label,可以在trainer里传入自定义的masked mse 里面，在那里处理应该做掩码的indices
+        discrete_expr_label = torch.full_like(padded_discrete_expr, -100)
+        discrete_expr_label[mask] = padded_discrete_expr[mask]
+        data_dict["discrete_expr_label"] = discrete_expr_label
         data_dict["mask"] = mask
+
         return data_dict
 
     def _mask(
