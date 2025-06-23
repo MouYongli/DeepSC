@@ -224,7 +224,7 @@ class Trainer:
                 data_iter = tqdm(
                     self.val_loader,
                     desc=f"Epoch {epoch} [val] Iter {iteration}",
-                    ncols=100,
+                    ncols=300,
                 )
             for index, data in enumerate(data_iter):
                 loss, final, mse_loss = self._process_batch(data)
