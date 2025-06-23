@@ -152,15 +152,6 @@ class Trainer:
         args = self.args
         # 是否应该让optimizer, lossfunction, scheduler customizable?
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
-        self.scheduler = CosineAnnealingWarmupRestarts(
-            self.optimizer,
-            first_cycle_steps=15,
-            cycle_mult=2,
-            max_lr=args.learning_rate,
-            min_lr=1e-6,
-            warmup_steps=5,
-            gamma=0.9,
-        )
         self.loss_fn = nn.CrossEntropyLoss(reduction="mean")
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
@@ -312,7 +303,7 @@ class Trainer:
         state = {
             "model": self.model,
             "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
+            "scheduler": None,
         }
         remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
 
@@ -412,7 +403,7 @@ class Trainer:
                         epoch,
                         self.model,
                         self.optimizer,
-                        self.scheduler,
+                        None,
                         running_loss / index,
                         self.args.model_name,
                         self.args.ckpt_dir,
@@ -437,13 +428,12 @@ class Trainer:
                         "learning_rate": self.optimizer.param_groups[0]["lr"],
                     }
                 )
-            self.scheduler.step()
             self.validate(epoch)
             save_ckpt_fabric(
                 epoch,
                 self.model,
                 self.optimizer,
-                self.scheduler,
+                None,
                 running_loss / index,
                 self.args.model_name,
                 self.args.ckpt_dir,
