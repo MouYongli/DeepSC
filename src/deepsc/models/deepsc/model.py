@@ -55,12 +55,22 @@ class ExpressionEmbedding(nn.Module):
         super(ExpressionEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.num_bins = num_bins
+        # alpba是否可以作为可学习的参数
+        self.alpha = alpha
         # 离散表达水平的嵌入矩阵 W_bin ∈ R^{d×N}
         self.bin_embedding = nn.Embedding(
             num_embeddings=num_bins + 3, embedding_dim=embedding_dim, padding_idx=0
         )
+        # 连续值的投影向量 v_cont ∈ R^d
+        self.continuous_projection = nn.Parameter(torch.randn(embedding_dim))
 
-    def forward(self, expression: torch.Tensor) -> torch.Tensor:
+        # 初始化权重
+        nn.init.xavier_uniform_(self.bin_embedding.weight)
+        nn.init.xavier_uniform_(self.continuous_projection.unsqueeze(0))
+
+    def forward(
+        self, discrete_expression: torch.Tensor, normalized_expr: torch.Tensor
+    ) -> torch.Tensor:
         """
         前向传播
 
@@ -70,7 +80,16 @@ class ExpressionEmbedding(nn.Module):
         Returns:
             expr_embeddings: 表达量嵌入 E_expr ∈ R^{g×d}, shape: (batch_size, g, d)
         """
-        expr_embeddings = self.bin_embedding(expression)
+
+        discrete_embeddings = self.bin_embedding(discrete_expression)
+        continuous_component = (
+            self.alpha
+            * normalized_expr.unsqueeze(-1)
+            * self.continuous_projection.unsqueeze(0).unsqueeze(0)
+        )
+
+        expr_embeddings = discrete_embeddings + continuous_component
+
         return expr_embeddings
 
 
@@ -340,7 +359,12 @@ class DeepSC(nn.Module):
         nn.init.zeros_(self.classifier.bias)
 
     def forward(
-        self, gene_ids, expression, return_encodings=False, return_mask_prob=True
+        self,
+        gene_ids,
+        expression_bin,
+        normalized_expr,
+        return_encodings=False,
+        return_mask_prob=True,
     ):
         """
         gene_ids: (batch, g)  # 基因ID序列
@@ -348,21 +372,26 @@ class DeepSC(nn.Module):
         M: (batch, num_heads, g, g) 门控矩阵
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
-        expr_emb = self.expr_embedding(expression)  # (batch, g, d)
+        expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
         M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
-        num_layers = len(self.layers)
         for i, layer in enumerate(self.layers):
             if i >= self.mask_layer_start:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, M)
             else:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
+
         if return_encodings:
             return gene_emb, expr_emb
-        # TODO: 是否需要去掉CLS token？ 我这里没有去掉，因为在它label里面是-100，所以被loss函数忽略了
-        logits = self.classifier(expr_emb)
-        if self.enable_ce and self.enable_mse and self.enable_l0:
+
+        if self.enable_mse and self.enable_ce:
             regression_output = self.regressor(expr_emb)
             regression_output = regression_output.squeeze(-1)
+            logits = self.classifier(expr_emb)
             return logits, regression_output, y
+        elif self.enable_mse:
+            regression_output = self.regressor(expr_emb)
+            regression_output = regression_output.squeeze(-1)
+            return regression_output, y
         elif self.enable_ce:
+            logits = self.classifier(expr_emb)
             return logits, y

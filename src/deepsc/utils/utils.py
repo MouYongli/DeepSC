@@ -540,10 +540,139 @@ def masked_mse_loss(
     masked_loss = elementwise_loss[mask]  # 只取被掩码的部分
 
     if reduction == "mean":
+        if masked_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
         return masked_loss.mean()
     elif reduction == "sum":
+        if masked_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
         return masked_loss.sum()
     elif reduction == "none":
         return masked_loss
     else:
         raise ValueError(f"Invalid reduction mode: {reduction}")
+
+
+def log_stats(
+    is_master,
+    num_bins,
+    final,
+    labels,
+    epoch,
+    index,
+    print_detailed_stats=False,
+    print_pred_dist=False,
+):
+    if not is_master:
+        return
+
+    non_padded_mask = labels != -100
+    valid_labels = labels[non_padded_mask]
+    valid_preds = final[non_padded_mask]
+    non_padded_count = valid_preds.numel()
+    num_classes = num_bins + 1
+
+    if non_padded_count == 0:
+        return
+
+    if print_pred_dist:
+        pred_counts = torch.bincount(valid_preds.to(torch.int), minlength=num_classes)
+        pred_dist = pred_counts.float() / non_padded_count
+        print(f"--- Epoch {epoch} Iteration {index} Prediction Distribution ---")
+        for i, p in enumerate(pred_dist):
+            if p > 0:
+                print(f"  Bin {i}: {p.item():.2%}")
+        print("---------------------------------------------")
+
+    if print_detailed_stats:
+        # 1. Label distribution
+        label_counts = torch.bincount(valid_labels.to(torch.int), minlength=num_classes)
+        label_dist = label_counts.float() / non_padded_count
+
+        # 2. Prediction distribution
+        pred_counts = torch.bincount(valid_preds.to(torch.int), minlength=num_classes)
+        pred_dist = pred_counts.float() / non_padded_count
+
+        # 5. Correct prediction distribution
+        correct_mask = valid_preds == valid_labels
+        correct_preds = valid_preds[correct_mask]
+        num_correct = correct_preds.numel()
+        if num_correct > 0:
+            correct_pred_counts = torch.bincount(
+                correct_preds.to(torch.int), minlength=num_classes
+            )
+            correct_pred_dist = correct_pred_counts.float() / num_correct
+        else:
+            correct_pred_dist = torch.zeros(num_classes, device=labels.device)
+
+        # 6. Incorrect prediction distribution
+        incorrect_mask = ~correct_mask
+        incorrect_preds = valid_preds[incorrect_mask]
+        num_incorrect = incorrect_preds.numel()
+        if num_incorrect > 0:
+            incorrect_pred_counts = torch.bincount(
+                incorrect_preds.to(torch.int), minlength=num_classes
+            )
+            incorrect_pred_dist = incorrect_pred_counts.float() / num_incorrect
+        else:
+            incorrect_pred_dist = torch.zeros(num_classes, device=labels.device)
+
+        # 7. Labels for incorrect predictions
+        incorrect_labels = valid_labels[incorrect_mask]
+        if num_incorrect > 0:
+            incorrect_label_counts = torch.bincount(
+                incorrect_labels.to(torch.int), minlength=num_classes
+            )
+            incorrect_label_dist = incorrect_label_counts.float() / num_incorrect
+        else:
+            incorrect_label_dist = torch.zeros(num_classes, device=labels.device)
+
+        def print_dist(dist_tensor, name):
+            print(f"--- {name} Distribution ---")
+            for i, p in enumerate(dist_tensor):
+                if p > 0:
+                    print(f"  Bin {i}: {p:.2%}")
+
+        print(f"\n===== Epoch {epoch} Validation Stats =====")
+        # 3 & 4. Total non-padded count
+        print(f"Total non-padded labels (predictions): {non_padded_count}")
+
+        # 1. Label distribution
+        print_dist(label_dist, "Label")
+        # 2. Prediction distribution
+        print_dist(pred_dist, "Prediction")
+        # 5. Correct prediction distribution
+        print(f"Total correct predictions: {num_correct}")
+        print_dist(correct_pred_dist, "Correct Predictions")
+        # 6. Incorrect prediction distribution
+        print(f"Total incorrect predictions: {num_incorrect}")
+        print_dist(incorrect_pred_dist, "Incorrect Predictions")
+        # 7. Labels for incorrect predictions
+        print_dist(incorrect_label_dist, "Labels of Incorrect Predictions")
+        print("================================\n")
+
+
+def compute_bin_distribution(final, valid_mask, num_bins, topk=None):
+    """
+    计算预测分布。
+    Args:
+        final: 预测的类别 (tensor)
+        valid_mask: 有效位置的mask (tensor, bool)
+        num_bins: bin的数量 (int)
+        topk: 若为None，返回前num_bins个bin的分布，否则返回预测比例最多的前topk个bin及其编号和比例
+    Returns:
+        如果topk为None，返回[(bin编号, 比例), ...]，长度为num_bins
+        否则，返回[(bin编号, 比例), ...]，长度为topk
+    """
+    if final is not None and valid_mask.any():
+        pred_counts = torch.bincount(final[valid_mask].cpu(), minlength=num_bins + 1)
+        pred_dist = (pred_counts.float() / pred_counts.sum()).tolist()
+        if topk is not None:
+            top_bins = sorted(enumerate(pred_dist), key=lambda x: x[1], reverse=True)[
+                :topk
+            ]
+            return top_bins
+        else:
+            return list(enumerate(pred_dist[:num_bins]))
+    else:
+        return None
