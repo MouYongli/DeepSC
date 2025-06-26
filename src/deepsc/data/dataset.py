@@ -34,20 +34,52 @@ class GeneExpressionDataset(Dataset):
         assert (
             coo_tensor.layout == torch.sparse_coo
         ), "Input must be a sparse COO tensor"
-        self.coo_tensor = coo_tensor.coalesce()
+        coo_tensor = coo_tensor.coalesce()
+
+        values = coo_tensor.values()
+        indices = coo_tensor.indices()
+        self.csr_matrix = sparse.csr_matrix(
+            (
+                values.cpu().numpy(),
+                (indices[0].cpu().numpy(), indices[1].cpu().numpy()),
+            ),
+            shape=coo_tensor.shape,
+        )
+
         self.num_samples = coo_tensor.shape[0]
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # 获取所有非零元素的索引和数值
-        indices = self.coo_tensor.indices()
-        values = self.coo_tensor.values()
-        # 找到属于第idx行的元素
-        mask = indices[0] == idx
-        gene_indices = indices[1, mask]
-        expression_values = values[mask]
+        row_slice = self.csr_matrix[idx]
+        row_coo = row_slice.tocoo()
+
+        gene_indices = torch.from_numpy(row_coo.col).long()
+        expression_values = torch.from_numpy(row_coo.data).float()
+
+        return {"genes": gene_indices, "expressions": expression_values}
+
+
+class GeneExpressionDatasetNew(Dataset):
+    def __init__(self, npz_path=None, csr_matrix=None, num_bin=50):
+        if csr_matrix is not None:
+            self.csr_matrix = csr_matrix
+        elif npz_path is not None:
+            self.csr_matrix = sparse.load_npz(npz_path)
+        else:
+            raise ValueError("Either npz_path or csr_matrix must be provided")
+        self.num_samples = self.csr_matrix.shape[0]
+        self.num_bin = num_bin
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        row_slice = self.csr_matrix[idx]
+        row_coo = row_slice.tocoo()
+        gene_indices = torch.from_numpy(row_coo.col).long()
+        expression_values = torch.from_numpy(row_coo.data).float()
         return {"genes": gene_indices, "expressions": expression_values}
 
 

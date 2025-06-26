@@ -4,26 +4,26 @@ defaults:
   - dataset: tripleca
 
 wandb_project: "DeepSC"
-
+pretrain_feature: "1000_dim_200k_cells_warmup_cosine"
 # Loss weights
 l0_lambda: 0
 ce_loss_weight: 1.0
 mse_loss_weight: 0
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_normalized/intestine_partition_0_sparse.pth"
+data_path: "/home/angli/baseline/DeepSC/data/3ca/converted_matrix.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 1
-valid_every: 100
+num_device: 2
+valid_every: 5000
 model_name: "scbert"
 grad_acc: 20
-learning_rate: 1e-4
+learning_rate: 5e-3
 epoch: 8
-batch_size: 10
-num_bin: 5
-save_ckpt_every: 2000
+batch_size: 3
+num_bin: 15
+save_ckpt_every: 3000
 enable_l0: True
-enable_mse: True
+enable_mse: False
 enable_ce: True
 log_on_wandb_every: 100
 

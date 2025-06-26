@@ -30,6 +30,7 @@ def pretrain(cfg: DictConfig):
         wandb.init(
             entity=cfg.get("wandb_team", "rwth_lfb"),
             project=cfg.get("wandb_project", "DeepSC"),
+            name=f"pretrain_feature: {cfg.pretrain_feature}, lr: {cfg.learning_rate}",
             config=dict(cfg),
         )
 

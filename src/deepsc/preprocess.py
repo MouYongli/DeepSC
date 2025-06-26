@@ -1,3 +1,4 @@
+import logging
 from typing import Union
 
 import numpy as np
@@ -58,6 +59,9 @@ def binning(
         )
 
     if row.min() <= 0:
+        logging.info(
+            f"Row has negative values: {row.min()}, which is negative, will be set to 0"
+        )
         non_zero_ids = row.nonzero()
         non_zero_row = row[non_zero_ids]
         bins = np.quantile(non_zero_row, np.linspace(0, 1, n_bins - 1))

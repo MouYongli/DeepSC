@@ -1,5 +1,5 @@
 _target_: src.deepsc.models.deepsc.model.DeepSC
-embedding_dim: 200
+embedding_dim: 1000
 num_genes: 34682
 num_layers: 10
 attn_dropout: 0.1

@@ -7,6 +7,7 @@ import torch
 from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -39,7 +40,7 @@ class Trainer:
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
-        self.load_data()
+        self.load_data_new()
         self.prepare_model()
 
     def load_all_sparse_tensors_from_folder(self, datapath):
@@ -132,6 +133,71 @@ class Trainer:
             train_loader, val_loader
         )
 
+    @timeit
+    def load_data_new(self):
+        # 只支持单个.npz文件，不支持目录
+        assert self.args.data_path.endswith(".npz"), "data_path必须为.npz文件"
+        from deepsc.data.dataset import GeneExpressionDatasetNew
+
+        csr_matrix = None
+        # 加载csr_matrix
+        import scipy.sparse
+
+        csr_matrix = scipy.sparse.load_npz(self.args.data_path)
+        row_indices = np.arange(csr_matrix.shape[0])
+        train_idx, val_idx = train_test_split(
+            row_indices, test_size=0.05, random_state=self.args.seed
+        )
+        train_csr = csr_matrix[train_idx]
+        val_csr = csr_matrix[val_idx]
+        self.train_dataset: Dataset = GeneExpressionDatasetNew(
+            csr_matrix=train_csr, num_bin=self.args.model.num_bins
+        )
+        self.val_dataset: Dataset = GeneExpressionDatasetNew(
+            csr_matrix=val_csr, num_bin=self.args.model.num_bins
+        )
+        self.train_sampler = DistributedSampler(self.train_dataset)
+        self.val_sampler = SequentialDistributedSampler(
+            self.val_dataset,
+            batch_size=self.args.batch_size,
+            world_size=self.world_size,
+        )
+        train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.args.batch_size,
+            sampler=self.train_sampler,
+            num_workers=8,
+            collate_fn=DataCollator(
+                do_padding=True,
+                pad_token_id=0,
+                pad_value=0,
+                do_mlm=True,
+                do_binning=True,
+                max_length=1000,
+                num_genes=self.args.model.num_genes,
+                num_bins=self.args.model.num_bins,
+            ),
+        )
+        val_loader = DataLoader(
+            self.val_dataset,
+            batch_size=self.args.batch_size,
+            sampler=self.val_sampler,
+            num_workers=4,
+            collate_fn=DataCollator(
+                do_padding=True,
+                pad_token_id=0,
+                pad_value=0,
+                do_mlm=True,
+                do_binning=True,
+                max_length=1000,
+                num_genes=self.args.model.num_genes,
+                num_bins=self.args.model.num_bins,
+            ),
+        )
+        self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
+            train_loader, val_loader
+        )
+
     def pad_for_val(self, seq):
         max_len = max(p.size(1) for p in seq)
         padded_preds = []
@@ -155,6 +221,18 @@ class Trainer:
         self.loss_fn = nn.CrossEntropyLoss(reduction="mean")
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
+        warmup_epochs = max(1, int(0.05 * args.epoch))
+        linear_scheduler = LinearLR(
+            self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+        )
+        cosine_scheduler = CosineAnnealingLR(
+            self.optimizer, T_max=args.epoch - warmup_epochs
+        )
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[linear_scheduler, cosine_scheduler],
+            milestones=[warmup_epochs],
+        )
 
     def _process_batch(self, data):
         gene = data["gene"]
@@ -303,7 +381,7 @@ class Trainer:
         state = {
             "model": self.model,
             "optimizer": self.optimizer.state_dict(),
-            "scheduler": None,
+            "scheduler": self.scheduler.state_dict(),
         }
         remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
 
@@ -403,7 +481,7 @@ class Trainer:
                         epoch,
                         self.model,
                         self.optimizer,
-                        None,
+                        self.scheduler,
                         running_loss / index,
                         self.args.model_name,
                         self.args.ckpt_dir,
@@ -433,13 +511,14 @@ class Trainer:
                 epoch,
                 self.model,
                 self.optimizer,
-                None,
+                self.scheduler,
                 running_loss / index,
                 self.args.model_name,
                 self.args.ckpt_dir,
                 self.fabric,
                 iteration=index,
             )
+            self.scheduler.step()
 
     def calculate_loss(
         self,
