@@ -102,6 +102,7 @@ class Trainer:
             batch_size=self.args.batch_size,
             sampler=self.train_sampler,
             num_workers=8,
+            shuffle=True,
             collate_fn=DataCollator(
                 do_padding=True,
                 pad_token_id=0,
@@ -118,6 +119,7 @@ class Trainer:
             batch_size=self.args.batch_size,
             sampler=self.val_sampler,
             num_workers=4,
+            shuffle=True,
             collate_fn=DataCollator(
                 do_padding=True,
                 pad_token_id=0,
@@ -150,18 +152,10 @@ class Trainer:
         )
         train_csr = csr_matrix[train_idx]
         val_csr = csr_matrix[val_idx]
-        self.train_dataset: Dataset = GeneExpressionDatasetNew(
-            csr_matrix=train_csr, num_bin=self.args.model.num_bins
-        )
-        self.val_dataset: Dataset = GeneExpressionDatasetNew(
-            csr_matrix=val_csr, num_bin=self.args.model.num_bins
-        )
-        self.train_sampler = DistributedSampler(self.train_dataset)
-        self.val_sampler = SequentialDistributedSampler(
-            self.val_dataset,
-            batch_size=self.args.batch_size,
-            world_size=self.world_size,
-        )
+        self.train_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=train_csr)
+        self.val_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=val_csr)
+        self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
+        self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
@@ -173,7 +167,7 @@ class Trainer:
                 pad_value=0,
                 do_mlm=True,
                 do_binning=True,
-                max_length=1000,
+                max_length=self.args.sequence_length,
                 num_genes=self.args.model.num_genes,
                 num_bins=self.args.model.num_bins,
             ),
@@ -189,7 +183,7 @@ class Trainer:
                 pad_value=0,
                 do_mlm=True,
                 do_binning=True,
-                max_length=1000,
+                max_length=self.args.sequence_length,
                 num_genes=self.args.model.num_genes,
                 num_bins=self.args.model.num_bins,
             ),
@@ -198,6 +192,8 @@ class Trainer:
             train_loader, val_loader
         )
 
+    # for validation part, to pad the predictions to the same length. It does not
+    # affect the training part. Considering moving to the utils part.
     def pad_for_val(self, seq):
         max_len = max(p.size(1) for p in seq)
         padded_preds = []
@@ -235,6 +231,23 @@ class Trainer:
         )
 
     def _process_batch(self, data):
+        """
+        data:
+        {
+            "gene": (batch_size, sequence_length)
+            "masked_discrete_expr": (batch_size, sequence_length)
+            "masked_continuous_expr": (batch_size, sequence_length)
+            "discrete_expr_label": (batch_size, sequence_length)
+            "continuous_expr_label": (batch_size, sequence_length)
+        }
+        In every iteration, get the gene, masked_discrete_expr,
+        masked_continuous_expr, discrete_expr_label, continuous_expr_label, mask
+        If enable_ce and enable_mse, get the logits, regression_output, y
+        If enable_ce, get the logits, y
+        If enable_mse, get the regression_output, y
+        Calculate the loss
+        Return the loss, final, mse_loss
+        """
         gene = data["gene"]
         masked_discrete_expr = data["masked_discrete_expr"]
         masked_continuous_expr = data["masked_continuous_expr"]
@@ -350,16 +363,15 @@ class Trainer:
             val_acc = get_reduced_with_fabric(
                 100 * cum_acc / len(self.val_loader), self.fabric
             )
-
-            logging.info(
-                "Validation Epoch %d Iter %d | Loss: %.6f | MSE Loss: %.6f | Acc: %.4f%%",
-                epoch,
-                iteration,
-                val_loss,
-                val_mse_loss,
-                val_acc,
-            )
             if self.is_master:
+                logging.info(
+                    "Validation Epoch %d Iter %d | Loss: %.6f | MSE Loss: %.6f | Acc: %.4f%%",
+                    epoch,
+                    iteration,
+                    val_loss,
+                    val_mse_loss,
+                    val_acc,
+                )
                 wandb.log(
                     {
                         "val/loss": val_loss,
@@ -445,7 +457,7 @@ class Trainer:
                 if self.is_master:
                     num_bins = self.args.model.num_bins
                     valid_mask = discrete_expr_label != -100
-                    # 选择top5还是前5个bin，下面以top5为例
+                    # 选择top5还是前5个bin，下面以top5为例, wrap it into a function
                     top_bins = compute_bin_distribution(
                         final, valid_mask, num_bins, topk=5
                     )
