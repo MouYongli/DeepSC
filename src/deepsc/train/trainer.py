@@ -272,7 +272,7 @@ class Trainer:
         elif self.args.enable_mse:
             regression_output, y = self.model(
                 gene,
-                masked_continuous_expr,
+                masked_discrete_expr,
                 masked_continuous_expr,
                 return_mask_prob=True,
             )
