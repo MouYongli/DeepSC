@@ -27,7 +27,12 @@ def pretrain(cfg: DictConfig):
 
     # wandb only in master
     if fabric.global_rank == 0:
-        wandb.init(project=cfg.get("wandb_project", "DeepSC"), config=dict(cfg))
+        wandb.init(
+            entity=cfg.get("wandb_team", "rwth_lfb"),
+            project=cfg.get("wandb_project", "DeepSC"),
+            name=f"pretrain_feature: {cfg.pretrain_feature}, lr: {cfg.learning_rate}",
+            config=dict(cfg),
+        )
 
     # model = select_model(cfg)
     # instantiate model
@@ -35,8 +40,6 @@ def pretrain(cfg: DictConfig):
     model = model.float()
     trainer = Trainer(cfg, fabric=fabric, model=model)
     trainer.train()
-
-    print(f"run in {cfg.fabric.global_rank}")
 
 
 if __name__ == "__main__":
