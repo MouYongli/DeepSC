@@ -309,6 +309,8 @@ class Trainer:
         running_mse_loss = 0.0  # accumulate mse_loss
         batch_accs = []
         cum_acc = 0.0
+        # 新增：收集expr_emb
+        all_expr_embs = []
         with torch.no_grad():
             data_iter = self.val_loader
             if self.is_master:
@@ -318,6 +320,22 @@ class Trainer:
                     ncols=300,
                 )
             for index, data in enumerate(data_iter):
+                # --------- 新增：尝试获取expr_emb ---------
+                gene = data["gene"]
+                masked_discrete_expr = data["masked_discrete_expr"]
+                masked_continuous_expr = data["masked_continuous_expr"]
+                try:
+                    _, expr_emb = self.model(
+                        gene,
+                        masked_discrete_expr,
+                        masked_continuous_expr,
+                        return_encodings=True,
+                    )  # expr_emb: (batch, g, d)
+                    all_expr_embs.append(expr_emb.cpu())
+                except Exception as e:
+                    # 某些模型不支持return_encodings，直接跳过
+                    pass
+                # --------- 原有loss/acc计算 ---------
                 loss, final, mse_loss = self._process_batch(data)
                 discrete_expr_label = data["discrete_expr_label"]
                 running_loss += loss.item()
@@ -354,6 +372,53 @@ class Trainer:
                 print_detailed_stats=True,
             )
 
+            # --------- 新增：分析expr_emb秩 ---------
+            if self.is_master and len(all_expr_embs) > 0:
+                all_expr_embs = torch.cat(all_expr_embs, dim=0)  # (total_batch, g, d)
+                E = all_expr_embs.reshape(-1, all_expr_embs.shape[-1])  # (N, d)
+                # 采样最多10000个
+                max_samples = 10000
+                if E.shape[0] > max_samples:
+                    idx = torch.randperm(E.shape[0])[:max_samples]
+                    E = E[idx]
+                rank = torch.linalg.matrix_rank(E)
+                print(f"[Embedding Analysis] expr_emb rank: {rank.item()}")
+                U, S, Vh = torch.linalg.svd(E)
+                print(
+                    f"[Embedding Analysis] Top 10 singular values: {S[:10].cpu().numpy()}"
+                )
+                # t-SNE可视化
+                try:
+                    import os
+
+                    import matplotlib.pyplot as plt
+                    from sklearn.manifold import TSNE
+
+                    tsne = TSNE(
+                        n_components=2, random_state=0, perplexity=30, n_iter=1000
+                    )
+                    E_np = E.cpu().numpy()
+                    E_tsne = tsne.fit_transform(E_np)
+                    plt.figure(figsize=(6, 6))
+                    plt.scatter(E_tsne[:, 0], E_tsne[:, 1], s=2, alpha=0.5)
+                    plt.title(f"expr_emb t-SNE (epoch {epoch}, iteration {iteration})")
+                    plt.tight_layout()
+                    tsne_dir = os.path.join(self.args.ckpt_dir, "tsne_vis")
+                    os.makedirs(tsne_dir, exist_ok=True)
+                    plt.savefig(
+                        os.path.join(
+                            tsne_dir,
+                            f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png",
+                        )
+                    )
+                    plt.close()
+                    tsne_path = os.path.join(
+                        tsne_dir, f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png"
+                    )
+                    print(f"[Embedding Analysis] t-SNE plot saved:\n  {tsne_path}")
+                except Exception as e:
+                    print(f"[Embedding Analysis] t-SNE failed: {e}")
+
             val_loss = get_reduced_with_fabric(
                 running_loss / len(self.val_loader), self.fabric
             )
@@ -378,7 +443,8 @@ class Trainer:
                         "val/mse_loss": val_mse_loss,
                         "val/acc": val_acc,
                         "epoch": epoch,
-                        "learning_rate": self.optimizer.param_groups[0]["lr"],
+                        "val/learning_rate": self.optimizer.param_groups[0]["lr"],
+                        "val/expr_emb_rank": rank.item(),
                     }
                 )
 
@@ -482,7 +548,9 @@ class Trainer:
                                 "train/acc": 100 * cum_acc / index,
                                 "epoch": epoch,
                                 "iteration": index,
-                                "learning_rate": self.optimizer.param_groups[0]["lr"],
+                                "train/learning_rate": self.optimizer.param_groups[0][
+                                    "lr"
+                                ],
                             }
                         )
                 if index % self.args.valid_every == 0:

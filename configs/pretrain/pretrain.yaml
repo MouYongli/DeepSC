@@ -14,7 +14,7 @@ data_path: "/home/angli/baseline/DeepSC/data/3ca/converted_matrix.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 2
-valid_every: 5000
+valid_every: 100
 model_name: "scbert"
 grad_acc: 20
 learning_rate: 5e-3
