@@ -350,7 +350,7 @@ class DeepSC(nn.Module):
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
-        self.classifier = nn.Linear(embedding_dim, num_bins)
+        self.classifier = nn.Linear(embedding_dim, num_bins + 1)
         self.regressor = nn.Linear(embedding_dim, 1)
         self.enable_l0 = enable_l0
         self.enable_mse = enable_mse

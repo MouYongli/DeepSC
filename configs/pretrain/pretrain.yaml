@@ -4,29 +4,33 @@ defaults:
   - dataset: tripleca
 
 wandb_project: "DeepSC"
-pretrain_feature: "shuffel_1000_dim_200k_cells_warmup_cosine"
+pretrain_feature: "binned_ce, bin prediction ce_1.0"
 # Loss weights
-l0_lambda: 0
+l0_lambda: 0.0
 ce_loss_weight: 1.0
-mse_loss_weight: 0
+mse_loss_weight: 0.0
 
 data_path: "/home/angli/baseline/DeepSC/data/3ca/converted_matrix.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 2
-valid_every: 100
+valid_every: 2000
 model_name: "scbert"
 grad_acc: 20
-learning_rate: 5e-3
+learning_rate: 5e-4
 epoch: 8
 batch_size: 10
-num_bin: 15
+num_bin: 5
 save_ckpt_every: 3000
 enable_l0: True
 enable_mse: False
 enable_ce: True
 log_on_wandb_every: 100
 sequence_length: 1000
+
+# 新增warmup相关参数
+use_warmup: True
+warmup_ratio: 0.05
 
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/

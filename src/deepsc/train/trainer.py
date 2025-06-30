@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 import hydra
@@ -210,6 +211,25 @@ class Trainer:
             padded_preds.append(p)
         return padded_preds
 
+    def pad_for_emb(self, embs):
+        """
+        对expr_emb list做padding，使得所有tensor在dim=1的长度一致。
+        embs: List[Tensor], 每个shape为(batch, g, d)
+        返回：List[Tensor]，每个shape为(batch, max_g, d)
+        """
+        max_len = max(e.shape[1] for e in embs)
+        padded_embs = []
+        for e in embs:
+            seq_len = e.shape[1]
+            if seq_len < max_len:
+                pad_amount = max_len - seq_len
+                # pad: (batch, g, d) → pad g 维右侧
+                e = torch.nn.functional.pad(e, (0, 0, 0, pad_amount), value=0)
+            else:
+                e = e[:, :max_len, :]
+            padded_embs.append(e)
+        return padded_embs
+
     def prepare_model(self):
         args = self.args
         # 是否应该让optimizer, lossfunction, scheduler customizable?
@@ -217,18 +237,28 @@ class Trainer:
         self.loss_fn = nn.CrossEntropyLoss(reduction="mean")
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
-        warmup_epochs = max(1, int(0.05 * args.epoch))
-        linear_scheduler = LinearLR(
-            self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+        self.scheduler = self.create_scheduler(
+            self.optimizer, self.args, self.train_loader
         )
-        cosine_scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=args.epoch - warmup_epochs
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[linear_scheduler, cosine_scheduler],
-            milestones=[warmup_epochs],
-        )
+
+    def create_scheduler(self, optimizer, args, train_loader):
+        total_steps = args.epoch * math.ceil(len(train_loader) / args.grad_acc)
+        if self.args.use_warmup:
+            warmup_ratio = self.args.warmup_ratio
+            warmup_steps = math.ceil(total_steps * warmup_ratio)
+            main_steps = total_steps - warmup_steps
+            linear_warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+            )
+            cosine_anneal = CosineAnnealingLR(optimizer, T_max=main_steps)
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[linear_warmup, cosine_anneal],
+                milestones=[warmup_steps],
+            )
+        else:
+            scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
+        return scheduler
 
     def _process_batch(self, data):
         """
@@ -295,6 +325,27 @@ class Trainer:
             final = None
         return loss, final, mse_loss
 
+    def _calculate_per_bin_accuracy(self, final, discrete_expr_label, num_bins):
+        """
+        计算每个bin的accuracy，然后对bin求平均（不包括bin0）
+        final: (batch, seq_len)
+        discrete_expr_label: (batch, seq_len)
+        num_bins: int
+        返回: float, 平均每个bin的accuracy（不含bin0）
+        """
+        accuracies = []
+        for bin_idx in range(1, num_bins):  # 跳过bin0
+            mask = discrete_expr_label == bin_idx
+            total = mask.sum()
+            if total == 0:
+                continue  # 该bin没有样本
+            correct = ((final == bin_idx) & mask).sum()
+            acc = correct.float() / total.float()
+            accuracies.append(acc)
+        if len(accuracies) == 0:
+            return 0.0
+        return torch.stack(accuracies).mean().item()
+
     def _calculate_accuracy(self, final, discrete_expr_label):
         pred_num = (discrete_expr_label != -100).sum(dim=-1)
         correct_num = (
@@ -309,6 +360,7 @@ class Trainer:
         running_mse_loss = 0.0  # accumulate mse_loss
         batch_accs = []
         cum_acc = 0.0
+        total_accs = []
         # 新增：收集expr_emb
         all_expr_embs = []
         with torch.no_grad():
@@ -340,40 +392,56 @@ class Trainer:
                 discrete_expr_label = data["discrete_expr_label"]
                 running_loss += loss.item()
                 running_mse_loss += mse_loss.item() if mse_loss is not None else 0.0
-                predictions.append(final)
-                truths.append(discrete_expr_label)
-                batch_acc = self._calculate_accuracy(final, discrete_expr_label)
-                batch_accs.append(batch_acc)
-                cum_acc += batch_acc
+                if final is not None:
+                    predictions.append(final)
+                    truths.append(discrete_expr_label)
+                    batch_acc = self._calculate_per_bin_accuracy(
+                        final, discrete_expr_label, self.args.model.num_bins
+                    )
+                    batch_accs.append(batch_acc)
+                    cum_acc += batch_acc
+                    # 计算总体accuracy
+                    total_acc = self._calculate_accuracy(final, discrete_expr_label)
+                    total_accs.append(total_acc)
                 if self.is_master:
                     data_iter.set_postfix(
                         loss=running_loss / (index + 1),
                         mse_loss=running_mse_loss / (index + 1),
-                        acc=100 * cum_acc / (index + 1),
+                        per_bin_acc=100 * cum_acc / (index + 1),
+                        total_acc=(
+                            100 * (sum(total_accs) / len(total_accs))
+                            if total_accs
+                            else 0.0
+                        ),
                     )
-            # 全局的predictions和truths，可能不需要
-            predictions = self.pad_for_val(predictions)
-            truths = self.pad_for_val(truths)
-            predictions = distributed_concat(
-                torch.cat(predictions, dim=0),
-                len(self.val_sampler.dataset),
-                self.world_size,
-            )
-            truths = distributed_concat(
-                torch.cat(truths, dim=0), len(self.val_sampler.dataset), self.world_size
-            )
-            log_stats(
-                self.is_master,
-                self.args.model.num_bins,
-                predictions,
-                truths,
-                epoch,
-                index=0,
-                print_detailed_stats=True,
-            )
+            # 只在有分类任务时做pad和评估
+            if len(predictions) > 0:
+                predictions = self.pad_for_val(predictions)
+                truths = self.pad_for_val(truths)
+                predictions = distributed_concat(
+                    torch.cat(predictions, dim=0),
+                    len(self.val_sampler.dataset),
+                    self.world_size,
+                )
+                truths = distributed_concat(
+                    torch.cat(truths, dim=0),
+                    len(self.val_sampler.dataset),
+                    self.world_size,
+                )
+                log_stats(
+                    self.is_master,
+                    self.args.model.num_bins,
+                    predictions,
+                    truths,
+                    epoch,
+                    index=0,
+                    print_detailed_stats=True,
+                )
 
             # --------- 新增：分析expr_emb秩 ---------
             if self.is_master and len(all_expr_embs) > 0:
+                # 对expr_emb做padding，保证g维一致
+                all_expr_embs = self.pad_for_emb(all_expr_embs)
                 all_expr_embs = torch.cat(all_expr_embs, dim=0)  # (total_batch, g, d)
                 E = all_expr_embs.reshape(-1, all_expr_embs.shape[-1])  # (N, d)
                 # 采样最多10000个
@@ -411,11 +479,42 @@ class Trainer:
                             f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png",
                         )
                     )
-                    plt.close()
                     tsne_path = os.path.join(
                         tsne_dir, f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png"
                     )
                     print(f"[Embedding Analysis] t-SNE plot saved:\n  {tsne_path}")
+                    # 新增：将t-SNE图片上传到wandb
+                    wandb.log(
+                        {
+                            "tsne": wandb.Image(tsne_path),
+                            "epoch": epoch,
+                            "iteration": iteration,
+                        }
+                    )
+                    plt.close()
+
+                    # 新增：UMAP可视化
+                    import umap
+
+                    reducer = umap.UMAP(n_components=2, random_state=0)
+                    E_umap = reducer.fit_transform(E_np)
+                    plt.figure(figsize=(6, 6))
+                    plt.scatter(E_umap[:, 0], E_umap[:, 1], s=2, alpha=0.5)
+                    plt.title(f"expr_emb UMAP (epoch {epoch}, iteration {iteration})")
+                    plt.tight_layout()
+                    umap_path = os.path.join(
+                        tsne_dir, f"expr_emb_umap_epoch{epoch}_iteration{iteration}.png"
+                    )
+                    plt.savefig(umap_path)
+                    wandb.log(
+                        {
+                            "umap": wandb.Image(umap_path),
+                            "epoch": epoch,
+                            "iteration": iteration,
+                        }
+                    )
+                    plt.close()
+                    print("[Embedding Analysis] t-SNE and UMAP plots saved")
                 except Exception as e:
                     print(f"[Embedding Analysis] t-SNE failed: {e}")
 
@@ -425,23 +524,29 @@ class Trainer:
             val_mse_loss = get_reduced_with_fabric(
                 running_mse_loss / len(self.val_loader), self.fabric
             )
-            val_acc = get_reduced_with_fabric(
+            val_per_bin_acc = get_reduced_with_fabric(
                 100 * cum_acc / len(self.val_loader), self.fabric
+            )
+            val_total_acc = get_reduced_with_fabric(
+                100 * (sum(total_accs) / len(total_accs)) if total_accs else 0.0,
+                self.fabric,
             )
             if self.is_master:
                 logging.info(
-                    "Validation Epoch %d Iter %d | Loss: %.6f | MSE Loss: %.6f | Acc: %.4f%%",
+                    "Val Epoch %d Iter %d | Loss: %.6f | MSE Loss: %.6f | Per-bin Acc: %.4f%% | Total Acc: %.4f%%",
                     epoch,
                     iteration,
                     val_loss,
                     val_mse_loss,
-                    val_acc,
+                    val_per_bin_acc,
+                    val_total_acc,
                 )
                 wandb.log(
                     {
                         "val/loss": val_loss,
                         "val/mse_loss": val_mse_loss,
-                        "val/acc": val_acc,
+                        "val/per_bin_acc": val_per_bin_acc,
+                        "val/total_acc": val_total_acc,
                         "epoch": epoch,
                         "val/learning_rate": self.optimizer.param_groups[0]["lr"],
                         "val/expr_emb_rank": rank.item(),
@@ -476,7 +581,7 @@ class Trainer:
 
     def train(self):
         # 用于恢复训练,cursor可能会删掉这行，不要让它删掉
-        # self.checkpoint_reload()
+        self.checkpoint_reload()
         if self.args.model_name == "DeepSC":
             self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
@@ -490,6 +595,7 @@ class Trainer:
                 data_iter = tqdm(
                     self.train_loader, desc=f"Epoch {epoch} [train]", ncols=300
                 )
+            total_accs = []
             for index, data in enumerate(data_iter, start=1):
 
                 # 每个data包含以下key：
@@ -515,11 +621,17 @@ class Trainer:
                     self.fabric.backward(loss / self.args.grad_acc)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
                     self.optimizer.step()
+                    self.scheduler.step()  # 每次optimizer.step()后更新学习率
                     self.optimizer.zero_grad()
                 running_loss += loss.item()
                 running_mse_loss += mse_loss.item() if mse_loss is not None else 0.0
-                batch_acc = self._calculate_accuracy(final, discrete_expr_label)
+                batch_acc = self._calculate_per_bin_accuracy(
+                    final, discrete_expr_label, self.args.model.num_bins
+                )
                 cum_acc += batch_acc
+                # 计算总体accuracy
+                total_acc = self._calculate_accuracy(final, discrete_expr_label)
+                total_accs.append(total_acc)
                 if self.is_master:
                     num_bins = self.args.model.num_bins
                     valid_mask = discrete_expr_label != -100
@@ -536,7 +648,12 @@ class Trainer:
                     data_iter.set_postfix(
                         loss=running_loss / index,
                         mse_loss=running_mse_loss / index,
-                        acc=100 * cum_acc / index,
+                        total_acc=(
+                            100 * (sum(total_accs) / len(total_accs))
+                            if total_accs
+                            else 0.0
+                        ),
+                        per_bin_acc=100 * cum_acc / index,
                         pred_dist=pred_dist_str,
                     )
                 if index % self.args.log_on_wandb_every == 0:
@@ -545,7 +662,12 @@ class Trainer:
                             {
                                 "train/loss": running_loss / index,
                                 "train/mse_loss": running_mse_loss / index,
-                                "train/acc": 100 * cum_acc / index,
+                                "train/per_bin_acc": 100 * cum_acc / index,
+                                "train/total_acc": (
+                                    100 * (sum(total_accs) / len(total_accs))
+                                    if total_accs
+                                    else 0.0
+                                ),
                                 "epoch": epoch,
                                 "iteration": index,
                                 "train/learning_rate": self.optimizer.param_groups[0][
@@ -575,13 +697,20 @@ class Trainer:
             epoch_mse_loss = get_reduced_with_fabric(
                 running_mse_loss / index, self.fabric
             )
-            epoch_acc = get_reduced_with_fabric(100 * cum_acc / index, self.fabric)
+            epoch_per_bin_acc = get_reduced_with_fabric(
+                100 * cum_acc / index, self.fabric
+            )
+            epoch_total_acc = get_reduced_with_fabric(
+                100 * (sum(total_accs) / len(total_accs)) if total_accs else 0.0,
+                self.fabric,
+            )
             if self.is_master:
                 wandb.log(
                     {
                         "train/loss": epoch_loss,
                         "train/mse_loss": epoch_mse_loss,
-                        "train/acc": epoch_acc,
+                        "train/per_bin_acc": epoch_per_bin_acc,
+                        "train/total_acc": epoch_total_acc,
                         "epoch": epoch,
                         "learning_rate": self.optimizer.param_groups[0]["lr"],
                     }
@@ -598,7 +727,32 @@ class Trainer:
                 self.fabric,
                 iteration=index,
             )
-            self.scheduler.step()
+
+    def calculate_per_bin_ce_loss(self, logits, discrete_expr_label, ignore_index=-100):
+        """
+        logits: (batch, seq_len, num_bins)
+        discrete_expr_label: (batch, seq_len)
+        返回: (num_bins,) 每个bin的平均交叉熵损失
+        计算平均时不包括bin0
+        """
+        num_bins = self.args.model.num_bins
+        ce_losses = []
+        logits_flat = logits.reshape(-1, num_bins + 1)
+        labels_flat = discrete_expr_label.reshape(-1)
+        for i in range(1, num_bins + 1):  # 跳过bin0
+            # 只统计label为i且不是ignore_index的样本
+            mask = (labels_flat == i) & (labels_flat != ignore_index)
+            if mask.sum() == 0:
+                ce_losses.append(torch.tensor(0.0, device=logits.device))
+                continue
+            logits_i = logits_flat[mask]
+            labels_i = labels_flat[mask]
+            ce = nn.CrossEntropyLoss(reduction="mean")
+            ce_loss = ce(logits_i, labels_i)
+            ce_losses.append(ce_loss)
+        if len(ce_losses) == 0:
+            return torch.tensor(0.0, device=logits.device)
+        return torch.stack(ce_losses)  # (num_bins-1,)
 
     def calculate_loss(
         self,
@@ -620,8 +774,16 @@ class Trainer:
             0.0, device=logits.device if logits is not None else "cpu"
         )
         l0_loss = 0.0
+        per_bin_ce_loss = None
         if enable_ce and logits is not None and discrete_expr_label is not None:
-            ce_loss = self.loss_fn(logits.transpose(1, 2), discrete_expr_label)
+            per_bin_ce_loss = self.calculate_per_bin_ce_loss(
+                logits, discrete_expr_label
+            )
+            ce_loss = (
+                per_bin_ce_loss.mean()
+                if per_bin_ce_loss is not None
+                else torch.tensor(0.0, device=logits.device)
+            )
             total_loss += ce_loss_weight * ce_loss
         if (
             enable_mse

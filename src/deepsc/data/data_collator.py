@@ -3,8 +3,6 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 import torch
 
-from deepsc.preprocess import binning
-
 
 @dataclass
 class DataCollator:
@@ -93,11 +91,8 @@ class DataCollator:
                 genes = genes + 1
             # 做binning
             if self.do_binning:
-                expressions = binning(
-                    row=expressions,
-                    n_bins=self.num_bins,
-                )
-                # TODO: 这里需要检查一下，是否需要long (我猜应该不需要了，之前需要他是因为没找出bug)
+                # 按细胞进行离散化，
+                expressions = self.discretize_expression(expressions)
                 expressions = expressions.long()
             # 添加cls token
             genes = torch.cat(
@@ -308,3 +303,18 @@ class DataCollator:
         )
         # 根据索引截取
         return genes[selected_idx], expressions[selected_idx]
+
+    def discretize_expression(self, normalized_expr: torch.Tensor) -> torch.Tensor:
+        """
+        表达量离散化：b_j = Discretize_N(x̃_j)
+        Args:
+            normalized_expr: 归一化表达量 x̃, shape: (g,)
+        Returns:
+            bin_indices: 离散化的bin索引 b, shape: (g,)
+        """
+        min_val = normalized_expr.min()
+        max_val = normalized_expr.max()
+        normalized_range = (normalized_expr - min_val) / (max_val - min_val + 1e-8)
+        bin_indices = torch.floor(normalized_range * (self.num_bins - 1)).long()
+        bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+        return bin_indices + 1

@@ -31,6 +31,7 @@ def pretrain(cfg: DictConfig):
             entity=cfg.get("wandb_team", "rwth_lfb"),
             project=cfg.get("wandb_project", "DeepSC"),
             name=f"pretrain_feature: {cfg.pretrain_feature}, lr: {cfg.learning_rate}",
+            tags=["new_binning", "umap", "tsne"],
             config=dict(cfg),
         )
 
