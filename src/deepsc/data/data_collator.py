@@ -92,7 +92,7 @@ class DataCollator:
             # 做binning
             if self.do_binning:
                 # 按细胞进行离散化，
-                expressions = self.discretize_expression(expressions)
+                expressions = self.discretize_expression_three_bins(expressions)
                 expressions = expressions.long()
             # 添加cls token
             genes = torch.cat(
@@ -319,32 +319,75 @@ class DataCollator:
         bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
         return bin_indices + 1
 
-    def smart_binning(self, expr_values: torch.Tensor) -> torch.Tensor:
+    def discretize_expression_log_bins(
+        self, normalized_expr: torch.Tensor
+    ) -> torch.Tensor:
         """
-        expr_values: torch.Tensor, shape (g,)
-        返回：bin_indices, shape (g,)
-        逻辑与check_npz.py的smart_binning一致：
-        - [0,2)为第1个bin
-        - [2, log_edges[1])为第2个bin
-        - 其余为对>=2的log分bin
-        - 返回bin编号从1开始
+        新的表达量离散化方法：
+        - 小于2的元素分为bin1
+        - 大于等于2的元素，按对数间隔分为剩下的bin（元素越大bin宽度越宽）
+        Args:
+            normalized_expr: 原始表达量 x, shape: (g,)
+        Returns:
+            bin_indices: 离散化的bin索引 b, shape: (g,)
         """
         num_bins = self.num_bins
-        expr_np = expr_values.cpu().numpy()
-        expr_ge2 = expr_np[expr_np >= 2]
-        if expr_ge2.size > 0:
-            import numpy as np
+        expr = normalized_expr.clone()
+        bin_indices = torch.zeros_like(expr, dtype=torch.long)
 
-            log_edges = np.logspace(
-                np.log10(2.0), np.log10(expr_ge2.max() + 1e-3), num_bins
-            )
-            log_edges = log_edges[1:]
-            bin_edges = np.concatenate([[0.0, 2.0], log_edges])
-        else:
-            bin_edges = [0.0, 2.0] + [2.0 + i for i in range(1, num_bins)]
-            bin_edges = np.array(bin_edges)
-        # digitize, right=False, bins编号从1开始
-        bin_indices = np.digitize(expr_np, bin_edges, right=False)
-        # digitize返回0~num_bins, 但我们希望1~num_bins
-        bin_indices = np.clip(bin_indices, 1, num_bins)
-        return torch.from_numpy(bin_indices).to(expr_values.device)
+        # 1. 小于2的分为bin1
+        mask_lt2 = expr < 2
+        bin_indices[mask_lt2] = 1
+
+        # 2. 大于等于2的分为剩下的bin（对数分bin）
+        mask_ge2 = ~mask_lt2
+        if mask_ge2.any():
+            expr_ge2 = expr[mask_ge2]
+            min_val = 2.0
+            max_val = expr_ge2.max().item()
+            n_log_bins = num_bins - 1  # bin1已用
+            if max_val > min_val:
+                # 对数分bin
+                log_min = torch.log(torch.tensor(min_val))
+                log_max = torch.log(torch.tensor(max_val) + 1e-8)
+                log_expr = torch.log(expr_ge2)
+                # 归一化到[0,1]
+                norm_log = (log_expr - log_min) / (log_max - log_min + 1e-8)
+                # 分到[2, num_bins]的bin
+                bins = torch.floor(norm_log * (n_log_bins - 1)).long() + 2
+                bins = torch.clamp(bins, 2, num_bins)
+                bin_indices[mask_ge2] = bins
+            else:
+                # 如果所有大于等于2的值都相等，则分到bin2
+                bin_indices[mask_ge2] = 2
+        return bin_indices
+
+    def discretize_expression_three_bins(
+        self, normalized_expr: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        按如下规则分为3个bin：
+        - 小于3的为bin1
+        - 大于等于3且小于6.7的为bin2
+        - 大于等于6.7的为bin3
+        Args:
+            normalized_expr: 原始表达量 x, shape: (g,)
+        Returns:
+            bin_indices: 离散化的bin索引 b, shape: (g,)
+        """
+        expr = normalized_expr.clone()
+        bin_indices = torch.zeros_like(expr, dtype=torch.long)
+
+        # bin1: 小于3
+        mask_bin1 = expr < 3
+        bin_indices[mask_bin1] = 1
+
+        # bin2: 大于等于3且小于6.7
+        mask_bin2 = (expr >= 3) & (expr < 6.7)
+        bin_indices[mask_bin2] = 2
+
+        # bin3: 大于等于6.7
+        mask_bin3 = expr >= 6.7
+        bin_indices[mask_bin3] = 3
+
+        return bin_indices
