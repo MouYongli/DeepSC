@@ -2,13 +2,17 @@ import logging
 import math
 import os
 
-import hydra
 import numpy as np
 import torch
 from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import (
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+    LinearLR,
+    SequentialLR,
+)
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
@@ -16,7 +20,6 @@ from tqdm import tqdm
 import time
 import wandb
 from deepsc.data import DataCollator
-from deepsc.data.dataset import extract_rows_from_sparse_tensor
 from deepsc.utils import *
 
 
@@ -41,7 +44,7 @@ class Trainer:
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
-        self.load_data_new()
+        self.load_data()
         self.prepare_model()
 
     def load_all_sparse_tensors_from_folder(self, datapath):
@@ -64,89 +67,36 @@ class Trainer:
             )
         return torch.cat(tensors, dim=0)
 
-    @timeit
-    def load_data(self):
-        if os.path.isdir(self.args.data_path):
-            coo_tensor = self.load_all_sparse_tensors_from_folder(self.args.data_path)
-        else:
-            coo_tensor = torch.load(self.args.data_path)
-
-        row_indices = np.arange(coo_tensor.shape[0])
-        # TODO: 大数据量载入的问题
-        row_indices = np.arange(coo_tensor.shape[0])
-        train_idx, val_idx = train_test_split(
-            row_indices, test_size=0.05, random_state=self.args.seed
-        )
-        # extract rows from sparse tensor
-
-        coo_tensor = coo_tensor.coalesce()
-        data_train = extract_rows_from_sparse_tensor(coo_tensor, train_idx)
-        data_val = extract_rows_from_sparse_tensor(coo_tensor, val_idx)
-        # instantiate dataset
-        self.train_dataset: Dataset = hydra.utils.instantiate(
-            self.args.dataset, coo_tensor=data_train
-        )
-        self.val_dataset: Dataset = hydra.utils.instantiate(
-            self.args.dataset, coo_tensor=data_val
-        )
-        # setup dataloader
-        # 前者的抽样结果没有顺序，而后者是有顺序的，比如Rank 0 抽样结果是[0,1,2,3,4,5,6,7,8,9]，Rank 1 抽样结果是[10,11,12,13,14,15,16,17,18,19]
-        # TODO:我们在这里似乎不需要sequential的，而且这是scbert自己写的代码，
-        self.train_sampler = DistributedSampler(self.train_dataset)
-        self.val_sampler = SequentialDistributedSampler(
-            self.val_dataset,
-            batch_size=self.args.batch_size,
-            world_size=self.world_size,
-        )
-        train_loader = DataLoader(
-            self.train_dataset,
-            batch_size=self.args.batch_size,
-            sampler=self.train_sampler,
-            num_workers=8,
-            shuffle=True,
-            collate_fn=DataCollator(
-                do_padding=True,
-                pad_token_id=0,
-                pad_value=0,
-                do_mlm=True,
-                do_binning=True,
-                max_length=1000,
-                num_genes=self.args.model.num_genes,
-                num_bins=self.args.model.num_bins,
-            ),
-        )
-        val_loader = DataLoader(
-            self.val_dataset,
-            batch_size=self.args.batch_size,
-            sampler=self.val_sampler,
-            num_workers=4,
-            shuffle=True,
-            collate_fn=DataCollator(
-                do_padding=True,
-                pad_token_id=0,
-                pad_value=0,
-                do_mlm=True,
-                do_binning=True,
-                max_length=1000,
-                num_genes=self.args.model.num_genes,
-                num_bins=self.args.model.num_bins,
-            ),
-        )
-        self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
-            train_loader, val_loader
-        )
-
-    @timeit
-    def load_data_new(self):
-        # 只支持单个.npz文件，不支持目录
-        assert self.args.data_path.endswith(".npz"), "data_path必须为.npz文件"
-        from deepsc.data.dataset import GeneExpressionDatasetNew
-
-        csr_matrix = None
-        # 加载csr_matrix
+    def load_all_csr_from_folder(self, datapath):
+        """
+        加载文件夹内所有.npz文件，并拼接为一个csr_matrix
+        """
         import scipy.sparse
 
-        csr_matrix = scipy.sparse.load_npz(self.args.data_path)
+        matrices = []
+        for file in os.listdir(datapath):
+            if file.endswith(".npz"):
+                path = os.path.join(datapath, file)
+                matrix = scipy.sparse.load_npz(path)
+                matrices.append(matrix)
+        if not matrices:
+            raise ValueError(f"No .npz files found in {datapath}")
+        return scipy.sparse.vstack(matrices)
+
+    @timeit
+    def load_data(self):
+        # 支持单个.npz文件或目录
+        import scipy.sparse
+
+        from deepsc.data.dataset import GeneExpressionDatasetNew
+
+        if os.path.isdir(self.args.data_path):
+            csr_matrix = self.load_all_csr_from_folder(self.args.data_path)
+        else:
+            assert self.args.data_path.endswith(
+                ".npz"
+            ), "data_path必须为.npz文件或包含.npz文件的目录"
+            csr_matrix = scipy.sparse.load_npz(self.args.data_path)
         row_indices = np.arange(csr_matrix.shape[0])
         train_idx, val_idx = train_test_split(
             row_indices, test_size=0.05, random_state=self.args.seed
@@ -242,22 +192,50 @@ class Trainer:
         )
 
     def create_scheduler(self, optimizer, args, train_loader):
+
         total_steps = args.epoch * math.ceil(len(train_loader) / args.grad_acc)
-        if self.args.use_warmup:
-            warmup_ratio = self.args.warmup_ratio
-            warmup_steps = math.ceil(total_steps * warmup_ratio)
-            main_steps = total_steps - warmup_steps
+        warmup_ratio = self.args.warmup_ratio
+        warmup_steps = math.ceil(total_steps * warmup_ratio)
+        main_steps = total_steps - warmup_steps
+        if self.args.use_scbert_scheduler:
+            scheduler = CosineAnnealingWarmupRestarts(
+                optimizer,
+                first_cycle_steps=warmup_steps * 1.5,
+                cycle_mult=1.5,
+                max_lr=1e-4,
+                min_lr=5e-6,
+                warmup_steps=warmup_steps,
+                gamma=0.8,
+            )
+            return scheduler
+        elif self.args.use_mogaide_scheduler:
             linear_warmup = LinearLR(
                 optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
             )
-            cosine_anneal = CosineAnnealingLR(optimizer, T_max=main_steps)
+            cosine_anneal = CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(
+                optimizer,
+                T_0=warmup_steps * 3,
+                T_mult=1,
+                warmup_steps=0,
+                decay=0.85,
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[linear_warmup, cosine_anneal],
+                milestones=[warmup_steps],
+            )
+        elif self.args.use_warmup:
+            linear_warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+            )
+            cosine_anneal = CosineAnnealingWarmRestarts(optimizer, T_0=warmup_steps)
             scheduler = SequentialLR(
                 optimizer,
                 schedulers=[linear_warmup, cosine_anneal],
                 milestones=[warmup_steps],
             )
         else:
-            scheduler = CosineAnnealingLR(optimizer, T_max=total_steps)
+            scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, T_mult=1)
         return scheduler
 
     def _process_batch(self, data):
@@ -306,7 +284,7 @@ class Trainer:
                 masked_continuous_expr,
                 return_mask_prob=True,
             )
-        loss, _, mse_loss, _ = self.calculate_loss(
+        loss, ce_loss, mse_loss, l0_loss = self.calculate_loss(
             self.args.enable_ce,
             self.args.enable_mse,
             logits=logits,
@@ -323,7 +301,7 @@ class Trainer:
             final = self.softmax(logits).argmax(dim=-1)
         else:
             final = None
-        return loss, final, mse_loss
+        return loss, final, mse_loss, ce_loss, l0_loss
 
     def _calculate_per_bin_accuracy(self, final, discrete_expr_label, num_bins):
         """
@@ -356,12 +334,7 @@ class Trainer:
 
     def validate(self, epoch, iteration=0):
         self.model.eval()
-        running_loss, predictions, truths = 0.0, [], []
-        running_mse_loss = 0.0  # accumulate mse_loss
-        batch_accs = []
-        cum_acc = 0.0
-        total_accs = []
-        # 新增：收集expr_emb
+        predictions, truths = [], []
         all_expr_embs = []
         with torch.no_grad():
             data_iter = self.val_loader
@@ -371,6 +344,12 @@ class Trainer:
                     desc=f"Epoch {epoch} [val] Iter {iteration}",
                     ncols=300,
                 )
+            accm_loss = []
+            accm_ce_loss = []
+            accm_l0_loss = []
+            accm_mse_loss = []
+            accm_per_bin_acc = []
+            accm_total_acc = []
             for index, data in enumerate(data_iter):
                 # --------- 新增：尝试获取expr_emb ---------
                 gene = data["gene"]
@@ -388,31 +367,30 @@ class Trainer:
                     # 某些模型不支持return_encodings，直接跳过
                     pass
                 # --------- 原有loss/acc计算 ---------
-                loss, final, mse_loss = self._process_batch(data)
+                loss, final, mse_loss, ce_loss, l0_loss = self._process_batch(data)
                 discrete_expr_label = data["discrete_expr_label"]
-                running_loss += loss.item()
-                running_mse_loss += mse_loss.item() if mse_loss is not None else 0.0
+                accm_loss.append(loss.item())
+                accm_ce_loss.append(ce_loss.item())
+                accm_l0_loss.append(l0_loss.item())
+                accm_mse_loss.append(mse_loss.item())
                 if final is not None:
                     predictions.append(final)
                     truths.append(discrete_expr_label)
-                    batch_acc = self._calculate_per_bin_accuracy(
+                    per_bin_accuracy = self._calculate_per_bin_accuracy(
                         final, discrete_expr_label, self.args.model.num_bins
                     )
-                    batch_accs.append(batch_acc)
-                    cum_acc += batch_acc
                     # 计算总体accuracy
                     total_acc = self._calculate_accuracy(final, discrete_expr_label)
-                    total_accs.append(total_acc)
+                    accm_per_bin_acc.append(per_bin_accuracy)
+                    accm_total_acc.append(total_acc)
                 if self.is_master:
                     data_iter.set_postfix(
-                        loss=running_loss / (index + 1),
-                        mse_loss=running_mse_loss / (index + 1),
-                        per_bin_acc=100 * cum_acc / (index + 1),
-                        total_acc=(
-                            100 * (sum(total_accs) / len(total_accs))
-                            if total_accs
-                            else 0.0
-                        ),
+                        loss=sum(accm_loss) / len(accm_loss),
+                        mse_loss=sum(accm_mse_loss) / len(accm_mse_loss),
+                        ce_loss=sum(accm_ce_loss) / len(accm_ce_loss),
+                        l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
+                        per_bin_acc=sum(accm_per_bin_acc) / len(accm_per_bin_acc),
+                        total_acc=sum(accm_total_acc) / len(accm_total_acc),
                     )
             # 只在有分类任务时做pad和评估
             if len(predictions) > 0:
@@ -519,27 +497,38 @@ class Trainer:
                     print(f"[Embedding Analysis] t-SNE failed: {e}")
 
             val_loss = get_reduced_with_fabric(
-                running_loss / len(self.val_loader), self.fabric
+                sum(accm_loss) / len(accm_loss), self.fabric
             )
             val_mse_loss = get_reduced_with_fabric(
-                running_mse_loss / len(self.val_loader), self.fabric
+                sum(accm_mse_loss) / len(accm_mse_loss), self.fabric
             )
             val_per_bin_acc = get_reduced_with_fabric(
-                100 * cum_acc / len(self.val_loader), self.fabric
+                100 * sum(accm_per_bin_acc) / len(accm_per_bin_acc), self.fabric
             )
             val_total_acc = get_reduced_with_fabric(
-                100 * (sum(total_accs) / len(total_accs)) if total_accs else 0.0,
+                100 * sum(accm_total_acc) / len(accm_total_acc),
                 self.fabric,
+            )
+            val_ce_loss = get_reduced_with_fabric(
+                sum(accm_ce_loss) / len(accm_ce_loss), self.fabric
+            )
+            val_l0_loss = get_reduced_with_fabric(
+                sum(accm_l0_loss) / len(accm_l0_loss), self.fabric
             )
             if self.is_master:
                 logging.info(
-                    "Val Epoch %d Iter %d | Loss: %.6f | MSE Loss: %.6f | Per-bin Acc: %.4f%% | Total Acc: %.4f%%",
+                    "Val E%d I%d | L:%.4f | Acc:%.2f%% | BinAcc:%.2f%%",
                     epoch,
                     iteration,
                     val_loss,
-                    val_mse_loss,
-                    val_per_bin_acc,
                     val_total_acc,
+                    val_per_bin_acc,
+                )
+                logging.info(
+                    "MSE:%.4f | CE:%.4f | L0:%.4f",
+                    val_mse_loss,
+                    val_ce_loss,
+                    val_l0_loss,
                 )
                 wandb.log(
                     {
@@ -547,8 +536,9 @@ class Trainer:
                         "val/mse_loss": val_mse_loss,
                         "val/per_bin_acc": val_per_bin_acc,
                         "val/total_acc": val_total_acc,
+                        "val/ce_loss": val_ce_loss,
+                        "val/l0_loss": val_l0_loss,
                         "epoch": epoch,
-                        "val/learning_rate": self.optimizer.param_groups[0]["lr"],
                         "val/expr_emb_rank": rank.item(),
                     }
                 )
@@ -581,21 +571,26 @@ class Trainer:
 
     def train(self):
         # 用于恢复训练,cursor可能会删掉这行，不要让它删掉
-        self.checkpoint_reload()
+        # self.checkpoint_reload()
         if self.args.model_name == "DeepSC":
             self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
-            running_loss, cum_acc = 0.0, 0.0
-            running_mse_loss = 0.0  # accumulate mse_loss
             data_iter = self.train_loader
             if self.is_master:
                 data_iter = tqdm(
                     self.train_loader, desc=f"Epoch {epoch} [train]", ncols=300
                 )
-            total_accs = []
+
+            accm_loss = []
+            accm_ce_loss = []
+            accm_l0_loss = []
+            accm_mse_loss = []
+            accm_per_bin_acc = []
+            accm_total_acc = []
+
             for index, data in enumerate(data_iter, start=1):
 
                 # 每个data包含以下key：
@@ -609,8 +604,19 @@ class Trainer:
                 # 跳过已完成的iteration
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
-                loss, final, mse_loss = self._process_batch(data)
+                loss, final, mse_loss, ce_loss, l0_loss = self._process_batch(data)
                 discrete_expr_label = data["discrete_expr_label"]
+                per_bin_accuracy = self._calculate_per_bin_accuracy(
+                    final, discrete_expr_label, self.args.model.num_bins
+                )
+                total_acc = self._calculate_accuracy(final, discrete_expr_label)
+                accm_loss.append(loss.item())
+                accm_ce_loss.append(ce_loss.item())
+                accm_l0_loss.append(l0_loss.item())
+                accm_mse_loss.append(mse_loss.item())
+                accm_per_bin_acc.append(per_bin_accuracy)
+                accm_total_acc.append(total_acc)
+
                 is_accumulating = index % self.args.grad_acc != 0
                 if is_accumulating:
                     with self.fabric.no_backward_sync(
@@ -623,51 +629,44 @@ class Trainer:
                     self.optimizer.step()
                     self.scheduler.step()  # 每次optimizer.step()后更新学习率
                     self.optimizer.zero_grad()
-                running_loss += loss.item()
-                running_mse_loss += mse_loss.item() if mse_loss is not None else 0.0
-                batch_acc = self._calculate_per_bin_accuracy(
-                    final, discrete_expr_label, self.args.model.num_bins
-                )
-                cum_acc += batch_acc
-                # 计算总体accuracy
-                total_acc = self._calculate_accuracy(final, discrete_expr_label)
-                total_accs.append(total_acc)
-                if self.is_master:
-                    num_bins = self.args.model.num_bins
-                    valid_mask = discrete_expr_label != -100
-                    # 选择top5还是前5个bin，下面以top5为例, wrap it into a function
-                    top_bins = compute_bin_distribution(
-                        final, valid_mask, num_bins, topk=5
-                    )
-                    if top_bins is not None:
-                        pred_dist_str = ", ".join(
-                            [f"bin{idx}:{p:.2%}" for idx, p in top_bins]
+
+                    average_loss = sum(accm_loss) / len(accm_loss)
+                    average_ce_loss = sum(accm_ce_loss) / len(accm_ce_loss)
+                    average_l0_loss = sum(accm_l0_loss) / len(accm_l0_loss)
+                    average_mse_loss = sum(accm_mse_loss) / len(accm_mse_loss)
+                    average_per_bin_acc = sum(accm_per_bin_acc) / len(accm_per_bin_acc)
+                    average_total_acc = sum(accm_total_acc) / len(accm_total_acc)
+
+                    if self.is_master:
+                        num_bins = self.args.model.num_bins
+                        pred_dist_str = self.get_top_bins_distribution_str(
+                            final, discrete_expr_label, num_bins, topk=5
                         )
-                    else:
-                        pred_dist_str = "N/A"
-                    data_iter.set_postfix(
-                        loss=running_loss / index,
-                        mse_loss=running_mse_loss / index,
-                        total_acc=(
-                            100 * (sum(total_accs) / len(total_accs))
-                            if total_accs
-                            else 0.0
-                        ),
-                        per_bin_acc=100 * cum_acc / index,
-                        pred_dist=pred_dist_str,
-                    )
-                if index % self.args.log_on_wandb_every == 0:
+                        data_iter.set_postfix(
+                            loss=average_loss,
+                            mse_loss=average_mse_loss,
+                            total_acc=average_total_acc,
+                            per_bin_acc=average_per_bin_acc,
+                            ce_loss=average_ce_loss,
+                            l0_loss=average_l0_loss,
+                            pred_dist=pred_dist_str,
+                        )
+
+                    accm_loss.clear()
+                    accm_ce_loss.clear()
+                    accm_l0_loss.clear()
+                    accm_mse_loss.clear()
+                    accm_per_bin_acc.clear()
+                    accm_total_acc.clear()
                     if self.is_master:
                         wandb.log(
                             {
-                                "train/loss": running_loss / index,
-                                "train/mse_loss": running_mse_loss / index,
-                                "train/per_bin_acc": 100 * cum_acc / index,
-                                "train/total_acc": (
-                                    100 * (sum(total_accs) / len(total_accs))
-                                    if total_accs
-                                    else 0.0
-                                ),
+                                "train/loss": average_loss,
+                                "train/mse_loss": average_mse_loss,
+                                "train/per_bin_acc": average_per_bin_acc,
+                                "train/total_acc": average_total_acc,
+                                "train/ce_loss": average_ce_loss,
+                                "train/l0_loss": average_l0_loss,
                                 "epoch": epoch,
                                 "iteration": index,
                                 "train/learning_rate": self.optimizer.param_groups[0][
@@ -684,7 +683,7 @@ class Trainer:
                         self.model,
                         self.optimizer,
                         self.scheduler,
-                        running_loss / index,
+                        average_loss,
                         self.args.model_name,
                         self.args.ckpt_dir,
                         self.fabric,
@@ -693,15 +692,14 @@ class Trainer:
             # at the end of each epoch, reset the iteration
             self.iteration = 1
 
-            epoch_loss = get_reduced_with_fabric(running_loss / index, self.fabric)
-            epoch_mse_loss = get_reduced_with_fabric(
-                running_mse_loss / index, self.fabric
-            )
+            # TODO: 在epoch的末尾有没有必要用这玩意？如果在每个iteration都用或者在每次log wandb都用，会不会拖慢速度？
+            epoch_loss = get_reduced_with_fabric(average_loss, self.fabric)
+            epoch_mse_loss = get_reduced_with_fabric(average_mse_loss, self.fabric)
             epoch_per_bin_acc = get_reduced_with_fabric(
-                100 * cum_acc / index, self.fabric
+                average_per_bin_acc, self.fabric
             )
             epoch_total_acc = get_reduced_with_fabric(
-                100 * (sum(total_accs) / len(total_accs)) if total_accs else 0.0,
+                average_total_acc,
                 self.fabric,
             )
             if self.is_master:
@@ -721,7 +719,7 @@ class Trainer:
                 self.model,
                 self.optimizer,
                 self.scheduler,
-                running_loss / index,
+                epoch_loss,
                 self.args.model_name,
                 self.args.ckpt_dir,
                 self.fabric,
@@ -798,3 +796,14 @@ class Trainer:
         l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
         total_loss += l0_lambda * l0_loss
         return total_loss, ce_loss, mse_loss, l0_loss
+
+    def get_top_bins_distribution_str(
+        self, final, discrete_expr_label, num_bins, topk=5
+    ):
+        valid_mask = discrete_expr_label != -100
+        top_bins = compute_bin_distribution(final, valid_mask, num_bins, topk=topk)
+        if top_bins is not None:
+            pred_dist_str = ", ".join([f"bin{idx}:{p:.2%}" for idx, p in top_bins])
+        else:
+            pred_dist_str = "N/A"
+        return pred_dist_str

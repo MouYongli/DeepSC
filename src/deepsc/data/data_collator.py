@@ -318,3 +318,33 @@ class DataCollator:
         bin_indices = torch.floor(normalized_range * (self.num_bins - 1)).long()
         bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
         return bin_indices + 1
+
+    def smart_binning(self, expr_values: torch.Tensor) -> torch.Tensor:
+        """
+        expr_values: torch.Tensor, shape (g,)
+        返回：bin_indices, shape (g,)
+        逻辑与check_npz.py的smart_binning一致：
+        - [0,2)为第1个bin
+        - [2, log_edges[1])为第2个bin
+        - 其余为对>=2的log分bin
+        - 返回bin编号从1开始
+        """
+        num_bins = self.num_bins
+        expr_np = expr_values.cpu().numpy()
+        expr_ge2 = expr_np[expr_np >= 2]
+        if expr_ge2.size > 0:
+            import numpy as np
+
+            log_edges = np.logspace(
+                np.log10(2.0), np.log10(expr_ge2.max() + 1e-3), num_bins
+            )
+            log_edges = log_edges[1:]
+            bin_edges = np.concatenate([[0.0, 2.0], log_edges])
+        else:
+            bin_edges = [0.0, 2.0] + [2.0 + i for i in range(1, num_bins)]
+            bin_edges = np.array(bin_edges)
+        # digitize, right=False, bins编号从1开始
+        bin_indices = np.digitize(expr_np, bin_edges, right=False)
+        # digitize返回0~num_bins, 但我们希望1~num_bins
+        bin_indices = np.clip(bin_indices, 1, num_bins)
+        return torch.from_numpy(bin_indices).to(expr_values.device)
