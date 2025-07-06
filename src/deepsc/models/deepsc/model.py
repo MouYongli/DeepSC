@@ -351,7 +351,21 @@ class DeepSC(nn.Module):
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
         self.classifier = nn.Linear(embedding_dim, num_bins + 1)
-        self.regressor = nn.Linear(embedding_dim, 1)
+        self.regressor = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim // 2),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim // 2, 1),
+        )
         self.enable_l0 = enable_l0
         self.enable_mse = enable_mse
         self.enable_ce = enable_ce
@@ -380,18 +394,15 @@ class DeepSC(nn.Module):
             else:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
 
-        if return_encodings:
-            return gene_emb, expr_emb
-
         if self.enable_mse and self.enable_ce:
             regression_output = self.regressor(expr_emb)
             regression_output = regression_output.squeeze(-1)
             logits = self.classifier(expr_emb)
-            return logits, regression_output, y
+            return logits, regression_output, y, gene_emb, expr_emb
         elif self.enable_mse:
             regression_output = self.regressor(expr_emb)
             regression_output = regression_output.squeeze(-1)
-            return regression_output, y
+            return regression_output, y, gene_emb, expr_emb
         elif self.enable_ce:
             logits = self.classifier(expr_emb)
-            return logits, y
+            return logits, y, gene_emb, expr_emb

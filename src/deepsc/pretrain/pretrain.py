@@ -30,8 +30,8 @@ def pretrain(cfg: DictConfig):
         wandb.init(
             entity=cfg.get("wandb_team", "rwth_lfb"),
             project=cfg.get("wandb_project", "DeepSC"),
-            name=f"pretrain_feature: {cfg.pretrain_feature}, lr: {cfg.learning_rate}",
-            tags=["new_binning", "umap", "tsne"],
+            name=f"weighted mse, lr: {cfg.learning_rate}",
+            tags=["l0", "5bin", "sort to truncate", "normal cellxgene dataset"],
             config=dict(cfg),
         )
 

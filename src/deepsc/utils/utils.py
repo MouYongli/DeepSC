@@ -168,7 +168,6 @@ def save_ckpt_fabric(
     model,
     optimizer,
     scheduler,
-    losses,
     model_name,
     ckpt_folder,
     fabric,
@@ -554,6 +553,104 @@ def masked_mse_loss(
         raise ValueError(f"Invalid reduction mode: {reduction}")
 
 
+def weighted_masked_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    reduction: str = "mean",
+    log_each: bool = False,
+    loss_type: str = "mse",
+):
+    """
+    分区加权 MSE Loss，只在 mask=True 的位置计算。
+    权重区间：
+        target == 1       → 0.2
+        1 < target < 3    → 0.5
+        3 <= target < 5   → 1.0
+        target >= 5       → 2.0
+    加权后进行归一化处理，防止梯度爆炸或 collapse。
+    loss_type: 'mse'（默认）或 'huber'，决定损失函数类型。
+    """
+
+    if loss_type == "mse":
+        loss_fn = nn.MSELoss(reduction="none")
+    elif loss_type == "huber":
+        loss_fn = nn.HuberLoss(reduction="none")
+    else:
+        raise ValueError(f"Invalid loss_type: {loss_type}. Supported: 'mse', 'huber'.")
+
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    with torch.no_grad():
+        weights = torch.ones_like(target)
+        weights[(target == 1)] = 0.2
+        weights[(target > 1) & (target < 3)] = 0.5
+        weights[(target >= 3) & (target < 5)] = 1.0
+        weights[target >= 5] = 2.0
+
+    elementwise_loss = elementwise_loss[mask]
+    weights = weights[mask]
+
+    if elementwise_loss.numel() == 0:
+        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+    weights = weights / (weights.sum() + 1e-8)
+
+    final_loss = elementwise_loss * weights
+
+    if log_each:
+        print("[VAL] pred.mean():", pred[mask].mean().item())
+        print("[VAL] pred.std():", pred[mask].std().item())
+        print("[VAL] target.mean():", target[mask].mean().item())
+        print("[VAL] target.std():", target[mask].std().item())
+        print("[VAL] weighted loss sample:", final_loss[:10].tolist())
+
+    if reduction == "mean":
+        return final_loss.sum()
+    elif reduction == "sum":
+        return final_loss.sum()
+    elif reduction == "none":
+        return final_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
+
+
+def weighted_masked_mse_loss_v2(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    reduction: str = "mean",
+    log_each: bool = False,
+):
+    """
+    以2为底的指数加权 MSE Loss，只在 mask=True 的位置上计算。
+    权重 = 2^(target - shift)
+    shift 可调节权重起点，默认为0。
+    """
+    loss_fn = nn.MSELoss(reduction="none")
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    # 生成以2为底的指数权重
+    weights = torch.pow(1.8, target - 1)
+
+    # 只在 mask=True 的地方计算
+    weighted_loss = elementwise_loss * weights
+    masked_weighted_loss = weighted_loss[mask]
+
+    if reduction == "mean":
+        if masked_weighted_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        return masked_weighted_loss.mean()
+    elif reduction == "sum":
+        if masked_weighted_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        return masked_weighted_loss.sum()
+    elif reduction == "none":
+        return masked_weighted_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
+
+
 def log_stats(
     is_master,
     num_bins,
@@ -800,3 +897,27 @@ class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
                 self.print_lr(self.verbose, i, lr, epoch)
 
         self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
+
+def interval_masked_mse_loss(pred, target, mask):
+    """
+    统计四个区间的未加权 MSE
+    返回: dict, key为区间名，value为MSE
+    区间：lt3, 3to5, 5to7, ge7
+    """
+    loss_fn = nn.MSELoss(reduction="none")
+    elementwise_loss = loss_fn(pred, target)
+    results = {}
+    intervals = [
+        ("lt3", target < 3),
+        ("3to5", (target >= 3) & (target < 5)),
+        ("5to7", (target >= 5) & (target < 7)),
+        ("ge7", target >= 7),
+    ]
+    for name, cond in intervals:
+        interval_mask = cond & mask
+        if interval_mask.sum() == 0:
+            results[name] = torch.tensor(0.0, device=pred.device)
+        else:
+            results[name] = elementwise_loss[interval_mask].mean()
+    return results

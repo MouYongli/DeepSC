@@ -7,5 +7,5 @@ source .env
 set +a
 
 python -m src.deepsc.data.preprocessing.batch_normalize \
-  --input_dir /home/angli/baseline/DeepSC/data/3ca/merged_batch_data_csr \
-  --output_dir /home/angli/baseline/DeepSC/data/3ca/merged_batch_data_csr_normalized \
+  --input_dir /home/angli/baseline/DeepSC/data/cellxgene/new_csr/heart \
+  --output_dir /home/angli/baseline/DeepSC/data/cellxgene/new_csr_normalized/heart \

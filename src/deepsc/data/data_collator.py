@@ -33,6 +33,7 @@ class DataCollator:
     """
 
     num_bins: int
+    do_hard_mask: bool
     pad_token_id: int = 0
     pad_value: int = 0
     num_genes: int = 34682
@@ -92,7 +93,7 @@ class DataCollator:
             # 做binning
             if self.do_binning:
                 # 按细胞进行离散化，
-                expressions = self.discretize_expression_three_bins(expressions)
+                expressions = self.discretize_expression(expressions)
                 expressions = expressions.long()
             # 添加cls token
             genes = torch.cat(
@@ -144,14 +145,17 @@ class DataCollator:
 
         # 为padded_continuous_expr添加mask 以及为padded_discrete_expr添加mask
         if self.do_mlm:
+            # 只采样一次 mask
             masked_discrete_expressions, mask = self._mask(
                 padded_discrete_expr, return_mask=True
             )
-            masked_continuous_expressions, _ = self._mask(
-                padded_continuous_expr, return_mask=True
+            # 用同一个 mask 应用到 continuous
+            masked_continuous_expressions = padded_continuous_expr.masked_fill(
+                mask, self.mask_value
             )
         else:
             masked_discrete_expressions = padded_discrete_expr
+            masked_continuous_expressions = padded_continuous_expr
             mask = torch.zeros_like(padded_discrete_expr, dtype=torch.bool)
         data_dict["masked_discrete_expr"] = masked_discrete_expressions
         data_dict["masked_continuous_expr"] = masked_continuous_expressions
@@ -181,8 +185,11 @@ class DataCollator:
         """
         device = expressions.device
         shape = expressions.shape
-
-        probability_matrix = torch.full(shape, self.mlm_probability)
+        if self.do_hard_mask:
+            probability_matrix = torch.full(shape, self.mlm_probability)
+        else:
+            bin_x = expressions.float()
+            probability_matrix = self.mlm_probability * (0.2 + ((bin_x - 1) ** 2) / 6.3)
         # set padded postion probability to 0
         probability_matrix[expressions.eq(self.pad_value)] = 0
         if self.keep_first_n_tokens > 0:
@@ -208,7 +215,9 @@ class DataCollator:
             return genes, expressions, expression_label
         if len(genes) > max_length:  # sample or truncate
             if self.sampling:
-                return self._sample(genes, expressions, expression_label, max_length)
+                return self._top_expr_or_pad(
+                    genes, expressions, expression_label, max_length
+                )
             else:
                 return (
                     genes[:max_length],
@@ -283,26 +292,6 @@ class DataCollator:
             ]
         )
         return genes, expressions, expression_label
-
-    def _truncate_by_expression(
-        self,
-        genes: torch.LongTensor,
-        expressions: torch.Tensor,
-        max_length: int,
-    ) -> Tuple[torch.LongTensor, torch.Tensor]:
-        # 保留最前面的 keep_first_n_tokens 不变
-        n = self.keep_first_n_tokens
-        # 对剩余部分按表达值降序排列，取 top-k
-        expr_tail = expressions[n:]
-        genes_tail = genes[n:]
-        # 获取降序索引
-        sorted_idx = torch.argsort(expr_tail, descending=True)[: (max_length - n)]
-        # 最终索引：前 n 个 + 按表达值选出的
-        selected_idx = torch.cat(
-            [torch.arange(n, device=genes.device), sorted_idx + n], dim=0
-        )
-        # 根据索引截取
-        return genes[selected_idx], expressions[selected_idx]
 
     def discretize_expression(self, normalized_expr: torch.Tensor) -> torch.Tensor:
         """
@@ -391,3 +380,53 @@ class DataCollator:
         bin_indices[mask_bin3] = 3
 
         return bin_indices
+
+    def _top_expr_or_pad(
+        self,
+        genes: torch.LongTensor,
+        expressions: torch.Tensor,
+        expression_label: torch.Tensor,
+        max_length: int,
+    ) -> Tuple[torch.LongTensor, torch.Tensor, torch.Tensor]:
+        """
+        优先截取表达值最大的基因，如果还不够长就pad。
+        保持前 keep_first_n_tokens 个不变。
+        """
+        device = genes.device
+        _n = self.keep_first_n_tokens
+        total_len = len(genes)
+        # 保持前n个不变
+        if _n > 0:
+            # 前n个直接保留
+            fixed_genes = genes[:_n]
+            fixed_expr = expressions[:_n]
+            fixed_label = expression_label[:_n]
+            # 剩下的部分按表达值排序
+            rest_genes = genes[_n:]
+            rest_expr = expressions[_n:]
+            rest_label = expression_label[_n:]
+            if len(rest_genes) > 0:
+                sorted_indices = torch.argsort(rest_expr, descending=True)
+                rest_genes = rest_genes[sorted_indices]
+                rest_expr = rest_expr[sorted_indices]
+                rest_label = rest_label[sorted_indices]
+            # 拼接
+            needed = max_length - _n
+            selected_genes = rest_genes[:needed]
+            selected_expr = rest_expr[:needed]
+            selected_label = rest_label[:needed]
+            out_genes = torch.cat([fixed_genes, selected_genes], dim=0)
+            out_expr = torch.cat([fixed_expr, selected_expr], dim=0)
+            out_label = torch.cat([fixed_label, selected_label], dim=0)
+        else:
+            # 全部按表达值排序
+            sorted_indices = torch.argsort(expressions, descending=True)
+            out_genes = genes[sorted_indices][:max_length]
+            out_expr = expressions[sorted_indices][:max_length]
+            out_label = expression_label[sorted_indices][:max_length]
+        # 如果还不够长就pad
+        if len(out_genes) < max_length:
+            out_genes, out_expr, out_label = self._pad(
+                out_genes, out_expr, out_label, max_length
+            )
+        return out_genes, out_expr, out_label
