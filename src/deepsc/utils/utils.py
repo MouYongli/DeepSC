@@ -516,6 +516,52 @@ class LabelSmoothCrossEntropyLoss(_WeightedLoss):
         return loss
 
 
+class FocalLoss(_WeightedLoss):
+    """
+    Focal Loss for multi-class classification.
+    Args:
+        weight (Tensor, optional): a manual rescaling weight given to each class.
+        gamma (float, optional): focusing parameter gamma >= 0.
+        ignore_index (int, optional): Specifies a
+        target value that is ignored and does not contribute to the input gradient.
+        reduction (string, optional): Specifies the reduction to apply to the output: 'none' | 'mean' | 'sum'.
+    """
+
+    def __init__(self, weight=None, gamma=2.0, ignore_index=-100, reduction="mean"):
+        super().__init__(weight=weight, reduction=reduction)
+        self.weight = weight
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+
+    def forward(self, input, target):
+        if len(input.shape) > 2:
+            input = input.reshape(-1, input.size(-1))
+        if len(target.shape) > 1:
+            target = target.reshape(-1)
+        valid_mask = target != self.ignore_index
+        input = input[valid_mask]
+        target = target[valid_mask]
+        logpt = F.log_softmax(input, dim=-1)
+        pt = torch.exp(logpt)
+        logpt = logpt.gather(1, target.unsqueeze(1)).squeeze(1)
+        pt = pt.gather(1, target.unsqueeze(1)).squeeze(1)
+        if self.weight is not None:
+            at = self.weight.gather(0, target)
+            logpt = logpt * at
+        loss = -((1 - pt) ** self.gamma) * logpt
+        if self.reduction == "mean":
+            return (
+                loss.mean()
+                if loss.numel() > 0
+                else torch.tensor(0.0, device=input.device)
+            )
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss
+
+
 def masked_mse_loss(
     pred: torch.Tensor,
     target: torch.Tensor,

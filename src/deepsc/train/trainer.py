@@ -21,7 +21,7 @@ import time
 import wandb
 from deepsc.data import DataCollator
 from deepsc.utils import *
-from deepsc.utils.utils import interval_masked_mse_loss
+from deepsc.utils.utils import FocalLoss, interval_masked_mse_loss
 
 
 # timeit decorator
@@ -170,9 +170,9 @@ class Trainer:
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
         # 加权 CrossEntropyLoss
         # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
-        ce_weight = torch.tensor([0, 1, 4.5, 4.5, 12, 60], dtype=torch.float32)
-        self.loss_fn = nn.CrossEntropyLoss(
-            weight=ce_weight, reduction="mean", ignore_index=-100
+        ce_weight = torch.tensor([0.0, 0.1106, 0.5006, 0.4988, 1.4074, 6.4826])
+        self.loss_fn = FocalLoss(
+            weight=ce_weight, reduction="mean", ignore_index=-100, gamma=2.0
         )
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
@@ -288,7 +288,13 @@ class Trainer:
             is_val=is_val,
         )
         if logits is not None:
-            final = self.softmax(logits).argmax(dim=-1)
+            probs = self.softmax(logits)  # (B, T, C)
+            final = probs.argmax(dim=-1)  # 分类预测结果
+            if is_val:
+                # 累加当前 batch 的 softmax 概率和 token 数
+                self.softmax_prob_sum += probs.sum(dim=(0, 1))  # (num_bins+1,)
+                self.softmax_total_count += probs.shape[0] * probs.shape[1]
+
         else:
             final = None
         # 新增：区间 MSE 统计
@@ -317,6 +323,10 @@ class Trainer:
         return loss, final, mse_loss, ce_loss, l0_loss, interval_mse
 
     def validate(self, epoch, iteration=0):
+        self.softmax_prob_sum = torch.zeros(
+            self.args.model.num_bins + 1, device=self.fabric.device
+        )
+        self.softmax_total_count = 0
         self.log_each = True
         self.model.eval()
         print("the loss weights are:")
@@ -520,6 +530,12 @@ class Trainer:
                         / len(accm_interval_mse["ge7"]),
                     }
                 )
+        avg_probs = self.softmax_prob_sum / self.softmax_total_count
+        print("\n[VAL] 平均 Softmax 概率 per bin:")
+        for i, p in enumerate(avg_probs):
+            print(f"  Bin {i}: {p.item():.4f}")
+        del self.softmax_prob_sum
+        del self.softmax_total_count
 
     def train(self):
         # 用于恢复训练,cursor可能会删掉这行，不要让它删掉
@@ -699,7 +715,7 @@ class Trainer:
                 continue
             logits_i = logits_flat[mask]
             labels_i = labels_flat[mask]
-            ce = nn.CrossEntropyLoss(reduction="mean")
+            ce = FocalLoss(reduction="mean", gamma=2.0)
             ce_loss = ce(logits_i, labels_i)
             ce_losses.append(ce_loss)
         if len(ce_losses) == 0:

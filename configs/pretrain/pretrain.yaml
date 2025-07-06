@@ -13,7 +13,7 @@ l0_lambda: 0.00
 ce_loss_weight: 1.0
 mse_loss_weight: 0
 weighted_ce_loss: True
-mean_ce_loss: True
+mean_ce_loss: False
 use_hard_mse_loss: True
 use_exp_mse_loss: False
 do_hard_mask: False
@@ -23,7 +23,7 @@ data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 3
-valid_every: 2000
+valid_every: 1000
 model_name: "scbert"
 grad_acc: 20
 learning_rate: 5e-4
