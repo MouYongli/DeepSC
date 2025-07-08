@@ -110,7 +110,7 @@ class CategoricalGumbelSoftmax(nn.Module):
         embedding_dim: int,
         num_categories: int = 3,
         hard: bool = True,
-        temperature: float = 1.0,
+        temperature: float = 0.3,
     ):
         super(CategoricalGumbelSoftmax, self).__init__()
         self.embedding_dim = embedding_dim
@@ -264,23 +264,38 @@ class BranchV(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, d, hidden_dim=None, dropout=0.1):
+    def __init__(self, d, hidden_dim=None, dropout=0.1, num_layers=2):
         super().__init__()
         hidden_dim = hidden_dim or d * 4
-        self.net = nn.Sequential(
-            nn.Linear(d, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, d),
-            nn.Dropout(dropout),
-        )
+        layers = []
+        # 第一层
+        layers.append(nn.Linear(d, hidden_dim))
+        layers.append(nn.GELU())
+        layers.append(nn.Dropout(dropout))
+        # 中间层
+        for _ in range(num_layers - 2):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.GELU())
+            layers.append(nn.Dropout(dropout))
+        # 最后一层
+        layers.append(nn.Linear(hidden_dim, d))
+        layers.append(nn.Dropout(dropout))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
 
 
 class DeepSCTransformerBlock(nn.Module):
-    def __init__(self, embedding_dim, num_heads, attn_dropout, ffn_dropout, fused):
+    def __init__(
+        self,
+        embedding_dim,
+        num_heads,
+        attn_dropout,
+        ffn_dropout,
+        fused,
+        num_layers_ffn=2,
+    ):
         super().__init__()
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
@@ -296,22 +311,33 @@ class DeepSCTransformerBlock(nn.Module):
         self.norm_expr1 = nn.LayerNorm(embedding_dim)
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
         # FFN
-        self.ffn_gene = FeedForward(embedding_dim, dropout=ffn_dropout)
-        self.ffn_expr = FeedForward(embedding_dim, dropout=ffn_dropout)
+        self.ffn_gene = FeedForward(
+            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        )
+        self.ffn_expr = FeedForward(
+            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        )
+        self.dropout = nn.Dropout(ffn_dropout)
 
     def forward(self, gene_emb, expr_emb, M=None):
-        # QKV: (batch, g, num_heads, head_dim)
-        V_gene = self.gene_v(gene_emb)
-        attn_gene = self.gene_attn(gene_emb, V_gene, M)
-        h_gene = self.norm_gene1(gene_emb + attn_gene)
-        ffn_gene = self.ffn_gene(h_gene)
-        out_gene = self.norm_gene2(h_gene + ffn_gene)
-        # Expression branch: 融合 gene 的 Q/K 参与注意力
-        V_expr = self.expr_v(expr_emb)
+
+        # Gene branch
+        x = self.norm_gene1(gene_emb)
+        V_gene = self.gene_v(x)
+        attn_gene = self.gene_attn(x, V_gene, M)
+        x = gene_emb + self.dropout(attn_gene)  # <-- 添加 residual dropout
+        x_ln = self.norm_gene2(x)
+        ffn_gene = self.ffn_gene(x_ln)
+        out_gene = x + self.dropout(ffn_gene)  # <-- 再次 residual dropout
+
+        y = self.norm_expr1(expr_emb)
+        V_expr = self.expr_v(y)
         attn_expr = self.expr_attn(gene_emb, expr_emb, V_expr, M)
-        h_expr = self.norm_expr1(expr_emb + attn_expr)
-        ffn_expr = self.ffn_expr(h_expr)
-        out_expr = self.norm_expr2(h_expr + ffn_expr)
+        y = expr_emb + self.dropout(attn_expr)
+        y_ln = self.norm_expr2(y)
+        ffn_expr = self.ffn_expr(y_ln)
+        out_expr = y + self.dropout(ffn_expr)
+
         return out_gene, out_expr
 
 
@@ -331,6 +357,7 @@ class DeepSC(nn.Module):
         enable_l0=True,
         enable_mse=True,
         enable_ce=True,
+        num_layers_ffn=2,
     ):
         super().__init__()
         self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
@@ -341,7 +368,12 @@ class DeepSC(nn.Module):
         self.layers = nn.ModuleList(
             [
                 DeepSCTransformerBlock(
-                    embedding_dim, num_heads, attn_dropout, ffn_dropout, fused
+                    embedding_dim,
+                    num_heads,
+                    attn_dropout,
+                    ffn_dropout,
+                    fused,
+                    num_layers_ffn,
                 )
                 for _ in range(num_layers)
             ]
@@ -350,7 +382,15 @@ class DeepSC(nn.Module):
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
-        self.classifier = nn.Linear(embedding_dim, num_bins + 1)
+        self.classifier = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),  # 升维
+            nn.GELU(),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.Linear(embedding_dim * 2, embedding_dim),  # 降回原维
+            nn.GELU(),
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, num_bins + 1),  # 输出类别
+        )
         self.regressor = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 2),
             nn.ReLU(),
@@ -369,8 +409,11 @@ class DeepSC(nn.Module):
         self.enable_l0 = enable_l0
         self.enable_mse = enable_mse
         self.enable_ce = enable_ce
-        nn.init.xavier_uniform_(self.classifier.weight)
-        nn.init.zeros_(self.classifier.bias)
+        # 初始化 classifier 内所有 Linear 层的权重和偏置
+        for m in self.classifier:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
 
     def forward(
         self,

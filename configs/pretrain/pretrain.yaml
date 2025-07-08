@@ -6,36 +6,47 @@ defaults:
 wandb_project: "DeepSC"
 pretrain_feature: "binned_ce, bin prediction ce_1.0"
 # Loss weights
-enable_l0: False
-enable_mse: False
-enable_ce: True
-l0_lambda: 0.00
+enable_l0: True
+enable_mse: True
+enable_ce: False
+l0_lambda: 0.1
 ce_loss_weight: 1.0
-mse_loss_weight: 0
-weighted_ce_loss: True
+mse_loss_weight: 1.0
+weighted_ce_loss: False
 mean_ce_loss: False
+use_ldam_loss: True # LDAM loss开关
+
+# how to calculate weight of mse loss
 use_hard_mse_loss: True
 use_exp_mse_loss: False
-do_hard_mask: False
+use_interval_mse_loss: False
+# interval loss configuration
+interval_loss_log_stats: Trze
+interval_loss_return_tensor: False
+adaptive_strategy: "inverse_count"  # "inverse_count", "inverse_loss", "balanced"
+
+#different mask probability on different bins
+do_hard_mask: True
+
 regression_loss_type: "huber"
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr"
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/small/partition_0_sparse_norm_small.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 3
-valid_every: 1000
+num_device: 1
+valid_every: 500
 model_name: "scbert"
 grad_acc: 20
 learning_rate: 5e-4
-epoch: 4
-batch_size: 13
+epoch: 10
+batch_size: 6
 num_bin: 5
 save_ckpt_every: 3000
 
 log_on_wandb_every: 20
 sequence_length: 1000
 plot_tsne_and_umap: False
-draw_continuous_pred_label_scatter: False
+draw_continuous_pred_label_scatter: True
 
 # 新增warmup相关参数
 use_warmup: False

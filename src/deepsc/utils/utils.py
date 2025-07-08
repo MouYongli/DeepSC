@@ -661,6 +661,120 @@ def weighted_masked_mse_loss(
         raise ValueError(f"Invalid reduction mode: {reduction}")
 
 
+def interval_average_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    loss_type: str = "mse",
+    log_stats: bool = False,
+    return_tensor: bool = False,
+):
+    """
+    计算四个区间的平均MSE Loss，只在 mask=True 的位置计算。
+
+    区间划分：
+        target == 1       → interval_1
+        1 < target < 3    → interval_2
+        3 <= target < 5   → interval_3
+        target >= 5       → interval_4
+
+    Args:
+        pred (torch.Tensor): 预测值
+        target (torch.Tensor): 目标值
+        mask (torch.Tensor): 掩码，True表示需要计算的位置
+        loss_type (str): 'mse'（默认）或 'huber'
+        log_stats (bool): 是否打印统计信息
+        return_tensor (bool): 是否返回tensor格式的overall loss
+
+    Returns:
+        dict: 包含四个区间平均loss的字典
+            {
+                'interval_1': float,  # target == 1
+                'interval_2': float,  # 1 < target < 3
+                'interval_3': float,  # 3 <= target < 5
+                'interval_4': float,  # target >= 5
+                'overall': float/tensor,  # 所有区间平均值的平均
+                'stats': dict,  # 统计信息（如果log_stats=True）
+            }
+    """
+
+    if loss_type == "mse":
+        loss_fn = nn.MSELoss(reduction="none")
+    elif loss_type == "huber":
+        loss_fn = nn.HuberLoss(reduction="none")
+    else:
+        raise ValueError(f"Invalid loss_type: {loss_type}. Supported: 'mse', 'huber'.")
+
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    # 定义四个区间
+    intervals = {
+        "interval_1": target == 1,
+        "interval_2": (target > 1) & (target < 3),
+        "interval_3": (target >= 3) & (target < 5),
+        "interval_4": target >= 5,
+    }
+
+    results = {}
+    interval_means = []
+    stats = {}
+
+    for interval_name, interval_mask in intervals.items():
+        # 结合mask和区间mask
+        combined_mask = mask & interval_mask
+        interval_loss = elementwise_loss[combined_mask]
+
+        if interval_loss.numel() == 0:
+            results[interval_name] = 0.0
+            stats[f"{interval_name}_count"] = 0
+            stats[f"{interval_name}_mean"] = 0.0
+            stats[f"{interval_name}_std"] = 0.0
+        else:
+            avg_loss = interval_loss.mean().item()
+            results[interval_name] = avg_loss
+            interval_means.append(avg_loss)
+
+            # 统计信息
+            stats[f"{interval_name}_count"] = interval_loss.numel()
+            stats[f"{interval_name}_mean"] = avg_loss
+            stats[f"{interval_name}_std"] = interval_loss.std().item()
+
+    # 计算总体平均：对各个区间的平均值再求平均
+    if interval_means:
+        overall_loss = sum(interval_means) / len(interval_means)
+        results["overall"] = (
+            overall_loss
+            if not return_tensor
+            else torch.tensor(overall_loss, device=pred.device)
+        )
+        stats["total_count"] = sum(
+            stats[f"{interval_name}_count"] for interval_name in intervals.keys()
+        )
+        stats["total_mean"] = overall_loss
+        stats["total_std"] = 0.0  # 简化处理
+    else:
+        results["overall"] = (
+            0.0 if not return_tensor else torch.tensor(0.0, device=pred.device)
+        )
+        stats["total_count"] = 0
+        stats["total_mean"] = 0.0
+        stats["total_std"] = 0.0
+
+    # 添加统计信息到结果中
+    if log_stats:
+        results["stats"] = stats
+        print(f"[Interval MSE Stats] Total samples: {stats['total_count']}")
+        for interval_name in intervals.keys():
+            count = stats[f"{interval_name}_count"]
+            mean_loss = stats[f"{interval_name}_mean"]
+            std_loss = stats[f"{interval_name}_std"]
+            print(
+                f"[Interval MSE Stats] {interval_name}: count={count}, mean={mean_loss:.4f}, std={std_loss:.4f}"
+            )
+
+    return results
+
+
 def weighted_masked_mse_loss_v2(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -967,3 +1081,33 @@ def interval_masked_mse_loss(pred, target, mask):
         else:
             results[name] = elementwise_loss[interval_mask].mean()
     return results
+
+
+class LDAMLoss(nn.Module):
+    def __init__(self, cls_num_list, max_m=0.5, weight=None, s=30, ignore_index=-100):
+        super(LDAMLoss, self).__init__()
+        m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
+        m_list = m_list * (max_m / np.max(m_list))
+        self.m_list = torch.tensor(m_list, dtype=torch.float32)
+        self.s = s
+        self.weight = weight
+        self.ignore_index = ignore_index
+
+    def forward(self, x, target):
+        valid_mask = target != self.ignore_index
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=x.device, requires_grad=True)
+
+        x_valid = x[valid_mask]
+        target_valid = target[valid_mask]
+
+        index = torch.zeros_like(x_valid, dtype=torch.bool)
+        index.scatter_(1, target_valid.view(-1, 1), True)
+
+        m_list = self.m_list.to(x.device)
+        batch_m = m_list[target_valid]  # shape: (N,)
+
+        x_m = x_valid.clone()
+        x_m[index] -= batch_m
+
+        return F.cross_entropy(self.s * x_m, target_valid, weight=self.weight)

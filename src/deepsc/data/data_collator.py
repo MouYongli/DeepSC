@@ -189,7 +189,10 @@ class DataCollator:
             probability_matrix = torch.full(shape, self.mlm_probability)
         else:
             bin_x = expressions.float()
-            probability_matrix = self.mlm_probability * (0.2 + ((bin_x - 1) ** 2) / 6.3)
+            probability_matrix = torch.zeros_like(bin_x)
+            probability_matrix[bin_x == 1] = 0.09  # bin1
+            probability_matrix[bin_x == 2] = 0.18  # bin2
+            probability_matrix[bin_x == 3] = 0.4  # bin3
         # set padded postion probability to 0
         probability_matrix[expressions.eq(self.pad_value)] = 0
         if self.keep_first_n_tokens > 0:
@@ -368,15 +371,15 @@ class DataCollator:
         bin_indices = torch.zeros_like(expr, dtype=torch.long)
 
         # bin1: 小于3
-        mask_bin1 = expr < 3
+        mask_bin1 = expr <= 2
         bin_indices[mask_bin1] = 1
 
         # bin2: 大于等于3且小于6.7
-        mask_bin2 = (expr >= 3) & (expr < 6.7)
+        mask_bin2 = (expr > 2) & (expr < 5.5)
         bin_indices[mask_bin2] = 2
 
         # bin3: 大于等于6.7
-        mask_bin3 = expr >= 6.7
+        mask_bin3 = expr >= 5.5
         bin_indices[mask_bin3] = 3
 
         return bin_indices

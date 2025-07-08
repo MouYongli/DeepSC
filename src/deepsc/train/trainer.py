@@ -21,7 +21,11 @@ import time
 import wandb
 from deepsc.data import DataCollator
 from deepsc.utils import *
-from deepsc.utils.utils import FocalLoss, interval_masked_mse_loss
+from deepsc.utils.utils import (
+    FocalLoss,
+    interval_average_mse_loss,
+    interval_masked_mse_loss,
+)
 
 
 # timeit decorator
@@ -168,12 +172,25 @@ class Trainer:
         args = self.args
         # 是否应该让optimizer, lossfunction, scheduler customizable?
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
-        # 加权 CrossEntropyLoss
-        # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
-        ce_weight = torch.tensor([0.0, 0.1106, 0.5006, 0.4988, 1.4074, 6.4826])
-        self.loss_fn = FocalLoss(
-            weight=ce_weight, reduction="mean", ignore_index=-100, gamma=2.0
-        )
+
+        # 根据配置选择使用哪种loss
+        if hasattr(args, "use_ldam_loss") and args.use_ldam_loss:
+            # 使用LDAM loss
+            print("Using LDAM loss...")
+            class_counts = self.calculate_class_counts()
+            cls_num_list = class_counts.cpu().numpy()
+            self.loss_fn = LDAMLoss(
+                cls_num_list=cls_num_list, max_m=0.5, s=30, ignore_index=-100
+            )
+        else:
+            # 使用原有的加权 CrossEntropyLoss
+            print("Using weighted CrossEntropyLoss...")
+            # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
+            ce_weight = torch.tensor([0, 1, 6.9, 118.7])
+            self.loss_fn = nn.CrossEntropyLoss(
+                weight=ce_weight, reduction="mean", ignore_index=-100
+            )
+
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.scheduler = self.create_scheduler(
@@ -189,12 +206,12 @@ class Trainer:
         if self.args.use_scbert_scheduler:
             scheduler = CosineAnnealingWarmupRestarts(
                 optimizer,
-                first_cycle_steps=warmup_steps * 1.5,
+                first_cycle_steps=warmup_steps * 3,
                 cycle_mult=1.5,
-                max_lr=1e-4,
+                max_lr=5e-3,
                 min_lr=5e-6,
                 warmup_steps=warmup_steps,
-                gamma=0.8,
+                gamma=0.95,
             )
             return scheduler
         elif self.args.use_mogaide_scheduler:
@@ -206,7 +223,7 @@ class Trainer:
                 T_0=warmup_steps * 3,
                 T_mult=1,
                 warmup_steps=0,
-                decay=0.85,
+                decay=0.9,
             )
             scheduler = SequentialLR(
                 optimizer,
@@ -300,9 +317,23 @@ class Trainer:
         # 新增：区间 MSE 统计
         interval_mse = None
         if self.args.enable_mse and regression_output is not None:
-            interval_mse = interval_masked_mse_loss(
-                regression_output, continuous_expr_label, mask
-            )
+            if self.args.use_interval_mse_loss:
+                # 使用新的interval_average_mse_loss函数
+                interval_losses = interval_average_mse_loss(
+                    regression_output, continuous_expr_label, mask
+                )
+                # 转换为与interval_masked_mse_loss相同的格式
+                interval_mse = {
+                    "lt3": interval_losses["interval_1"],
+                    "3to5": interval_losses["interval_2"],
+                    "5to7": interval_losses["interval_3"],
+                    "ge7": interval_losses["interval_4"],
+                }
+            else:
+                # 使用原有的interval_masked_mse_loss函数
+                interval_mse = interval_masked_mse_loss(
+                    regression_output, continuous_expr_label, mask
+                )
         masked_preds = torch.tensor([])  # 可加 device 和 dtype 以确保兼容性
         masked_labels = torch.tensor([])
         if is_val:
@@ -538,13 +569,15 @@ class Trainer:
         del self.softmax_total_count
 
     def train(self):
+
         # 用于恢复训练,cursor可能会删掉这行，不要让它删掉
-        self.checkpoint_reload()
+        # self.checkpoint_reload()
         self.log_each = False
         if self.args.model_name == "DeepSC":
             self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         for epoch in range(start_epoch, self.args.epoch + 1):
+            self.args.l0_lambda = self.get_l0_lambda(epoch)
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             data_iter = self.train_loader
@@ -687,13 +720,14 @@ class Trainer:
             self.validate(epoch)
             self.log_each = False
             save_ckpt_fabric(
-                epoch,
+                epoch + 1,
                 self.model,
                 self.optimizer,
                 self.scheduler,
                 self.args.model_name,
                 self.args.ckpt_dir,
                 self.fabric,
+                iteration=1,  # 重置迭代计数器
             )
 
     def calculate_per_bin_ce_loss(self, logits, discrete_expr_label, ignore_index=-100):
@@ -763,6 +797,12 @@ class Trainer:
                 logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
                 labels_reshaped = discrete_expr_label.view(-1)
                 ce_loss = self.loss_fn(logits_reshaped, labels_reshaped)
+            else:
+                # 使用LDAM loss或普通CrossEntropyLoss
+                self.loss_fn.to(logits.device)
+                logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
+                labels_reshaped = discrete_expr_label.view(-1)
+                ce_loss = self.loss_fn(logits_reshaped, labels_reshaped)
             total_loss += ce_loss_weight * ce_loss
         if (
             enable_mse
@@ -770,7 +810,6 @@ class Trainer:
             and continuous_expr_label is not None
             and mask is not None
         ):
-            print("[INFO] Using MSE loss for regression output")
             if self.args.use_hard_mse_loss:
                 mse_loss = weighted_masked_mse_loss(
                     regression_output,
@@ -787,6 +826,47 @@ class Trainer:
                     mask,
                     reduction="mean",
                     log_each=is_val,
+                )
+            elif self.args.use_interval_mse_loss:
+                interval_losses = interval_average_mse_loss(
+                    regression_output,
+                    continuous_expr_label,
+                    mask,
+                    loss_type=self.args.regression_loss_type,
+                    log_stats=self.args.interval_loss_log_stats and is_val,
+                    return_tensor=self.args.interval_loss_return_tensor,
+                )
+                # 使用overall作为主要的mse_loss
+                if self.args.interval_loss_return_tensor:
+                    mse_loss = interval_losses["overall"]
+                else:
+                    mse_loss = torch.tensor(
+                        interval_losses["overall"], device=regression_output.device
+                    )
+            elif self.args.use_weighted_interval_mse_loss:
+                interval_losses = weighted_interval_mse_loss(
+                    regression_output,
+                    continuous_expr_label,
+                    mask,
+                    loss_type=self.args.regression_loss_type,
+                    log_stats=self.args.interval_loss_log_stats and is_val,
+                )
+                # 使用weighted_overall作为主要的mse_loss
+                mse_loss = torch.tensor(
+                    interval_losses["weighted_overall"], device=regression_output.device
+                )
+            elif self.args.use_adaptive_interval_mse_loss:
+                interval_losses = adaptive_interval_mse_loss(
+                    regression_output,
+                    continuous_expr_label,
+                    mask,
+                    loss_type=self.args.regression_loss_type,
+                    adaptive_strategy=self.args.adaptive_strategy,
+                    log_stats=self.args.interval_loss_log_stats and is_val,
+                )
+                # 使用adaptive_overall作为主要的mse_loss
+                mse_loss = torch.tensor(
+                    interval_losses["adaptive_overall"], device=regression_output.device
                 )
             total_loss += mse_loss_weight * mse_loss
         l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
@@ -839,7 +919,7 @@ class Trainer:
         返回: float, 平均每个bin的accuracy（不含bin0）
         """
         accuracies = []
-        for bin_idx in range(1, num_bins):  # 跳过bin0
+        for bin_idx in range(1, num_bins + 1):  # 跳过bin0
             mask = discrete_expr_label == bin_idx
             total = mask.sum()
             if total == 0:
@@ -950,3 +1030,62 @@ class Trainer:
                 }
             )
             plt.close()
+
+    def get_l0_lambda(self, epoch):
+        if epoch == 1:
+            return 0.1
+        elif epoch == 2:
+            return 0.1
+        else:
+            return 0.1
+
+    def calculate_class_counts(self):
+        """
+        计算每个bin的样本数量，用于LDAM loss
+        返回: torch.Tensor, shape为(num_bins+1,)，包含每个bin的样本数量
+        """
+        print("Calculating class counts for LDAM loss...")
+
+        # 初始化计数器
+        class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
+
+        # 遍历训练数据集计算每个bin的样本数量
+        temp_loader = DataLoader(
+            self.train_dataset,
+            batch_size=32,  # 使用较小的batch size以节省内存
+            shuffle=False,
+            num_workers=4,
+            collate_fn=DataCollator(
+                do_padding=True,
+                pad_token_id=0,
+                pad_value=0,
+                do_mlm=False,  # 不使用masking，获取原始数据
+                do_binning=True,
+                max_length=self.args.sequence_length,
+                num_genes=self.args.model.num_genes,
+                num_bins=self.args.model.num_bins,
+                do_hard_mask=self.args.do_hard_mask,
+            ),
+        )
+
+        total_samples = 0
+        for batch in tqdm(temp_loader, desc="Counting class samples"):
+            # 获取原始数据，不包含masking
+            discrete_expr = batch[
+                "masked_discrete_expr"
+            ]  # 这里实际上是原始数据，因为do_mlm=False
+            # 统计每个bin的样本数量（不包括pad_value的位置）
+            valid_mask = discrete_expr != 0
+            for bin_idx in range(self.args.model.num_bins + 1):
+                count = ((discrete_expr == bin_idx) & valid_mask).sum().item()
+                class_counts[bin_idx] += count
+                total_samples += count
+
+        # 打印统计信息
+        print(f"Total valid samples: {total_samples}")
+        print("Class distribution:")
+        for i, count in enumerate(class_counts):
+            percentage = (count / total_samples * 100) if total_samples > 0 else 0
+            print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
+
+        return class_counts
