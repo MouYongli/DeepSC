@@ -4,24 +4,34 @@ defaults:
   - dataset: tripleca
 
 wandb_project: "DeepSC"
-pretrain_feature: "binned_ce, bin prediction ce_1.0"
+tags: ["l0", "5bin", "normal cellxgene dataset", "ce only", "adaptive ce loss"]
 # Loss weights
 enable_l0: True
-enable_mse: True
-enable_ce: False
+enable_mse: False
+enable_ce: True
 l0_lambda: 0.1
 ce_loss_weight: 1.0
-mse_loss_weight: 1.0
+mse_loss_weight: 0
+#control the weight of mse loss
+adaptive_mse_weight: False
+
+
 weighted_ce_loss: False
 mean_ce_loss: False
 use_ldam_loss: True # LDAM loss开关
-
+enable_adaptive_ce_loss: False
+enable_alternating_ldam_mean_ce_loss: True
+enable_warm_alternating_ldam_mean_ce_loss: False
 # how to calculate weight of mse loss
 use_hard_mse_loss: True
 use_exp_mse_loss: False
 use_interval_mse_loss: False
+#Print details of mse loss in log
+show_mse_loss_details: False
+output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
+
 # interval loss configuration
-interval_loss_log_stats: Trze
+interval_loss_log_stats: True
 interval_loss_return_tensor: False
 adaptive_strategy: "inverse_count"  # "inverse_count", "inverse_loss", "balanced"
 
@@ -33,13 +43,13 @@ regression_loss_type: "huber"
 data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/small/partition_0_sparse_norm_small.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 1
+num_device: 3
 valid_every: 500
 model_name: "scbert"
 grad_acc: 20
 learning_rate: 5e-4
 epoch: 10
-batch_size: 6
+batch_size: 13
 num_bin: 5
 save_ckpt_every: 3000
 
@@ -54,6 +64,9 @@ warmup_ratio: 0.03
 use_warmup_with_decay: False
 use_scbert_scheduler: False
 use_mogaide_scheduler: True
+
+# 梯度检查相关参数
+check_grad_flow: False  # 是否启用梯度检查
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
   verbose: False

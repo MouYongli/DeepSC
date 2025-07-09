@@ -1086,9 +1086,13 @@ def interval_masked_mse_loss(pred, target, mask):
 class LDAMLoss(nn.Module):
     def __init__(self, cls_num_list, max_m=0.5, weight=None, s=30, ignore_index=-100):
         super(LDAMLoss, self).__init__()
-        m_list = 1.0 / np.sqrt(np.sqrt(cls_num_list))
+        # 排除padding类（第0类），只对有效类别计算margin
+        valid_cls_num_list = cls_num_list[1:]  # 排除第0类
+        m_list = 1.0 / np.sqrt(np.sqrt(valid_cls_num_list))
         m_list = m_list * (max_m / np.max(m_list))
-        self.m_list = torch.tensor(m_list, dtype=torch.float32)
+        # 为padding类（第0类）设置margin为0
+        self.m_list = torch.zeros(len(cls_num_list), dtype=torch.float32)
+        self.m_list[1:] = torch.tensor(m_list, dtype=torch.float32)  # 第0类margin为0
         self.s = s
         self.weight = weight
         self.ignore_index = ignore_index
@@ -1111,3 +1115,102 @@ class LDAMLoss(nn.Module):
         x_m[index] -= batch_m
 
         return F.cross_entropy(self.s * x_m, target_valid, weight=self.weight)
+
+
+def switch_ce_loss(epoch):
+    if epoch == 1 or epoch == 2:
+        return nn.CrossEntropyLoss(reduction="mean", ignore_index=-100)
+    elif epoch == 3:
+        return nn.CrossEntropyLoss(
+            weight=torch.tensor([0, 1, 3, 5, 7, 20.0]),
+            reduction="mean",
+            ignore_index=-100,
+        )
+    elif epoch == 4:
+        return nn.CrossEntropyLoss(
+            weight=torch.tensor([0, 1, 5, 8, 13, 30.7]),
+            reduction="mean",
+            ignore_index=-100,
+        )
+
+
+def check_grad_flow(
+    model: nn.Module,
+    loss_tensor: torch.Tensor,
+    verbose: bool = True,
+    retain_graph: bool = False,
+    backward_fn=None,
+):
+    """
+    检查模型的梯度传导是否正常。
+    Args:
+        model: nn.Module
+        loss_tensor: loss
+        verbose: 是否详细打印
+        retain_graph: 是否保留计算图
+        backward_fn: 自定义反向传播函数（如 fabric.backward）
+    """
+    print("=" * 60)
+    print("➡️ [检查开始] 反向传播中梯度传导情况...")
+
+    # 保存原始梯度状态
+    original_grads = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            original_grads[name] = param.grad.clone()
+
+    model.zero_grad()
+
+    try:
+        if backward_fn is not None:
+            backward_fn(loss_tensor, retain_graph=retain_graph)
+        else:
+            loss_tensor.backward(retain_graph=retain_graph)
+    except Exception as e:
+        print(f"[ERROR] 反向传播失败: {e}")
+        # 恢复原始梯度
+        for name, param in model.named_parameters():
+            if name in original_grads:
+                param.grad = original_grads[name]
+        return {"ok": [], "zero": [], "none": []}
+
+    no_grad_names = []
+    zero_grad_names = []
+    ok_grad_names = []
+
+    for name, param in model.named_parameters():
+        try:
+            if param.grad is None:
+                no_grad_names.append(name)
+                if verbose:
+                    print(f"[❌ NONE ] {name}: grad is None")
+            elif torch.all(param.grad == 0):
+                zero_grad_names.append(name)
+                if verbose:
+                    print(f"[⚠️ ZERO] {name}: grad == 0")
+            else:
+                ok_grad_names.append(name)
+                if verbose:
+                    print(
+                        f"[✅ OK  ] {name}: grad max={param.grad.abs().max():.4e}, min={param.grad.abs().min():.4e}"
+                    )
+        except Exception as e:
+            print(f"[ERROR] 检查参数 {name} 梯度时出错: {e}")
+            no_grad_names.append(name)
+
+    print("-" * 60)
+    print(f"✅ 有效梯度参数数：{len(ok_grad_names)}")
+    print(f"⚠️ 梯度为0的参数数：{len(zero_grad_names)}")
+    print(f"❌ grad is None 的参数数：{len(no_grad_names)}")
+    print("=" * 60)
+
+    # 恢复原始梯度
+    for name, param in model.named_parameters():
+        if name in original_grads:
+            param.grad = original_grads[name]
+
+    return {
+        "ok": ok_grad_names,
+        "zero": zero_grad_names,
+        "none": no_grad_names,
+    }

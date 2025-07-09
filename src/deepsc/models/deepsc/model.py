@@ -241,6 +241,188 @@ class ExpressionAttentionLayer(nn.Module):
         return output
 
 
+class NewGeneAttentionLayer(nn.Module):
+    """
+    手动实现的多头注意力层，用于基因分支
+    """
+
+    def __init__(self, d, num_heads, attn_dropout=0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = d // num_heads
+        self.d = d
+
+        # Q, K, V 投影矩阵
+        self.W_Q = nn.Linear(d, d)
+        self.W_K = nn.Linear(d, d)
+        self.W_V = nn.Linear(d, d)
+
+        # 输出投影
+        self.out_proj = nn.Linear(d, d)
+
+        # Dropout
+        self.dropout = nn.Dropout(attn_dropout)
+
+        # 缩放因子
+        self.scale = self.head_dim**-0.5
+
+    def forward(self, x, M=None, eps: float = 1e-8):
+        """
+        Args:
+            x: 输入张量, shape: (batch_size, seq_len, d)
+            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
+            eps: 数值稳定性参数
+        Returns:
+            output: 注意力输出, shape: (batch_size, seq_len, d)
+        """
+        batch_size, seq_len, _ = x.shape
+
+        # 计算 Q, K, V
+        Q = self.W_Q(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        K = self.W_K(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        V = self.W_V(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        # 转置以便进行注意力计算
+        Q = Q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        K = K.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        V = V.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+
+        # 计算注意力分数
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        # scores: (batch_size, num_heads, seq_len, seq_len)
+
+        # 应用门控矩阵 M（如果提供）
+        if M is not None:
+            if M.dim() == 3:
+                M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            # 将门控矩阵应用到注意力分数上
+            scores = scores * M
+
+        # 应用 softmax
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # 如果有门控矩阵，进行稀疏化处理
+        if M is not None:
+            A_sparse = attn_weights * M
+            norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
+            A_bar = A_sparse / norm
+        else:
+            A_bar = attn_weights
+
+        # 计算输出
+        output = torch.matmul(A_bar, V)  # (batch_size, num_heads, seq_len, head_dim)
+
+        # 转置并重塑
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (batch_size, seq_len, num_heads, head_dim)
+        output = output.view(batch_size, seq_len, self.d)  # (batch_size, seq_len, d)
+
+        # 输出投影
+        output = self.out_proj(output)
+
+        return output
+
+
+class NewExpressionAttentionLayer(nn.Module):
+    """
+    手动实现的多头注意力层，用于表达分支
+    使用融合的基因和表达嵌入作为Q和K，表达嵌入作为V
+    """
+
+    def __init__(self, d, num_heads, attn_dropout=0.1, fused: bool = True):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = d // num_heads
+        self.d = d
+        self.fused = fused
+
+        # 融合投影（如果启用）
+        if fused:
+            self.fused_emb_proj = nn.Linear(2 * d, d)
+
+        # Q, K, V 投影矩阵
+        self.W_Q = nn.Linear(d, d)
+        self.W_K = nn.Linear(d, d)
+        self.W_V = nn.Linear(d, d)
+
+        # 输出投影
+        self.out_proj = nn.Linear(d, d)
+
+        # Dropout
+        self.dropout = nn.Dropout(attn_dropout)
+
+        # 缩放因子
+        self.scale = self.head_dim**-0.5
+
+    def forward(self, gene_emb, expr_emb, M=None, eps: float = 1e-8):
+        """
+        Args:
+            gene_emb: 基因嵌入, shape: (batch_size, seq_len, d)
+            expr_emb: 表达嵌入, shape: (batch_size, seq_len, d)
+            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
+            eps: 数值稳定性参数
+        Returns:
+            output: 注意力输出, shape: (batch_size, seq_len, d)
+        """
+        batch_size, seq_len, _ = gene_emb.shape
+
+        # 融合基因和表达嵌入（如果启用）
+        if self.fused:
+            fused_emb = torch.cat([gene_emb, expr_emb], dim=-1)
+            fused_emb = self.fused_emb_proj(fused_emb)
+        else:
+            fused_emb = gene_emb
+
+        # 计算 Q, K, V
+        Q = self.W_Q(fused_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        K = self.W_K(fused_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        V = self.W_V(expr_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+
+        # 转置以便进行注意力计算
+        Q = Q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        K = K.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        V = V.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+
+        # 计算注意力分数
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        # scores: (batch_size, num_heads, seq_len, seq_len)
+
+        # 应用门控矩阵 M（如果提供）
+        if M is not None:
+            if M.dim() == 3:
+                M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+            # 将门控矩阵应用到注意力分数上
+            scores = scores * M
+
+        # 应用 softmax
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # 如果有门控矩阵，进行稀疏化处理
+        if M is not None:
+            A_sparse = attn_weights * M
+            norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
+            A_bar = A_sparse / norm
+        else:
+            A_bar = attn_weights
+
+        # 计算输出
+        output = torch.matmul(A_bar, V)  # (batch_size, num_heads, seq_len, head_dim)
+
+        # 转置并重塑
+        output = output.transpose(
+            1, 2
+        ).contiguous()  # (batch_size, seq_len, num_heads, head_dim)
+        output = output.view(batch_size, seq_len, self.d)  # (batch_size, seq_len, d)
+
+        # 输出投影
+        output = self.out_proj(output)
+
+        return output
+
+
 class BranchV(nn.Module):
     """
     通用的 V 计算模块，支持多头
@@ -267,23 +449,51 @@ class FeedForward(nn.Module):
     def __init__(self, d, hidden_dim=None, dropout=0.1, num_layers=2):
         super().__init__()
         hidden_dim = hidden_dim or d * 4
-        layers = []
-        # 第一层
-        layers.append(nn.Linear(d, hidden_dim))
-        layers.append(nn.GELU())
-        layers.append(nn.Dropout(dropout))
-        # 中间层
+        self.d = d
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        # 创建每一层的模块
+        self.layers = nn.ModuleList()
+
+        # 第一层：d -> hidden_dim
+        first_layer = nn.Sequential(
+            nn.Linear(d, hidden_dim), nn.GELU(), nn.Dropout(dropout)
+        )
+        self.layers.append(first_layer)
+
+        # 中间层：hidden_dim -> hidden_dim
         for _ in range(num_layers - 2):
-            layers.append(nn.Linear(hidden_dim, hidden_dim))
-            layers.append(nn.GELU())
-            layers.append(nn.Dropout(dropout))
-        # 最后一层
-        layers.append(nn.Linear(hidden_dim, d))
-        layers.append(nn.Dropout(dropout))
-        self.net = nn.Sequential(*layers)
+            middle_layer = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Dropout(dropout)
+            )
+            self.layers.append(middle_layer)
+
+        # 最后一层：hidden_dim -> d
+        last_layer = nn.Sequential(nn.Linear(hidden_dim, d), nn.Dropout(dropout))
+        self.layers.append(last_layer)
 
     def forward(self, x):
-        return self.net(x)
+        if self.num_layers == 2:
+            # 只有两层的情况：d -> hidden_dim -> d
+            h = self.layers[0](x)  # d -> hidden_dim
+            h = self.layers[1](h)  # hidden_dim -> d
+            return x + h  # 残差连接
+
+        else:
+            # 多层的情况
+            # 第一层
+            h = self.layers[0](x)  # d -> hidden_dim
+
+            # 中间层，每层都有残差连接
+            for i in range(1, self.num_layers - 1):
+                residual = h
+                h = self.layers[i](h)  # hidden_dim -> hidden_dim
+                h = h + residual  # 残差连接
+
+            # 最后一层
+            h = self.layers[-1](h)  # hidden_dim -> d
+            return x + h  # 最终残差连接
 
 
 class DeepSCTransformerBlock(nn.Module):
@@ -333,6 +543,74 @@ class DeepSCTransformerBlock(nn.Module):
         y = self.norm_expr1(expr_emb)
         V_expr = self.expr_v(y)
         attn_expr = self.expr_attn(gene_emb, expr_emb, V_expr, M)
+        y = expr_emb + self.dropout(attn_expr)
+        y_ln = self.norm_expr2(y)
+        ffn_expr = self.ffn_expr(y_ln)
+        out_expr = y + self.dropout(ffn_expr)
+
+        return out_gene, out_expr
+
+
+class NewDeepSCTransformerBlock(nn.Module):
+    """
+    使用新的手动实现注意力层的Transformer块
+    """
+
+    def __init__(
+        self,
+        embedding_dim,
+        num_heads,
+        attn_dropout,
+        ffn_dropout,
+        fused,
+        num_layers_ffn=2,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.embedding_dim = embedding_dim
+
+        # 使用新的注意力层，不再需要BranchV
+        self.gene_attn = NewGeneAttentionLayer(embedding_dim, num_heads, attn_dropout)
+        self.expr_attn = NewExpressionAttentionLayer(
+            embedding_dim, num_heads, attn_dropout, fused
+        )
+
+        # Norm
+        self.norm_gene1 = nn.LayerNorm(embedding_dim)
+        self.norm_gene2 = nn.LayerNorm(embedding_dim)
+        self.norm_expr1 = nn.LayerNorm(embedding_dim)
+        self.norm_expr2 = nn.LayerNorm(embedding_dim)
+
+        # FFN
+        self.ffn_gene = FeedForward(
+            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        )
+        self.ffn_expr = FeedForward(
+            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        )
+        self.dropout = nn.Dropout(ffn_dropout)
+
+    def forward(self, gene_emb, expr_emb, M=None):
+        """
+        Args:
+            gene_emb: 基因嵌入, shape: (batch_size, seq_len, embedding_dim)
+            expr_emb: 表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
+        Returns:
+            out_gene: 更新后的基因嵌入
+            out_expr: 更新后的表达嵌入
+        """
+        # Gene branch
+        x = self.norm_gene1(gene_emb)
+        attn_gene = self.gene_attn(x, M)
+        x = gene_emb + self.dropout(attn_gene)
+        x_ln = self.norm_gene2(x)
+        ffn_gene = self.ffn_gene(x_ln)
+        out_gene = x + self.dropout(ffn_gene)
+
+        # Expression branch
+        y = self.norm_expr1(expr_emb)
+        attn_expr = self.expr_attn(gene_emb, y, M)
         y = expr_emb + self.dropout(attn_expr)
         y_ln = self.norm_expr2(y)
         ffn_expr = self.ffn_expr(y_ln)
@@ -400,10 +678,6 @@ class DeepSC(nn.Module):
             nn.ReLU(),
             nn.LayerNorm(embedding_dim),
             nn.Dropout(0.1),
-            nn.Linear(embedding_dim, embedding_dim // 2),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim // 2),
-            nn.Dropout(0.1),
             nn.Linear(embedding_dim // 2, 1),
         )
         self.enable_l0 = enable_l0
@@ -431,6 +705,121 @@ class DeepSC(nn.Module):
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
         M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
+        for i, layer in enumerate(self.layers):
+            if i >= self.mask_layer_start:
+                gene_emb, expr_emb = layer(gene_emb, expr_emb, M)
+            else:
+                gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
+
+        if self.enable_mse and self.enable_ce:
+            regression_output = self.regressor(expr_emb)
+            regression_output = regression_output.squeeze(-1)
+            logits = self.classifier(expr_emb)
+            return logits, regression_output, y, gene_emb, expr_emb
+        elif self.enable_mse:
+            regression_output = self.regressor(expr_emb)
+            regression_output = regression_output.squeeze(-1)
+            return regression_output, y, gene_emb, expr_emb
+        elif self.enable_ce:
+            logits = self.classifier(expr_emb)
+            return logits, y, gene_emb, expr_emb
+
+
+class NewDeepSC(nn.Module):
+    """
+    使用新的手动实现注意力层的DeepSC模型
+    """
+
+    def __init__(
+        self,
+        embedding_dim,
+        num_genes,
+        num_layers=4,
+        num_heads=8,
+        attn_dropout=0.1,
+        ffn_dropout=0.1,
+        fused=True,
+        num_bins=8,
+        alpha=0.1,
+        mask_layer_start=None,
+        enable_l0=True,
+        enable_mse=True,
+        enable_ce=True,
+        num_layers_ffn=2,
+    ):
+        super().__init__()
+        self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
+        self.expr_embedding = ExpressionEmbedding(
+            embedding_dim, num_bins=num_bins, alpha=alpha
+        )
+        self.num_heads = num_heads
+        self.layers = nn.ModuleList(
+            [
+                NewDeepSCTransformerBlock(
+                    embedding_dim,
+                    num_heads,
+                    attn_dropout,
+                    ffn_dropout,
+                    fused,
+                    num_layers_ffn,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
+        self.mask_layer_start = (
+            mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),  # 升维
+            nn.GELU(),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.Linear(embedding_dim * 2, embedding_dim),  # 降回原维
+            nn.GELU(),
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, num_bins + 1),  # 输出类别
+        )
+        self.regressor = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim // 2),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim // 2, 1),
+        )
+        self.enable_l0 = enable_l0
+        self.enable_mse = enable_mse
+        self.enable_ce = enable_ce
+        # 初始化 classifier 内所有 Linear 层的权重和偏置
+        for m in self.classifier:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(
+        self,
+        gene_ids,
+        expression_bin,
+        normalized_expr,
+        return_encodings=False,
+        return_mask_prob=True,
+    ):
+        """
+        gene_ids: (batch, g)  # 基因ID序列
+        expression_bin: (batch, g)  # 离散化的表达量
+        normalized_expr: (batch, g)  # 归一化的表达量
+        """
+        gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
+        expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
+        M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
+
         for i, layer in enumerate(self.layers):
             if i >= self.mask_layer_start:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, M)

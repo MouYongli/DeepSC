@@ -22,7 +22,7 @@ import wandb
 from deepsc.data import DataCollator
 from deepsc.utils import *
 from deepsc.utils.utils import (
-    FocalLoss,
+    check_grad_flow,
     interval_average_mse_loss,
     interval_masked_mse_loss,
 )
@@ -46,6 +46,7 @@ class Trainer:
         self.args = args
         self.fabric = fabric
         self.model = model
+        self.epoch = 1  # 添加epoch类变量
         seed_all(args.seed + self.fabric.global_rank)
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
@@ -179,10 +180,18 @@ class Trainer:
             print("Using LDAM loss...")
             class_counts = self.calculate_class_counts()
             cls_num_list = class_counts.cpu().numpy()
+
+            # 确保padding类（第0类）有合理的权重，避免除零错误
+            if cls_num_list[0] == 0:
+                print(
+                    "Warning: Padding class (bin 0) has 0 samples, setting to 1 to avoid division by zero"
+                )
+                cls_num_list[0] = 1  # 设置为1避免除零，但不影响实际训练
+
             self.loss_fn = LDAMLoss(
                 cls_num_list=cls_num_list, max_m=0.5, s=30, ignore_index=-100
             )
-        else:
+        elif self.args.weighted_ce_loss:
             # 使用原有的加权 CrossEntropyLoss
             print("Using weighted CrossEntropyLoss...")
             # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
@@ -190,7 +199,9 @@ class Trainer:
             self.loss_fn = nn.CrossEntropyLoss(
                 weight=ce_weight, reduction="mean", ignore_index=-100
             )
-
+        else:
+            print("Using standard CrossEntropyLoss...")
+            self.loss_fn = nn.CrossEntropyLoss(reduction="mean", ignore_index=-100)
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.scheduler = self.create_scheduler(
@@ -577,6 +588,9 @@ class Trainer:
             self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         for epoch in range(start_epoch, self.args.epoch + 1):
+            if self.args.enable_adaptive_ce_loss:
+                self.loss_fn = switch_ce_loss(epoch)
+            self.epoch = epoch  # 更新类变量epoch
             self.args.l0_lambda = self.get_l0_lambda(epoch)
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
@@ -628,6 +642,46 @@ class Trainer:
                     ):
                         self.fabric.backward(loss / self.args.grad_acc)
                 else:
+                    # 梯度检查（可选，通过配置控制）
+                    if (
+                        hasattr(self.args, "check_grad_flow")
+                        and self.args.check_grad_flow
+                        and index % 100 == 0
+                    ):
+                        print(f"\n[梯度检查] Epoch {epoch}, Iteration {index}")
+                        try:
+                            grad_stats = check_grad_flow(
+                                self.model,
+                                loss / self.args.grad_acc,
+                                verbose=True,
+                                retain_graph=True,
+                                backward_fn=self.fabric.backward,
+                            )
+                            if self.is_master:
+                                wandb.log(
+                                    {
+                                        "grad_check/ok_params": len(grad_stats["ok"]),
+                                        "grad_check/zero_params": len(
+                                            grad_stats["zero"]
+                                        ),
+                                        "grad_check/none_params": len(
+                                            grad_stats["none"]
+                                        ),
+                                        "epoch": epoch,
+                                        "iteration": index,
+                                    }
+                                )
+                        except Exception as e:
+                            print(f"[WARNING] 梯度检查失败: {e}")
+                            if self.is_master:
+                                wandb.log(
+                                    {
+                                        "grad_check/error": 1,
+                                        "epoch": epoch,
+                                        "iteration": index,
+                                    }
+                                )
+
                     self.fabric.backward(loss / self.args.grad_acc)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
                     self.optimizer.step()
@@ -749,7 +803,7 @@ class Trainer:
                 continue
             logits_i = logits_flat[mask]
             labels_i = labels_flat[mask]
-            ce = FocalLoss(reduction="mean", gamma=2.0)
+            ce = nn.CrossEntropyLoss(reduction="mean")
             ce_loss = ce(logits_i, labels_i)
             ce_losses.append(ce_loss)
         if len(ce_losses) == 0:
@@ -784,14 +838,25 @@ class Trainer:
             # 保证label和logits在同一device
             discrete_expr_label = discrete_expr_label.to(logits.device)
             if self.args.mean_ce_loss:
-                per_bin_ce_loss = self.calculate_per_bin_ce_loss(
-                    logits, discrete_expr_label
-                )
-                ce_loss = (
-                    per_bin_ce_loss.mean()
-                    if per_bin_ce_loss is not None
-                    else torch.tensor(0.0, device=logits.device)
-                )
+                if (
+                    self.epoch == 1
+                    or self.epoch == 2
+                    or self.epoch == 3
+                    or self.epoch == 4
+                ) and self.args.enable_adaptive_ce_loss:
+                    self.loss_fn.to(logits.device)
+                    logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
+                    labels_reshaped = discrete_expr_label.view(-1)
+                    ce_loss = self.loss_fn(logits_reshaped, labels_reshaped)
+                else:
+                    per_bin_ce_loss = self.calculate_per_bin_ce_loss(
+                        logits, discrete_expr_label
+                    )
+                    ce_loss = (
+                        per_bin_ce_loss.mean()
+                        if per_bin_ce_loss is not None
+                        else torch.tensor(0.0, device=logits.device)
+                    )
             elif self.args.weighted_ce_loss:
                 self.loss_fn.to(logits.device)
                 logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
@@ -843,27 +908,6 @@ class Trainer:
                     mse_loss = torch.tensor(
                         interval_losses["overall"], device=regression_output.device
                     )
-            elif self.args.use_weighted_interval_mse_loss:
-                interval_losses = weighted_interval_mse_loss(
-                    regression_output,
-                    continuous_expr_label,
-                    mask,
-                    loss_type=self.args.regression_loss_type,
-                    log_stats=self.args.interval_loss_log_stats and is_val,
-                )
-                # 使用weighted_overall作为主要的mse_loss
-                mse_loss = torch.tensor(
-                    interval_losses["weighted_overall"], device=regression_output.device
-                )
-            elif self.args.use_adaptive_interval_mse_loss:
-                interval_losses = adaptive_interval_mse_loss(
-                    regression_output,
-                    continuous_expr_label,
-                    mask,
-                    loss_type=self.args.regression_loss_type,
-                    adaptive_strategy=self.args.adaptive_strategy,
-                    log_stats=self.args.interval_loss_log_stats and is_val,
-                )
                 # 使用adaptive_overall作为主要的mse_loss
                 mse_loss = torch.tensor(
                     interval_losses["adaptive_overall"], device=regression_output.device
@@ -1079,13 +1123,17 @@ class Trainer:
             for bin_idx in range(self.args.model.num_bins + 1):
                 count = ((discrete_expr == bin_idx) & valid_mask).sum().item()
                 class_counts[bin_idx] += count
-                total_samples += count
+                if bin_idx > 0:  # 只对非padding类累加总样本数
+                    total_samples += count
 
         # 打印统计信息
-        print(f"Total valid samples: {total_samples}")
+        print(f"Total valid samples (excluding padding): {total_samples}")
         print("Class distribution:")
         for i, count in enumerate(class_counts):
-            percentage = (count / total_samples * 100) if total_samples > 0 else 0
-            print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
+            if i == 0:
+                print(f"  Bin {i} (padding): {count} samples (excluded from LDAM)")
+            else:
+                percentage = (count / total_samples * 100) if total_samples > 0 else 0
+                print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
 
         return class_counts
