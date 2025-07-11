@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn.modules.loss import _WeightedLoss
 from torch.optim.lr_scheduler import _LRScheduler
 
+import wandb
 from datetime import datetime
 
 
@@ -566,6 +567,7 @@ def masked_mse_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    loss_fn,
     reduction: str = "mean",
 ):
     """
@@ -580,7 +582,7 @@ def masked_mse_loss(
     Returns:
         Tensor: loss 值
     """
-    loss_fn = nn.MSELoss(reduction="none")
+    loss_fn = loss_fn
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
     masked_loss = elementwise_loss[mask]  # 只取被掩码的部分
@@ -603,9 +605,9 @@ def weighted_masked_mse_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    loss_fn,
     reduction: str = "mean",
     log_each: bool = False,
-    loss_type: str = "mse",
 ):
     """
     分区加权 MSE Loss，只在 mask=True 的位置计算。
@@ -615,16 +617,7 @@ def weighted_masked_mse_loss(
         3 <= target < 5   → 1.0
         target >= 5       → 2.0
     加权后进行归一化处理，防止梯度爆炸或 collapse。
-    loss_type: 'mse'（默认）或 'huber'，决定损失函数类型。
     """
-
-    if loss_type == "mse":
-        loss_fn = nn.MSELoss(reduction="none")
-    elif loss_type == "huber":
-        loss_fn = nn.HuberLoss(reduction="none")
-    else:
-        raise ValueError(f"Invalid loss_type: {loss_type}. Supported: 'mse', 'huber'.")
-
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
     with torch.no_grad():
@@ -661,124 +654,11 @@ def weighted_masked_mse_loss(
         raise ValueError(f"Invalid reduction mode: {reduction}")
 
 
-def interval_average_mse_loss(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    mask: torch.Tensor,
-    loss_type: str = "mse",
-    log_stats: bool = False,
-    return_tensor: bool = False,
-):
-    """
-    计算四个区间的平均MSE Loss，只在 mask=True 的位置计算。
-
-    区间划分：
-        target == 1       → interval_1
-        1 < target < 3    → interval_2
-        3 <= target < 5   → interval_3
-        target >= 5       → interval_4
-
-    Args:
-        pred (torch.Tensor): 预测值
-        target (torch.Tensor): 目标值
-        mask (torch.Tensor): 掩码，True表示需要计算的位置
-        loss_type (str): 'mse'（默认）或 'huber'
-        log_stats (bool): 是否打印统计信息
-        return_tensor (bool): 是否返回tensor格式的overall loss
-
-    Returns:
-        dict: 包含四个区间平均loss的字典
-            {
-                'interval_1': float,  # target == 1
-                'interval_2': float,  # 1 < target < 3
-                'interval_3': float,  # 3 <= target < 5
-                'interval_4': float,  # target >= 5
-                'overall': float/tensor,  # 所有区间平均值的平均
-                'stats': dict,  # 统计信息（如果log_stats=True）
-            }
-    """
-
-    if loss_type == "mse":
-        loss_fn = nn.MSELoss(reduction="none")
-    elif loss_type == "huber":
-        loss_fn = nn.HuberLoss(reduction="none")
-    else:
-        raise ValueError(f"Invalid loss_type: {loss_type}. Supported: 'mse', 'huber'.")
-
-    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
-
-    # 定义四个区间
-    intervals = {
-        "interval_1": target == 1,
-        "interval_2": (target > 1) & (target < 3),
-        "interval_3": (target >= 3) & (target < 5),
-        "interval_4": target >= 5,
-    }
-
-    results = {}
-    interval_means = []
-    stats = {}
-
-    for interval_name, interval_mask in intervals.items():
-        # 结合mask和区间mask
-        combined_mask = mask & interval_mask
-        interval_loss = elementwise_loss[combined_mask]
-
-        if interval_loss.numel() == 0:
-            results[interval_name] = 0.0
-            stats[f"{interval_name}_count"] = 0
-            stats[f"{interval_name}_mean"] = 0.0
-            stats[f"{interval_name}_std"] = 0.0
-        else:
-            avg_loss = interval_loss.mean().item()
-            results[interval_name] = avg_loss
-            interval_means.append(avg_loss)
-
-            # 统计信息
-            stats[f"{interval_name}_count"] = interval_loss.numel()
-            stats[f"{interval_name}_mean"] = avg_loss
-            stats[f"{interval_name}_std"] = interval_loss.std().item()
-
-    # 计算总体平均：对各个区间的平均值再求平均
-    if interval_means:
-        overall_loss = sum(interval_means) / len(interval_means)
-        results["overall"] = (
-            overall_loss
-            if not return_tensor
-            else torch.tensor(overall_loss, device=pred.device)
-        )
-        stats["total_count"] = sum(
-            stats[f"{interval_name}_count"] for interval_name in intervals.keys()
-        )
-        stats["total_mean"] = overall_loss
-        stats["total_std"] = 0.0  # 简化处理
-    else:
-        results["overall"] = (
-            0.0 if not return_tensor else torch.tensor(0.0, device=pred.device)
-        )
-        stats["total_count"] = 0
-        stats["total_mean"] = 0.0
-        stats["total_std"] = 0.0
-
-    # 添加统计信息到结果中
-    if log_stats:
-        results["stats"] = stats
-        print(f"[Interval MSE Stats] Total samples: {stats['total_count']}")
-        for interval_name in intervals.keys():
-            count = stats[f"{interval_name}_count"]
-            mean_loss = stats[f"{interval_name}_mean"]
-            std_loss = stats[f"{interval_name}_std"]
-            print(
-                f"[Interval MSE Stats] {interval_name}: count={count}, mean={mean_loss:.4f}, std={std_loss:.4f}"
-            )
-
-    return results
-
-
 def weighted_masked_mse_loss_v2(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    loss_fn,
     reduction: str = "mean",
     log_each: bool = False,
 ):
@@ -787,7 +667,7 @@ def weighted_masked_mse_loss_v2(
     权重 = 2^(target - shift)
     shift 可调节权重起点，默认为0。
     """
-    loss_fn = nn.MSELoss(reduction="none")
+    loss_fn = loss_fn
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
     # 生成以2为底的指数权重
@@ -843,6 +723,36 @@ def log_stats(
         print("---------------------------------------------")
 
     if print_detailed_stats:
+        recall, precision, f1, macro_f1, average_recall, average_precision = (
+            compute_classification_metrics(
+                valid_preds, valid_labels, num_classes, labels.device
+            )
+        )
+        # INSERT_YOUR_CODE
+        # 将每个类别的recall, precision, f1上传到wandb
+        if "wandb" in globals() and wandb.run is not None:
+            log_dict = {}
+            for i in range(num_classes):
+                log_dict[f"recall/bin{i}"] = recall[i].item()
+                log_dict[f"precision/bin{i}"] = precision[i].item()
+                log_dict[f"f1/bin{i}"] = f1[i].item()
+            log_dict["val/macro_f1"] = macro_f1
+            # 只对非第0类(bin0)求平均
+            log_dict["val/average_recall"] = average_recall
+            log_dict["val/average_precision"] = average_precision
+            wandb.log(log_dict)
+
+        print(f"\n===== Epoch {epoch} Validation Stats =====")
+        print(f"Total non-padded labels (predictions): {valid_preds.numel()}")
+        print(f"{'Class':>8} | {'Recall':>8} | {'Precision':>10} | {'F1':>8}")
+        print("-" * 44)
+        for i in range(num_classes):
+            print(
+                f"{i:>8} | {recall[i].item():>8.4f} | {precision[i].item():>10.4f} | {f1[i].item():>8.4f}"
+            )
+        print("-" * 44)
+        print(f"{'Macro F1':>8} | {macro_f1:>8.4f}")
+        print("================================\n")
         # 1. Label distribution
         label_counts = torch.bincount(valid_labels.to(torch.int), minlength=num_classes)
         label_dist = label_counts.float() / non_padded_count
@@ -1117,23 +1027,6 @@ class LDAMLoss(nn.Module):
         return F.cross_entropy(self.s * x_m, target_valid, weight=self.weight)
 
 
-def switch_ce_loss(epoch):
-    if epoch == 1 or epoch == 2:
-        return nn.CrossEntropyLoss(reduction="mean", ignore_index=-100)
-    elif epoch == 3:
-        return nn.CrossEntropyLoss(
-            weight=torch.tensor([0, 1, 3, 5, 7, 20.0]),
-            reduction="mean",
-            ignore_index=-100,
-        )
-    elif epoch == 4:
-        return nn.CrossEntropyLoss(
-            weight=torch.tensor([0, 1, 5, 8, 13, 30.7]),
-            reduction="mean",
-            ignore_index=-100,
-        )
-
-
 def check_grad_flow(
     model: nn.Module,
     loss_tensor: torch.Tensor,
@@ -1214,3 +1107,73 @@ def check_grad_flow(
         "zero": zero_grad_names,
         "none": no_grad_names,
     }
+
+
+# 计算每个类别的TP, FP, FN
+def compute_classification_metrics(valid_preds, valid_labels, num_classes, device):
+    """
+    计算每个类别的TP, FP, FN, recall, precision, f1, macro_f1
+    返回: recall, precision, f1, macro_f1
+    注意：不计算bin0（即类别0）的指标
+    """
+    # True Positives (TP): 预测为i且真实为i
+    TP = torch.zeros(num_classes, dtype=torch.long, device=device)
+    for i in range(num_classes):
+        TP[i] = ((valid_preds == i) & (valid_labels == i)).sum()
+
+    # False Positives (FP): 预测为i但真实不是i
+    FP = torch.zeros(num_classes, dtype=torch.long, device=device)
+    for i in range(num_classes):
+        FP[i] = ((valid_preds == i) & (valid_labels != i)).sum()
+
+    # False Negatives (FN): 真实为i但预测不是i
+    FN = torch.zeros(num_classes, dtype=torch.long, device=device)
+    for i in range(num_classes):
+        FN[i] = ((valid_preds != i) & (valid_labels == i)).sum()
+
+    # Recall, Precision, F1
+    recall = torch.zeros(num_classes, dtype=torch.float, device=device)
+    precision = torch.zeros(num_classes, dtype=torch.float, device=device)
+    f1 = torch.zeros(num_classes, dtype=torch.float, device=device)
+    for i in range(num_classes):
+        recall[i] = (
+            TP[i].float() / (TP[i] + FN[i]).float()
+            if (TP[i] + FN[i]) > 0
+            else torch.tensor(0.0, device=device)
+        )
+        precision[i] = (
+            TP[i].float() / (TP[i] + FP[i]).float()
+            if (TP[i] + FP[i]) > 0
+            else torch.tensor(0.0, device=device)
+        )
+        if recall[i] + precision[i] > 0:
+            f1[i] = 2 * recall[i] * precision[i] / (recall[i] + precision[i])
+        else:
+            f1[i] = torch.tensor(0.0, device=device)
+    # 只计算bin1~num_classes-1的macro_f1
+    macro_f1 = f1[1:].mean().item()
+    average_recall = recall[1:].mean().item()
+    average_precision = precision[1:].mean().item()
+
+    return recall, precision, f1, macro_f1, average_recall, average_precision
+
+
+def get_l0_lambda(epoch, index, l0_warmup_start_epoch, l0_lambda_target, epoch_length):
+    """
+    计算l0 lambda，使用warmup策略
+    """
+    if epoch < l0_warmup_start_epoch:
+        return 0.0
+    elif epoch > l0_warmup_start_epoch:
+        return l0_lambda_target
+    else:
+        return calculate_l0_lambda_with_warmup_fine_grained(
+            index, l0_lambda_target, epoch_length
+        )
+
+
+def calculate_l0_lambda_with_warmup_fine_grained(index, l0_lambda_target, epoch_length):
+    """
+    计算当前的l0 lambda 按index在l0_warmup_start_epoch到l0_warmup_start_epoch + 1之间线性增加到l0_lambda_target
+    """
+    return l0_lambda_target * (index / epoch_length)

@@ -30,7 +30,7 @@ def pretrain(cfg: DictConfig):
         wandb.init(
             entity=cfg.get("wandb_team", "rwth_lfb"),
             project=cfg.get("wandb_project", "DeepSC"),
-            name=f"ce only, lr: {cfg.learning_rate}",
+            name=f"{cfg.run_name}, lr: {cfg.learning_rate}",
             tags=cfg.tags,
             config=dict(cfg),
         )

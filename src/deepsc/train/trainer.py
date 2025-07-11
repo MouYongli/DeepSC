@@ -23,7 +23,6 @@ from deepsc.data import DataCollator
 from deepsc.utils import *
 from deepsc.utils.utils import (
     check_grad_flow,
-    interval_average_mse_loss,
     interval_masked_mse_loss,
 )
 
@@ -47,12 +46,19 @@ class Trainer:
         self.fabric = fabric
         self.model = model
         self.epoch = 1  # 添加epoch类变量
+        self.epoch_length = 0
+        self.iteration = 0
         seed_all(args.seed + self.fabric.global_rank)
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
         self.load_data()
+        self.init_loss_fn()
         self.prepare_model()
+        if self.args.enable_l0_warmup:
+            self.l0_lambda = 0.0
+        else:
+            self.l0_lambda = self.args.l0_lambda_target
 
     def load_all_csr_from_folder(self, datapath):
         """
@@ -173,35 +179,6 @@ class Trainer:
         args = self.args
         # 是否应该让optimizer, lossfunction, scheduler customizable?
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
-
-        # 根据配置选择使用哪种loss
-        if hasattr(args, "use_ldam_loss") and args.use_ldam_loss:
-            # 使用LDAM loss
-            print("Using LDAM loss...")
-            class_counts = self.calculate_class_counts()
-            cls_num_list = class_counts.cpu().numpy()
-
-            # 确保padding类（第0类）有合理的权重，避免除零错误
-            if cls_num_list[0] == 0:
-                print(
-                    "Warning: Padding class (bin 0) has 0 samples, setting to 1 to avoid division by zero"
-                )
-                cls_num_list[0] = 1  # 设置为1避免除零，但不影响实际训练
-
-            self.loss_fn = LDAMLoss(
-                cls_num_list=cls_num_list, max_m=0.5, s=30, ignore_index=-100
-            )
-        elif self.args.weighted_ce_loss:
-            # 使用原有的加权 CrossEntropyLoss
-            print("Using weighted CrossEntropyLoss...")
-            # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
-            ce_weight = torch.tensor([0, 1, 6.9, 118.7])
-            self.loss_fn = nn.CrossEntropyLoss(
-                weight=ce_weight, reduction="mean", ignore_index=-100
-            )
-        else:
-            print("Using standard CrossEntropyLoss...")
-            self.loss_fn = nn.CrossEntropyLoss(reduction="mean", ignore_index=-100)
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.scheduler = self.create_scheduler(
@@ -312,7 +289,7 @@ class Trainer:
             y=y,
             ce_loss_weight=self.args.ce_loss_weight,
             mse_loss_weight=self.args.mse_loss_weight,
-            l0_lambda=self.args.l0_lambda,
+            l0_lambda=self.l0_lambda,
             is_val=is_val,
         )
         if logits is not None:
@@ -328,23 +305,9 @@ class Trainer:
         # 新增：区间 MSE 统计
         interval_mse = None
         if self.args.enable_mse and regression_output is not None:
-            if self.args.use_interval_mse_loss:
-                # 使用新的interval_average_mse_loss函数
-                interval_losses = interval_average_mse_loss(
-                    regression_output, continuous_expr_label, mask
-                )
-                # 转换为与interval_masked_mse_loss相同的格式
-                interval_mse = {
-                    "lt3": interval_losses["interval_1"],
-                    "3to5": interval_losses["interval_2"],
-                    "5to7": interval_losses["interval_3"],
-                    "ge7": interval_losses["interval_4"],
-                }
-            else:
-                # 使用原有的interval_masked_mse_loss函数
-                interval_mse = interval_masked_mse_loss(
-                    regression_output, continuous_expr_label, mask
-                )
+            interval_mse = interval_masked_mse_loss(
+                regression_output, continuous_expr_label, mask
+            )
         masked_preds = torch.tensor([])  # 可加 device 和 dtype 以确保兼容性
         masked_labels = torch.tensor([])
         if is_val:
@@ -462,11 +425,6 @@ class Trainer:
                         interval_mse=interval_mse_str,
                     )
                 if self.args.enable_mse and mse_loss is not None:
-                    print(masked_preds)
-                    print(masked_labels)
-                    logging.info(
-                        f"[VAL] masked_preds: {masked_preds.shape}, masked_labels: {masked_labels.shape}"
-                    )
                     all_masked_preds.append(masked_preds)
                     all_masked_labels.append(masked_labels)
             # 只在有分类任务时做pad和评估
@@ -566,9 +524,11 @@ class Trainer:
                         "val/l0_loss": val_l0_loss,
                         "epoch": epoch,
                         "val/expr_emb_rank": rank.item(),
-                        "val/interval_mse_5to7": sum(accm_interval_mse["5to7"])
+                        "ValRegression/interval_mse_5to7": sum(
+                            accm_interval_mse["5to7"]
+                        )
                         / len(accm_interval_mse["5to7"]),
-                        "val/interval_mse_ge7": sum(accm_interval_mse["ge7"])
+                        "ValRegression/interval_mse_ge7": sum(accm_interval_mse["ge7"])
                         / len(accm_interval_mse["ge7"]),
                     }
                 )
@@ -587,11 +547,9 @@ class Trainer:
         if self.args.model_name == "DeepSC":
             self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
+        self.epoch_length = len(self.train_loader)
         for epoch in range(start_epoch, self.args.epoch + 1):
-            if self.args.enable_adaptive_ce_loss:
-                self.loss_fn = switch_ce_loss(epoch)
             self.epoch = epoch  # 更新类变量epoch
-            self.args.l0_lambda = self.get_l0_lambda(epoch)
             self.train_loader.sampler.set_epoch(epoch)
             self.model.train()
             data_iter = self.train_loader
@@ -611,8 +569,11 @@ class Trainer:
             average_loss = 0.0
 
             for index, data in enumerate(data_iter, start=1):
+                self.iteration = index
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
+                if self.args.adaptive_mse_weight:
+                    self.calculate_adaptive_mse_weight()
                 loss, final, mse_loss, ce_loss, l0_loss, interval_mse = (
                     self._process_batch(data)
                 )
@@ -621,6 +582,9 @@ class Trainer:
                     interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
                 per_bin_accuracy = self._calculate_per_bin_accuracy(
                     final, discrete_expr_label, self.args.model.num_bins
+                )
+                self.accumulate_or_log_classification_metrics(
+                    final, discrete_expr_label
                 )
                 total_acc = self._calculate_accuracy(final, discrete_expr_label)
                 accm_loss.append(loss.item())
@@ -643,6 +607,14 @@ class Trainer:
                         self.fabric.backward(loss / self.args.grad_acc)
                 else:
                     # 梯度检查（可选，通过配置控制）
+                    if self.args.enable_l0_warmup:
+                        self.l0_lambda = get_l0_lambda(
+                            epoch,
+                            index,
+                            self.args.l0_warmup_start_epoch,
+                            self.args.l0_lambda_target,
+                            self.epoch_length,
+                        )
                     if (
                         hasattr(self.args, "check_grad_flow")
                         and self.args.check_grad_flow
@@ -667,8 +639,6 @@ class Trainer:
                                         "grad_check/none_params": len(
                                             grad_stats["none"]
                                         ),
-                                        "epoch": epoch,
-                                        "iteration": index,
                                     }
                                 )
                         except Exception as e:
@@ -677,8 +647,6 @@ class Trainer:
                                 wandb.log(
                                     {
                                         "grad_check/error": 1,
-                                        "epoch": epoch,
-                                        "iteration": index,
                                     }
                                 )
 
@@ -733,19 +701,19 @@ class Trainer:
                                 "train/total_acc": average_total_acc,
                                 "train/ce_loss": average_ce_loss,
                                 "train/l0_loss": average_l0_loss,
-                                "train/interval_mse_5to7": sum(
+                                "TrainRegressionMetrics/interval_mse_5to7": sum(
                                     accm_interval_mse["5to7"]
                                 )
                                 / len(accm_interval_mse["5to7"]),
-                                "train/interval_mse_ge7": sum(accm_interval_mse["ge7"])
+                                "TrainRegressionMetrics/interval_mse_ge7": sum(
+                                    accm_interval_mse["ge7"]
+                                )
                                 / len(accm_interval_mse["ge7"]),
-                                "train/ce_loss_weight": self.args.ce_loss_weight,
-                                "train/mse_loss_weight": self.args.mse_loss_weight,
+                                "TrainLossWeight/ce_loss_weight": self.args.ce_loss_weight,
+                                "TrainLossWeight/mse_loss_weight": self.args.mse_loss_weight,
                                 "epoch": epoch,
                                 "iteration": index,
-                                "train/learning_rate": self.optimizer.param_groups[0][
-                                    "lr"
-                                ],
+                                "learning_rate": self.optimizer.param_groups[0]["lr"],
                             }
                         )
 
@@ -770,7 +738,7 @@ class Trainer:
                         iteration=index,
                     )
             # at the end of each epoch, reset the iteration
-            self.iteration = 1
+            self.iteration = 0
             self.validate(epoch)
             self.log_each = False
             save_ckpt_fabric(
@@ -829,7 +797,7 @@ class Trainer:
         ce_loss = torch.tensor(
             0.0, device=logits.device if logits is not None else "cpu"
         )
-        mse_loss = torch.tensor(
+        regression_loss = torch.tensor(
             0.0, device=logits.device if logits is not None else "cpu"
         )
         l0_loss = 0.0
@@ -837,37 +805,28 @@ class Trainer:
         if enable_ce and logits is not None and discrete_expr_label is not None:
             # 保证label和logits在同一device
             discrete_expr_label = discrete_expr_label.to(logits.device)
-            if self.args.mean_ce_loss:
-                if (
-                    self.epoch == 1
-                    or self.epoch == 2
-                    or self.epoch == 3
-                    or self.epoch == 4
-                ) and self.args.enable_adaptive_ce_loss:
-                    self.loss_fn.to(logits.device)
-                    logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
-                    labels_reshaped = discrete_expr_label.view(-1)
-                    ce_loss = self.loss_fn(logits_reshaped, labels_reshaped)
-                else:
-                    per_bin_ce_loss = self.calculate_per_bin_ce_loss(
-                        logits, discrete_expr_label
-                    )
-                    ce_loss = (
-                        per_bin_ce_loss.mean()
-                        if per_bin_ce_loss is not None
-                        else torch.tensor(0.0, device=logits.device)
-                    )
+            if self.args.enable_alternating_ldam_mean_ce_loss:
+                ce_loss = self.calculate_alternating_ldam_mean_ce_loss(
+                    self.epoch, logits, discrete_expr_label
+                )
+            elif self.args.enable_adaptive_ce_loss:
+                ce_loss = self.calculate_mogaide_ce_loss(logits, discrete_expr_label)
+            elif self.args.enable_warm_alternating_ldam_mean_ce_loss:
+                ce_loss = self.calculate_warm_alternating_ldam_mean_ce_loss(
+                    self.epoch,
+                    logits,
+                    discrete_expr_label,
+                    self.epoch_length,
+                    self.iteration,
+                )
             elif self.args.weighted_ce_loss:
-                self.loss_fn.to(logits.device)
-                logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
-                labels_reshaped = discrete_expr_label.view(-1)
-                ce_loss = self.loss_fn(logits_reshaped, labels_reshaped)
+                ce_loss = self.calculate_weighted_ce_loss(logits, discrete_expr_label)
+            elif self.args.use_ldam_loss:
+                ce_loss = self.calculate_ldam_ce_loss(logits, discrete_expr_label)
+            elif self.args.mean_ce_loss:
+                ce_loss = self.calculate_mean_ce_loss(logits, discrete_expr_label)
             else:
-                # 使用LDAM loss或普通CrossEntropyLoss
-                self.loss_fn.to(logits.device)
-                logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
-                labels_reshaped = discrete_expr_label.view(-1)
-                ce_loss = self.loss_fn(logits_reshaped, labels_reshaped)
+                ce_loss = self.calculate_ce_loss(logits, discrete_expr_label)
             total_loss += ce_loss_weight * ce_loss
         if (
             enable_mse
@@ -875,47 +834,36 @@ class Trainer:
             and continuous_expr_label is not None
             and mask is not None
         ):
-            if self.args.use_hard_mse_loss:
-                mse_loss = weighted_masked_mse_loss(
+            if self.args.use_normal_regression_loss:
+                regression_loss = masked_mse_loss(
                     regression_output,
                     continuous_expr_label,
                     mask,
+                    loss_fn=self.regression_loss_fn,
                     reduction="mean",
-                    log_each=is_val,
-                    loss_type=self.args.regression_loss_type,
                 )
-            elif self.args.use_exp_mse_loss:
-                mse_loss = weighted_masked_mse_loss_v2(
+            elif self.args.use_hard_regression_loss:
+                regression_loss = weighted_masked_mse_loss(
                     regression_output,
                     continuous_expr_label,
                     mask,
+                    loss_fn=self.regression_loss_fn,
                     reduction="mean",
-                    log_each=is_val,
+                    log_each=is_val and self.args.show_mse_loss_details,
                 )
-            elif self.args.use_interval_mse_loss:
-                interval_losses = interval_average_mse_loss(
+            elif self.args.use_exp_regression_loss:
+                regression_loss = weighted_masked_mse_loss_v2(
                     regression_output,
                     continuous_expr_label,
                     mask,
-                    loss_type=self.args.regression_loss_type,
-                    log_stats=self.args.interval_loss_log_stats and is_val,
-                    return_tensor=self.args.interval_loss_return_tensor,
+                    loss_fn=self.regression_loss_fn,
+                    reduction="mean",
+                    log_each=is_val and self.args.show_mse_loss_details,
                 )
-                # 使用overall作为主要的mse_loss
-                if self.args.interval_loss_return_tensor:
-                    mse_loss = interval_losses["overall"]
-                else:
-                    mse_loss = torch.tensor(
-                        interval_losses["overall"], device=regression_output.device
-                    )
-                # 使用adaptive_overall作为主要的mse_loss
-                mse_loss = torch.tensor(
-                    interval_losses["adaptive_overall"], device=regression_output.device
-                )
-            total_loss += mse_loss_weight * mse_loss
+            total_loss += mse_loss_weight * regression_loss
         l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
         total_loss += l0_lambda * l0_loss
-        return total_loss, ce_loss, mse_loss, l0_loss
+        return total_loss, ce_loss, regression_loss, l0_loss
 
     def get_top_bins_distribution_str(
         self, final, discrete_expr_label, num_bins, topk=5
@@ -963,8 +911,11 @@ class Trainer:
         返回: float, 平均每个bin的accuracy（不含bin0）
         """
         accuracies = []
+        # 排除-100的情况
+        valid_mask = discrete_expr_label != -100
         for bin_idx in range(1, num_bins + 1):  # 跳过bin0
-            mask = discrete_expr_label == bin_idx
+            # 只考虑非-100且label为bin_idx的样本
+            mask = (discrete_expr_label == bin_idx) & valid_mask
             total = mask.sum()
             if total == 0:
                 continue  # 该bin没有样本
@@ -982,6 +933,43 @@ class Trainer:
         ).sum(dim=-1)
         batch_acc = torch.true_divide(correct_num, pred_num).mean().item()
         return batch_acc
+
+    def accumulate_or_log_classification_metrics(self, final, discrete_expr_label):
+        non_padded_mask = discrete_expr_label != -100
+        valid_labels = discrete_expr_label[non_padded_mask]
+        valid_preds = final[non_padded_mask]
+        num_classes = self.args.model.num_bins + 1
+        recall, precision, f1, macro_f1, average_recall, average_precision = (
+            compute_classification_metrics(
+                valid_preds, valid_labels, num_classes, discrete_expr_label.device
+            )
+        )
+        if not hasattr(self, "acc_recall"):
+            self.acc_recall = []
+        if not hasattr(self, "acc_precision"):
+            self.acc_precision = []
+        if not hasattr(self, "acc_macro_f1"):
+            self.acc_macro_f1 = []
+        self.acc_recall.append(average_recall)
+        self.acc_precision.append(average_precision)
+        self.acc_macro_f1.append(macro_f1)
+        if self.iteration % self.args.log_on_wandb_every == 0:
+            if self.is_master:
+                average_acc_recall = sum(self.acc_recall) / len(self.acc_recall)
+                average_acc_precision = sum(self.acc_precision) / len(
+                    self.acc_precision
+                )
+                average_acc_macro_f1 = sum(self.acc_macro_f1) / len(self.acc_macro_f1)
+                wandb.log(
+                    {
+                        "TrainClassificationMetrics/average_recall": average_acc_recall,
+                        "TrainClassificationMetrics/average_precision": average_acc_precision,
+                        "TrainClassificationMetrics/average_macro_f1": average_acc_macro_f1,
+                    }
+                )
+                self.acc_recall = []
+                self.acc_precision = []
+                self.acc_macro_f1 = []
 
     def draw_expr_emb_analysis(self, E, epoch, iteration=0):
         # --------- 新增：分析expr_emb秩 ---------
@@ -1014,8 +1002,6 @@ class Trainer:
                 wandb.log(
                     {
                         "tsne": wandb.Image(tsne_path),
-                        "epoch": epoch,
-                        "iteration": iteration,
                     }
                 )
                 plt.close()
@@ -1036,8 +1022,6 @@ class Trainer:
                 wandb.log(
                     {
                         "umap": wandb.Image(umap_path),
-                        "epoch": epoch,
-                        "iteration": iteration,
                     }
                 )
                 plt.close()
@@ -1068,20 +1052,10 @@ class Trainer:
             plt.savefig(scatter_path)
             wandb.log(
                 {
-                    "val/pred_vs_label_scatter": wandb.Image(scatter_path),
-                    "epoch": epoch,
-                    "iteration": iteration,
+                    "pred_vs_label_scatter": wandb.Image(scatter_path),
                 }
             )
             plt.close()
-
-    def get_l0_lambda(self, epoch):
-        if epoch == 1:
-            return 0.1
-        elif epoch == 2:
-            return 0.1
-        else:
-            return 0.1
 
     def calculate_class_counts(self):
         """
@@ -1137,3 +1111,134 @@ class Trainer:
                 print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
 
         return class_counts
+
+    # need to predefine the weight and also need to ensure that the length of weight corresponding to the number of bins
+    def init_weighted_ce_loss(self):
+        # 使用原有的加权 CrossEntropyLoss
+        print("Using weighted CrossEntropyLoss...")
+        # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
+        ce_weight = torch.tensor([0, 1, 6.9, 118.7])
+        self.weighted_ce_loss_fn = nn.CrossEntropyLoss(
+            weight=ce_weight, reduction="mean", ignore_index=-100
+        )
+
+    def calculate_weighted_ce_loss(self, logits, discrete_expr_label):
+        self.weighted_ce_loss_fn.to(logits.device)
+        logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
+        labels_reshaped = discrete_expr_label.view(-1)
+        return self.weighted_ce_loss_fn(logits_reshaped, labels_reshaped)
+
+    def init_ldam_loss(self):
+        print("Using LDAM loss...")
+        class_counts = self.calculate_class_counts()
+        cls_num_list = class_counts.cpu().numpy()
+
+        # 确保padding类（第0类）有合理的权重，避免除零错误
+        if cls_num_list[0] == 0:
+            print(
+                "Warning: Padding class (bin 0) has 0 samples, setting to 1 to avoid division by zero"
+            )
+            cls_num_list[0] = 1  # 设置为1避免除零，但不影响实际训练
+
+        return LDAMLoss(cls_num_list=cls_num_list, max_m=0.5, s=30, ignore_index=-100)
+
+    # if: enable_alternating_ldam_mean_ce_loss
+    # need to ensure that loss_fn is initialized with LDAM loss
+    def calculate_alternating_ldam_mean_ce_loss(
+        self, epoch, logits, discrete_expr_label
+    ):
+        if epoch % 2 == 1:
+            ce_loss = self.calculate_ldam_ce_loss(logits, discrete_expr_label)
+        else:
+            ce_loss = self.calculate_mean_ce_loss(logits, discrete_expr_label)
+        return ce_loss
+
+    # if: enable_adaptive_ce_loss
+    def calculate_mogaide_ce_loss(self, logits, discrete_expr_label):
+        if self.epoch == 1 or self.epoch == 2:
+            ce_loss = self.cross_entropy_loss_fn(logits, discrete_expr_label)
+        elif self.epoch == 3 or self.epoch == 4:
+            ce_loss = self.calculate_weighted_ce_loss(logits, discrete_expr_label)
+        else:
+            ce_loss = self.calculate_mean_ce_loss(logits, discrete_expr_label)
+        return ce_loss
+
+    # if: enable_warm_alternating_ldam_mean_ce_loss
+    # need to ensure that loss_fn is initialized with LDAM loss
+    def calculate_warm_alternating_ldam_mean_ce_loss(
+        self, epoch, logits, discrete_expr_label, epoch_length, index
+    ):
+        ldam_loss = self.calculate_ldam_ce_loss(logits, discrete_expr_label)
+        per_bin_ce_loss_mean = self.calculate_mean_ce_loss(logits, discrete_expr_label)
+        # 单数回合的前半段偏向ldam，偶数回合前半段偏向ce
+        progress = index / epoch_length if epoch_length > 0 else 0.0
+        if epoch % 2 == 1:
+            # 单数回合：前半段ldam多，后半段ce多
+            ldam_weight = 1.0 - progress
+            ce_weight = progress
+        else:
+            # 偶数回合：前半段ce多，后半段ldam多
+            ldam_weight = progress
+            ce_weight = 1.0 - progress
+        if index % 20 == 0:
+            if self.is_master:
+                wandb.log(
+                    {
+                        "TrainLossWeight/ldam_weight": ldam_weight,
+                        "TrainLossWeight/ce_weight": ce_weight,
+                    }
+                )
+        ce_loss = ldam_weight * ldam_loss + ce_weight * per_bin_ce_loss_mean
+        return ce_loss
+
+    def calculate_mean_ce_loss(self, logits, discrete_expr_label):
+        per_bin_ce_loss = self.calculate_per_bin_ce_loss(logits, discrete_expr_label)
+        mean_ce_loss = (
+            per_bin_ce_loss.mean()
+            if per_bin_ce_loss is not None
+            else torch.tensor(0.0, device=logits.device)
+        )
+        return mean_ce_loss
+
+    # if: use_ldam_loss
+    # need to ensure that loss_fn is initialized with LDAM loss
+    def calculate_ldam_ce_loss(self, logits, discrete_expr_label):
+        self.ldam_loss_fn.to(logits.device)
+        logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
+        labels_reshaped = discrete_expr_label.view(-1)
+        return self.ldam_loss_fn(logits_reshaped, labels_reshaped)
+
+    def calculate_ce_loss(self, logits, discrete_expr_label):
+        self.cross_entropy_loss_fn.to(logits.device)
+        logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
+        labels_reshaped = discrete_expr_label.view(-1)
+        return self.cross_entropy_loss_fn(logits_reshaped, labels_reshaped)
+
+    def calculate_adaptive_mse_weight(self):
+        weight_grad = self.args.grad_acc / self.epoch_length
+        if (self.epoch == 1 and self.iteration > self.epoch_length / 3) or (
+            self.epoch == 2 and self.iteration < 2 * self.epoch_length / 3
+        ):
+            self.args.mse_loss_weight = weight_grad + self.args.mse_loss_weight
+
+    def init_loss_fn(self):
+        if (
+            self.args.enable_alternating_ldam_mean_ce_loss
+            or self.args.enable_warm_alternating_ldam_mean_ce_loss
+            or self.args.use_ldam_loss
+        ):
+            self.ldam_loss_fn = self.init_ldam_loss()
+        elif self.args.weighted_ce_loss or self.args.enable_adaptive_ce_loss:
+            self.init_weighted_ce_loss()
+            self.cross_entropy_loss_fn = nn.CrossEntropyLoss(
+                reduction="mean", ignore_index=-100
+            )
+        else:
+            self.cross_entropy_loss_fn = nn.CrossEntropyLoss(
+                reduction="mean", ignore_index=-100
+            )
+
+        if self.args.enable_mse_loss:
+            self.regression_loss_fn = nn.MSELoss(reduction="none")
+        elif self.args.enable_huber_loss:
+            self.regression_loss_fn = nn.HuberLoss(reduction="none")

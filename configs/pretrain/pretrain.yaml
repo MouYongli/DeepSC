@@ -5,42 +5,47 @@ defaults:
 
 wandb_project: "DeepSC"
 tags: ["l0", "5bin", "normal cellxgene dataset", "ce only", "adaptive ce loss"]
+run_name: "warm_alternating"
 # Loss weights
 enable_l0: True
-enable_mse: False
+enable_mse: True
 enable_ce: True
-l0_lambda: 0.1
 ce_loss_weight: 1.0
-mse_loss_weight: 0
+mse_loss_weight: 1.0
 #control the weight of mse loss
 adaptive_mse_weight: False
 
+# L0 loss warmup parameters
+l0_warmup_start_epoch: 3  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
+enable_l0_warmup: True
+l0_lambda_target: 0.1
+# 数据增强相关
+do_hard_mask: True
 
+# 分类任务
+# 最多只能打开一个开关
 weighted_ce_loss: False
-mean_ce_loss: False
-use_ldam_loss: True # LDAM loss开关
+mean_ce_loss: True
+use_ldam_loss: False
 enable_adaptive_ce_loss: False
-enable_alternating_ldam_mean_ce_loss: True
+enable_alternating_ldam_mean_ce_loss: False
 enable_warm_alternating_ldam_mean_ce_loss: False
-# how to calculate weight of mse loss
-use_hard_mse_loss: True
-use_exp_mse_loss: False
-use_interval_mse_loss: False
+
+# 回归任务
+# 最多只能打开一个开关 选择huber还是mse
+enable_mse_loss: False
+enable_huber_loss: True
+# 回归任务
+# 最多只能打开一个开关 选择普通的还是加权的
+use_normal_regression_loss: True
+use_hard_regression_loss: False
+use_exp_regression_loss: False
+
 #Print details of mse loss in log
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 
-# interval loss configuration
-interval_loss_log_stats: True
-interval_loss_return_tensor: False
-adaptive_strategy: "inverse_count"  # "inverse_count", "inverse_loss", "balanced"
-
-#different mask probability on different bins
-do_hard_mask: True
-
-regression_loss_type: "huber"
-
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/small/partition_0_sparse_norm_small.npz"
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/partition_0_sparse_norm.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 3
