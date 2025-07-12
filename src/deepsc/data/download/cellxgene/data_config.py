@@ -9,9 +9,23 @@ MAJOR_TISSUE_LIST = [
 ]
 VERSION = "2025-01-30"
 
-CANCER_LIST_PATH = "/home/angli/DeepSC/scripts/download/cellxgene/cancer_list.txt"
-with open(CANCER_LIST_PATH) as f:
-    CANCER_LIST = [line.rstrip("\n") for line in f]
+import os
+from pathlib import Path
+
+# Use environment variable with sensible default
+PROJECT_ROOT = os.getenv("DEEPSC_PROJECT_ROOT", str(Path(__file__).parent.parent.parent.parent.parent))
+CANCER_LIST_PATH = os.getenv(
+    "DEEPSC_CANCER_LIST_PATH", 
+    os.path.join(PROJECT_ROOT, "scripts", "download", "cellxgene", "cancer_list.txt")
+)
+
+# Handle case where file might not exist
+try:
+    with open(CANCER_LIST_PATH) as f:
+        CANCER_LIST = [line.rstrip("\n") for line in f]
+except FileNotFoundError:
+    print(f"Warning: Cancer list file not found at {CANCER_LIST_PATH}. Using empty list.")
+    CANCER_LIST = []
 
 #  build the value filter dict for each tissue
 VALUE_FILTER = {
