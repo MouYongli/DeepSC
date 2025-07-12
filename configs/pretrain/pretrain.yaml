@@ -1,23 +1,48 @@
 defaults:
   - _self_
-  - model: scbert
+  - model: deepsc
   - dataset: tripleca
 
 wandb_project: "DeepSC"
+pretrain_feature: "binned_ce, bin prediction ce_1.0"
+# Loss weights
+enable_l0: False
+enable_mse: False
+enable_ce: True
+l0_lambda: 0.00
+ce_loss_weight: 1.0
+mse_loss_weight: 0
+weighted_ce_loss: True
+mean_ce_loss: False
+use_hard_mse_loss: True
+use_exp_mse_loss: False
+do_hard_mask: False
+regression_loss_type: "huber"
 
-data_path: "/home/angli/baseline/DeepSC/data/3ca/mapped_batch_data/1d84333c-0327-4ad6-be02-94fee81154ff_sparse_preprocessed.pth"
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 2
-valid_every: 1
+num_device: 3
+valid_every: 1000
 model_name: "scbert"
-grad_acc: 80
-learning_rate: 1e-4
-epoch: 6
-batch_size: 5
+grad_acc: 20
+learning_rate: 5e-4
+epoch: 4
+batch_size: 13
 num_bin: 5
-save_ckpt_every: 4000
+save_ckpt_every: 3000
 
+log_on_wandb_every: 20
+sequence_length: 1000
+plot_tsne_and_umap: False
+draw_continuous_pred_label_scatter: False
+
+# 新增warmup相关参数
+use_warmup: False
+warmup_ratio: 0.03
+use_warmup_with_decay: False
+use_scbert_scheduler: False
+use_mogaide_scheduler: True
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
   verbose: False

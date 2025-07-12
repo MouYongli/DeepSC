@@ -4,6 +4,7 @@ import math
 import os
 import os.path as osp
 import random
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -167,7 +168,6 @@ def save_ckpt_fabric(
     model,
     optimizer,
     scheduler,
-    losses,
     model_name,
     ckpt_folder,
     fabric,
@@ -514,3 +514,456 @@ class LabelSmoothCrossEntropyLoss(_WeightedLoss):
             loss = loss.mean()
 
         return loss
+
+
+class FocalLoss(_WeightedLoss):
+    """
+    Focal Loss for multi-class classification.
+    Args:
+        weight (Tensor, optional): a manual rescaling weight given to each class.
+        gamma (float, optional): focusing parameter gamma >= 0.
+        ignore_index (int, optional): Specifies a
+        target value that is ignored and does not contribute to the input gradient.
+        reduction (string, optional): Specifies the reduction to apply to the output: 'none' | 'mean' | 'sum'.
+    """
+
+    def __init__(self, weight=None, gamma=2.0, ignore_index=-100, reduction="mean"):
+        super().__init__(weight=weight, reduction=reduction)
+        self.weight = weight
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+
+    def forward(self, input, target):
+        if len(input.shape) > 2:
+            input = input.reshape(-1, input.size(-1))
+        if len(target.shape) > 1:
+            target = target.reshape(-1)
+        valid_mask = target != self.ignore_index
+        input = input[valid_mask]
+        target = target[valid_mask]
+        logpt = F.log_softmax(input, dim=-1)
+        pt = torch.exp(logpt)
+        logpt = logpt.gather(1, target.unsqueeze(1)).squeeze(1)
+        pt = pt.gather(1, target.unsqueeze(1)).squeeze(1)
+        if self.weight is not None:
+            at = self.weight.gather(0, target)
+            logpt = logpt * at
+        loss = -((1 - pt) ** self.gamma) * logpt
+        if self.reduction == "mean":
+            return (
+                loss.mean()
+                if loss.numel() > 0
+                else torch.tensor(0.0, device=input.device)
+            )
+        elif self.reduction == "sum":
+            return loss.sum()
+        else:
+            return loss
+
+
+def masked_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    reduction: str = "mean",
+):
+    """
+    计算只在 mask=True 的位置上的 MSE Loss。
+
+    Args:
+        pred (Tensor): 模型输出，shape = (B, T)
+        target (Tensor): 目标值，shape = (B, T)
+        mask (BoolTensor): 掩码，True 表示需要计算的位置
+        reduction (str): "mean"、"sum" 或 "none"
+
+    Returns:
+        Tensor: loss 值
+    """
+    loss_fn = nn.MSELoss(reduction="none")
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    masked_loss = elementwise_loss[mask]  # 只取被掩码的部分
+
+    if reduction == "mean":
+        if masked_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        return masked_loss.mean()
+    elif reduction == "sum":
+        if masked_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        return masked_loss.sum()
+    elif reduction == "none":
+        return masked_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
+
+
+def weighted_masked_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    reduction: str = "mean",
+    log_each: bool = False,
+    loss_type: str = "mse",
+):
+    """
+    分区加权 MSE Loss，只在 mask=True 的位置计算。
+    权重区间：
+        target == 1       → 0.2
+        1 < target < 3    → 0.5
+        3 <= target < 5   → 1.0
+        target >= 5       → 2.0
+    加权后进行归一化处理，防止梯度爆炸或 collapse。
+    loss_type: 'mse'（默认）或 'huber'，决定损失函数类型。
+    """
+
+    if loss_type == "mse":
+        loss_fn = nn.MSELoss(reduction="none")
+    elif loss_type == "huber":
+        loss_fn = nn.HuberLoss(reduction="none")
+    else:
+        raise ValueError(f"Invalid loss_type: {loss_type}. Supported: 'mse', 'huber'.")
+
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    with torch.no_grad():
+        weights = torch.ones_like(target)
+        weights[(target == 1)] = 0.2
+        weights[(target > 1) & (target < 3)] = 0.5
+        weights[(target >= 3) & (target < 5)] = 1.0
+        weights[target >= 5] = 2.0
+
+    elementwise_loss = elementwise_loss[mask]
+    weights = weights[mask]
+
+    if elementwise_loss.numel() == 0:
+        return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+
+    weights = weights / (weights.sum() + 1e-8)
+
+    final_loss = elementwise_loss * weights
+
+    if log_each:
+        print("[VAL] pred.mean():", pred[mask].mean().item())
+        print("[VAL] pred.std():", pred[mask].std().item())
+        print("[VAL] target.mean():", target[mask].mean().item())
+        print("[VAL] target.std():", target[mask].std().item())
+        print("[VAL] weighted loss sample:", final_loss[:10].tolist())
+
+    if reduction == "mean":
+        return final_loss.sum()
+    elif reduction == "sum":
+        return final_loss.sum()
+    elif reduction == "none":
+        return final_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
+
+
+def weighted_masked_mse_loss_v2(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    reduction: str = "mean",
+    log_each: bool = False,
+):
+    """
+    以2为底的指数加权 MSE Loss，只在 mask=True 的位置上计算。
+    权重 = 2^(target - shift)
+    shift 可调节权重起点，默认为0。
+    """
+    loss_fn = nn.MSELoss(reduction="none")
+    elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
+
+    # 生成以2为底的指数权重
+    weights = torch.pow(1.8, target - 1)
+
+    # 只在 mask=True 的地方计算
+    weighted_loss = elementwise_loss * weights
+    masked_weighted_loss = weighted_loss[mask]
+
+    if reduction == "mean":
+        if masked_weighted_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        return masked_weighted_loss.mean()
+    elif reduction == "sum":
+        if masked_weighted_loss.numel() == 0:
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        return masked_weighted_loss.sum()
+    elif reduction == "none":
+        return masked_weighted_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
+
+
+def log_stats(
+    is_master,
+    num_bins,
+    final,
+    labels,
+    epoch,
+    index,
+    print_detailed_stats=False,
+    print_pred_dist=False,
+):
+    if not is_master:
+        return
+
+    non_padded_mask = labels != -100
+    valid_labels = labels[non_padded_mask]
+    valid_preds = final[non_padded_mask]
+    non_padded_count = valid_preds.numel()
+    num_classes = num_bins + 1
+
+    if non_padded_count == 0:
+        return
+
+    if print_pred_dist:
+        pred_counts = torch.bincount(valid_preds.to(torch.int), minlength=num_classes)
+        pred_dist = pred_counts.float() / non_padded_count
+        print(f"--- Epoch {epoch} Iteration {index} Prediction Distribution ---")
+        for i, p in enumerate(pred_dist):
+            if p > 0:
+                print(f"  Bin {i}: {p.item():.2%}")
+        print("---------------------------------------------")
+
+    if print_detailed_stats:
+        # 1. Label distribution
+        label_counts = torch.bincount(valid_labels.to(torch.int), minlength=num_classes)
+        label_dist = label_counts.float() / non_padded_count
+
+        # 2. Prediction distribution
+        pred_counts = torch.bincount(valid_preds.to(torch.int), minlength=num_classes)
+        pred_dist = pred_counts.float() / non_padded_count
+
+        # 5. Correct prediction distribution
+        correct_mask = valid_preds == valid_labels
+        correct_preds = valid_preds[correct_mask]
+        num_correct = correct_preds.numel()
+        if num_correct > 0:
+            correct_pred_counts = torch.bincount(
+                correct_preds.to(torch.int), minlength=num_classes
+            )
+            correct_pred_dist = correct_pred_counts.float() / num_correct
+        else:
+            correct_pred_dist = torch.zeros(num_classes, device=labels.device)
+
+        # 6. Incorrect prediction distribution
+        incorrect_mask = ~correct_mask
+        incorrect_preds = valid_preds[incorrect_mask]
+        num_incorrect = incorrect_preds.numel()
+        if num_incorrect > 0:
+            incorrect_pred_counts = torch.bincount(
+                incorrect_preds.to(torch.int), minlength=num_classes
+            )
+            incorrect_pred_dist = incorrect_pred_counts.float() / num_incorrect
+        else:
+            incorrect_pred_dist = torch.zeros(num_classes, device=labels.device)
+
+        # 7. Labels for incorrect predictions
+        incorrect_labels = valid_labels[incorrect_mask]
+        if num_incorrect > 0:
+            incorrect_label_counts = torch.bincount(
+                incorrect_labels.to(torch.int), minlength=num_classes
+            )
+            incorrect_label_dist = incorrect_label_counts.float() / num_incorrect
+        else:
+            incorrect_label_dist = torch.zeros(num_classes, device=labels.device)
+
+        def print_dist(dist_tensor, name):
+            print(f"--- {name} Distribution ---")
+            for i, p in enumerate(dist_tensor):
+                if p > 0:
+                    print(f"  Bin {i}: {p:.2%}")
+
+        print(f"\n===== Epoch {epoch} Validation Stats =====")
+        # 3 & 4. Total non-padded count
+        print(f"Total non-padded labels (predictions): {non_padded_count}")
+
+        # 1. Label distribution
+        print_dist(label_dist, "Label")
+        # 2. Prediction distribution
+        print_dist(pred_dist, "Prediction")
+        # 5. Correct prediction distribution
+        print(f"Total correct predictions: {num_correct}")
+        print_dist(correct_pred_dist, "Correct Predictions")
+        # 6. Incorrect prediction distribution
+        print(f"Total incorrect predictions: {num_incorrect}")
+        print_dist(incorrect_pred_dist, "Incorrect Predictions")
+        # 7. Labels for incorrect predictions
+        print_dist(incorrect_label_dist, "Labels of Incorrect Predictions")
+        print("================================\n")
+
+
+def compute_bin_distribution(final, valid_mask, num_bins, topk=None):
+    """
+    计算预测分布。
+    Args:
+        final: 预测的类别 (tensor)
+        valid_mask: 有效位置的mask (tensor, bool)
+        num_bins: bin的数量 (int)
+        topk: 若为None，返回前num_bins个bin的分布，否则返回预测比例最多的前topk个bin及其编号和比例
+    Returns:
+        如果topk为None，返回[(bin编号, 比例), ...]，长度为num_bins
+        否则，返回[(bin编号, 比例), ...]，长度为topk
+    """
+    if final is not None and valid_mask.any():
+        pred_counts = torch.bincount(final[valid_mask].cpu(), minlength=num_bins + 1)
+        pred_dist = (pred_counts.float() / pred_counts.sum()).tolist()
+        if topk is not None:
+            top_bins = sorted(enumerate(pred_dist), key=lambda x: x[1], reverse=True)[
+                :topk
+            ]
+            return top_bins
+        else:
+            return list(enumerate(pred_dist[:num_bins]))
+    else:
+        return None
+
+
+"""
+@file source.py
+@author Ryan Missel
+
+Class definition for the CosineAnnealingWarmRestarts with both Max-LR Decay and global LinearWarmup.
+"""
+
+
+class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
+    r"""Set the learning rate of each parameter group using a cosine annealing
+    schedule, where :math:`\eta_{max}` is set to the initial lr, :math:`T_{cur}`
+    is the number of epochs since the last restart and :math:`T_{i}` is the number
+    of epochs between two warm restarts in SGDR:
+    """
+
+    def __init__(
+        self,
+        optimizer,
+        T_0,
+        T_mult=1,
+        eta_min=0,
+        last_epoch=-1,
+        verbose=False,
+        warmup_steps=350,
+        decay=1,
+    ):
+        if T_0 <= 0 or not isinstance(T_0, int):
+            raise ValueError("Expected positive integer T_0, but got {}".format(T_0))
+        if T_mult < 1 or not isinstance(T_mult, int):
+            raise ValueError("Expected integer T_mult >= 1, but got {}".format(T_mult))
+        self.T_0 = T_0
+        self.T_i = T_0
+        self.T_mult = T_mult
+        self.eta_min = eta_min
+        self.T_cur = last_epoch
+        super(CosineAnnealingWarmRestartsWithDecayAndLinearWarmup, self).__init__(
+            optimizer, last_epoch
+        )
+
+        # Decay attributes
+        self.decay = decay
+        self.initial_lrs = self.base_lrs
+
+        # Warmup attributes
+        self.warmup_steps = warmup_steps
+        self.current_steps = 0
+        self.verbose = verbose
+
+    def get_lr(self):
+        if not self._get_lr_called_within_step:
+            warnings.warn(
+                "To get the last learning rate computed by the scheduler, "
+                "please use `get_last_lr()`.",
+                UserWarning,
+            )
+
+        if self.warmup_steps == 0:
+            # 没有 warmup，直接用 cosine annealing
+            return [
+                self.eta_min
+                + (base_lr - self.eta_min)
+                * (1 + math.cos(math.pi * self.T_cur / self.T_i))
+                / 2
+                for base_lr in self.base_lrs
+            ]
+        else:
+            # 有 warmup，按原有逻辑
+            return [
+                (self.current_steps / self.warmup_steps)
+                * (
+                    self.eta_min
+                    + (base_lr - self.eta_min)
+                    * (1 + math.cos(math.pi * self.T_cur / self.T_i))
+                    / 2
+                )
+                for base_lr in self.base_lrs
+            ]
+
+    def step(self, epoch=None):
+        """Step could be called after every batch update"""
+        if epoch is None and self.last_epoch < 0:
+            epoch = 0
+
+        if self.T_cur + 1 == self.T_i:
+            if self.verbose:
+                print("multiplying base_lrs by {:.4f}".format(self.decay))
+            self.base_lrs = [base_lr * self.decay for base_lr in self.base_lrs]
+
+        if epoch is None:
+            epoch = self.last_epoch + 1
+            self.T_cur = self.T_cur + 1
+
+            if self.current_steps < self.warmup_steps:
+                self.current_steps += 1
+
+            if self.T_cur >= self.T_i:
+                self.T_cur = self.T_cur - self.T_i
+                self.T_i = self.T_i * self.T_mult
+
+        self.last_epoch = math.floor(epoch)
+
+        class _enable_get_lr_call:
+
+            def __init__(self, o):
+                self.o = o
+
+            def __enter__(self):
+                self.o._get_lr_called_within_step = True
+                return self
+
+            def __exit__(self, type, value, traceback):
+                self.o._get_lr_called_within_step = False
+                return self
+
+        with _enable_get_lr_call(self):
+            for i, data in enumerate(zip(self.optimizer.param_groups, self.get_lr())):
+                param_group, lr = data
+                param_group["lr"] = lr
+                self.print_lr(self.verbose, i, lr, epoch)
+
+        self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
+
+def interval_masked_mse_loss(pred, target, mask):
+    """
+    统计四个区间的未加权 MSE
+    返回: dict, key为区间名，value为MSE
+    区间：lt3, 3to5, 5to7, ge7
+    """
+    loss_fn = nn.MSELoss(reduction="none")
+    elementwise_loss = loss_fn(pred, target)
+    results = {}
+    intervals = [
+        ("lt3", target < 3),
+        ("3to5", (target >= 3) & (target < 5)),
+        ("5to7", (target >= 5) & (target < 7)),
+        ("ge7", target >= 7),
+    ]
+    for name, cond in intervals:
+        interval_mask = cond & mask
+        if interval_mask.sum() == 0:
+            results[name] = torch.tensor(0.0, device=pred.device)
+        else:
+            results[name] = elementwise_loss[interval_mask].mean()
+    return results

@@ -1,10 +1,7 @@
-import logging
-
 import numpy as np
 import pandas as pd
 import scanpy as sc
-import torch
-from scipy.sparse import issparse
+from scipy.sparse import csr_matrix, issparse, save_npz
 
 from .config import GENE_MAP_PATH
 
@@ -15,43 +12,33 @@ def process_h5ad_to_sparse_tensor(
     gene_map_df = pd.read_csv(gene_map_path)
     gene_map_df["id"] = gene_map_df["id"].astype(int)
     gene_map = dict(zip(gene_map_df["feature_name"], gene_map_df["id"]))
+    max_gene_id = gene_map_df["id"].max()
 
     adata = sc.read_h5ad(h5ad_path)
-    feature_names = adata.var["feature_name"]
-    X = adata.X.tocsr() if issparse(adata.X) else adata.X
+    feature_names = adata.var["feature_name"].values
+    X = adata.X.tocsr() if issparse(adata.X) else csr_matrix(adata.X)
 
-    row_indices = []
-    col_indices = []
-    values = []
+    # 只保留有映射的基因列
+    valid_mask = np.array([f in gene_map for f in feature_names])
+    valid_feature_names = feature_names[valid_mask]
+    valid_gene_ids = np.array([gene_map[f] for f in valid_feature_names])
 
-    for i in range(adata.n_obs):
-        row = X.getrow(i).tocoo()
-        nonzero_indices = row.col
-        nonzero_values = row.data
+    X_valid = X[:, valid_mask]
 
-        expressed_feature_names = feature_names.iloc[nonzero_indices].values
-        ids = pd.Series(expressed_feature_names).map(gene_map).values
+    # 按 gene_id 排序
+    sort_idx = np.argsort(valid_gene_ids)
+    X_valid_sorted = X_valid[:, sort_idx]
+    valid_gene_ids_sorted = valid_gene_ids[sort_idx]
 
-        valid_mask = pd.notna(ids)
-        valid_ids = ids[valid_mask].astype(int)
-        valid_expr_values = nonzero_values[valid_mask].astype(int)
+    n_cells = X.shape[0]
+    n_genes = max_gene_id + 1
 
-        sorted_idx = np.argsort(valid_ids)
-        sorted_ids = valid_ids[sorted_idx]
-        sorted_expr_values = valid_expr_values[sorted_idx]
+    # 用三元组(row, col, data)构造目标稀疏矩阵
+    X_valid_sorted = X_valid_sorted.tocoo()
+    rows = X_valid_sorted.row
+    cols = valid_gene_ids_sorted[X_valid_sorted.col]
+    data = X_valid_sorted.data
+    X_final = csr_matrix((data, (rows, cols)), shape=(n_cells, n_genes), dtype=X.dtype)
 
-        row_indices.extend([i] * len(sorted_ids))
-        col_indices.extend(sorted_ids)
-        values.extend(sorted_expr_values.tolist())
-        if i % 1000 == 0 or i == adata.n_obs - 1:
-            progress = (i + 1) / adata.n_obs * 100
-            logging.info(f"Progress: {progress:.2f}% ({i + 1}/{adata.n_obs} cells)")
-            print(f"Progress: {progress:.2f}% ({i + 1}/{adata.n_obs} cells)")
-    coo_tensor = torch.sparse_coo_tensor(
-        indices=np.vstack((row_indices, col_indices)),
-        values=values,
-        size=(adata.n_obs, max(col_indices) + 1),
-    ).coalesce()
-
-    torch.save(coo_tensor, output_path)
+    save_npz(output_path, X_final)
     return {"status": "saved", "path": output_path}

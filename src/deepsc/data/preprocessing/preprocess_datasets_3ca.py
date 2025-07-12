@@ -6,8 +6,10 @@ import pandas as pd
 from tqdm import tqdm
 
 from multiprocessing import Pool, cpu_count
-from deepsc.data.preprocessing.preprocess_datasets import process_h5ad_to_sparse_tensor
-from deepsc.utils import setup_logging
+from src.deepsc.data.preprocessing.preprocess_datasets import (
+    process_h5ad_to_sparse_tensor,
+)
+from src.deepsc.utils import setup_logging
 
 
 def process_one_sample(row_dict, output_dir):
@@ -18,7 +20,7 @@ def process_one_sample(row_dict, output_dir):
         logging.info(f"warning : File not found {h5ad_path}")
         return f"Warning: File not found {h5ad_path}"
 
-    basename = os.path.basename(h5ad_path).replace(".h5ad", "_sparse.pth")
+    basename = os.path.basename(h5ad_path).replace(".h5ad", "_sparse.npz")
     output_path = os.path.join(output_dir, basename)
 
     # logging.info(f"Processing {h5ad_path} -> {output_path}")
