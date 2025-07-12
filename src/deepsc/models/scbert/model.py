@@ -15,7 +15,7 @@ try:
     from apex import amp
 
     APEX_AVAILABLE = True
-except:
+except ImportError:
     APEX_AVAILABLE = False
 
 # helpers
@@ -40,10 +40,6 @@ def null_context():
 
 def cast_tuple(val):
     return (val,) if not isinstance(val, tuple) else val
-
-
-# def get_module_device(module):
-#     return next(module.parameters).device
 
 
 def get_module_device(module):
@@ -574,6 +570,7 @@ def apply_rotary_pos_emb(q, k, sinu_pos):
 class Gene2VecPositionalEmbedding(nn.Module):
     def __init__(self, dim, max_seq_len):
         super().__init__()
+        # TODO: Replace hardcoded path with environment variable or relative path
         gene2vec_weight = np.load("/home/angli/scBERT/gene2vec_res_34683_200.npy")
         gene2vec_weight = np.concatenate(
             (gene2vec_weight, np.zeros((1, gene2vec_weight.shape[1]))), axis=0

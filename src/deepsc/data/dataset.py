@@ -81,14 +81,51 @@ class GeneExpressionDatasetNew(Dataset):
 
 # 直接将gene count 进行normalize, 避免转成anndata然后再转回去
 def normalize_tensor(csr):
+    """
+    Normalize gene count tensor by filtering cells and applying log2 normalization.
+    
+    Args:
+        csr: scipy.sparse CSR matrix containing gene expression data
+        
+    Returns:
+        scipy.sparse CSR matrix: Normalized expression data
+        
+    Raises:
+        TypeError: If input is not a sparse CSR matrix
+        ValueError: If matrix has invalid dimensions or no valid cells
+    """
+    if not sparse.issparse(csr):
+        raise TypeError("Input must be a sparse matrix")
+    
+    if not sparse.isspmatrix_csr(csr):
+        raise TypeError("Input must be a CSR matrix")
+    
+    if csr.shape[0] == 0 or csr.shape[1] == 0:
+        raise ValueError("Input matrix cannot have zero dimensions")
+    
+    # Filter cells with at least 200 genes
     valid_cells = np.diff(csr.indptr) >= 200
+    
+    if not np.any(valid_cells):
+        raise ValueError("No cells with >= 200 genes found. Cannot normalize.")
+    
     csr = csr[valid_cells]
+    
+    # Calculate row sums for normalization
     row_sums = np.array(csr.sum(axis=1)).flatten()
+    
+    if np.any(row_sums < 0):
+        raise ValueError("Negative values found in expression data")
+    
+    # Normalize to 10,000 counts per cell
     row_scales = np.divide(
         1e4, row_sums, out=np.zeros_like(row_sums, dtype=np.float32), where=row_sums > 0
     )
     csr = csr.multiply(row_scales[:, None])
+    
+    # Apply log2(1 + x) transformation
     csr.data = np.log2(1 + csr.data)
+    
     return csr
 
 

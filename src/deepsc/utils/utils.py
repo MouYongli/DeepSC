@@ -1,4 +1,3 @@
-from __future__ import print_function
 import logging
 import math
 import os
@@ -17,38 +16,64 @@ from torch.optim.lr_scheduler import _LRScheduler
 from datetime import datetime
 
 
-def testPackage():
-    print("#############")
 
 
 def path_of_file(file_path, file_name):
-    if file_name == "cell":
-        searchKey1 = "cell"
-        searchKey2 = ".csv"
+    """
+    Find a file in a given directory based on file type.
+    
+    Args:
+        file_path: Path to search in
+        file_name: Type of file to search for ('cell' or 'gene')
+        
+    Returns:
+        Path: The found file path
+        
+    Raises:
+        ValueError: If file_name is not 'cell' or 'gene', or if multiple files found
+        FileNotFoundError: If no matching file is found
+        NotADirectoryError: If file_path is not a valid directory
+    """
+    if not isinstance(file_path, Path):
+        file_path = Path(file_path)
+    
+    if not file_path.exists():
+        raise FileNotFoundError(f"Directory does not exist: {file_path}")
+    
+    if not file_path.is_dir():
+        raise NotADirectoryError(f"Path is not a directory: {file_path}")
 
-    if file_name == "gene":
-        searchKey1 = "gene"
-        searchKey2 = ".txt"
+    if file_name == "cell":
+        search_key1 = "cell"
+        search_key2 = ".csv"
+    elif file_name == "gene":
+        search_key1 = "gene"
+        search_key2 = ".txt"
+    else:
+        raise ValueError(f"Invalid file_name: {file_name}. Must be 'cell' or 'gene'")
 
     files_in_directory = {
         f.name.lower(): f.name for f in file_path.iterdir() if f.is_file()
     }
     lower_files = list(files_in_directory.keys())
-    search_file_path = Path("")
 
     search_files = [
-        f for f in lower_files if f.startswith(searchKey1) and f.endswith(searchKey2)
+        f for f in lower_files if f.startswith(search_key1) and f.endswith(search_key2)
     ]
+    
     if search_files:
-        if not len(search_files) > 1:
-            # print(f"find {file_name} file: {search_files[0]} in path {file_path}")
+        if len(search_files) == 1:
             original_file_name = files_in_directory[search_files[0]]
             search_file_path = file_path / original_file_name
             return search_file_path
         else:
-            print(f"Multiple files found in path {file_path}")
+            raise ValueError(f"Multiple {file_name} files found in {file_path}: {search_files}")
     else:
+        # Search in parent directory
         parent_folder = file_path.parent
+        if not parent_folder.exists() or not parent_folder.is_dir():
+            raise FileNotFoundError(f"No {file_name} file found in {file_path} and parent directory is invalid")
+            
         files_in_parent_directory = {
             f.name.lower(): f.name for f in parent_folder.iterdir() if f.is_file()
         }
@@ -56,18 +81,18 @@ def path_of_file(file_path, file_name):
         search_files = [
             f
             for f in lower_files_in_parent_directory
-            if f.startswith(searchKey1) and f.endswith(searchKey2)
+            if f.startswith(search_key1) and f.endswith(search_key2)
         ]
+        
         if search_files:
-            if not len(search_files) > 1:
+            if len(search_files) == 1:
                 original_file_name = files_in_parent_directory[search_files[0]]
                 search_file_path = parent_folder / original_file_name
-                # print(f"find gene file: {search_files[0]} in path {parent_folder}")
                 return search_file_path
             else:
-                print(f"Multiple files found in path {file_path}")
+                raise ValueError(f"Multiple {file_name} files found in parent directory {parent_folder}: {search_files}")
         else:
-            print(f"Corresponding file not found in path {file_path}")
+            raise FileNotFoundError(f"No {file_name} file found in {file_path} or its parent directory")
 
 
 def seed_all(seed_value, cuda_deterministic=False):
@@ -90,105 +115,168 @@ def seed_all(seed_value, cuda_deterministic=False):
         torch.backends.cudnn.benchmark = True
 
 
-# TODO: Duplicated utils functions? refactor!
-
-
-def setup_logging(type: str, log_path: str = "./logs") -> str:
+def setup_logging(
+    log_path: str = "./logs", 
+    log_name: str = "deepsc", 
+    rank: int = -1,
+    add_timestamp: bool = True,
+    log_level: str = "INFO"
+) -> str:
+    """
+    Setup unified logging configuration.
+    
+    Args:
+        log_path: Directory to store log files
+        log_name: Base name for the log file
+        rank: Process rank for distributed training (-1 for single process)
+        add_timestamp: Whether to add timestamp to log filename
+        log_level: Logging level
+        
+    Returns:
+        str: Path to the created log file
+    """
     os.makedirs(log_path, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = osp.join(log_path, f"pretrain_{type}_{timestamp}.log")
-
+    
+    # Build log filename
+    if add_timestamp:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"{log_name}_{timestamp}.log"
+    else:
+        time_now = datetime.now()
+        log_filename = f"{log_name}_{time_now.year}_{time_now.month}_{time_now.day}_{time_now.hour}_{time_now.minute}.log"
+    
+    log_file = osp.join(log_path, log_filename)
+    
+    # Set logging level based on rank
+    if rank in [-1, 0]:
+        level = getattr(logging, log_level.upper())
+    else:
+        level = logging.WARN
+    
+    # Configure logging
     logging.basicConfig(
-        filename=log_file,
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        filemode="w",
+        level=level,
+        format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+        datefmt="[%X]",
+        handlers=[
+            logging.FileHandler(log_file, mode='w'),
+            logging.StreamHandler()
+        ],
+        force=True  # Reset any existing logging configuration
     )
-
-    console = logging.StreamHandler()
-    console.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    console.setFormatter(formatter)
-    logging.getLogger("").addHandler(console)
-
-    logging.info(f"日志文件: {log_file}")
+    
+    logger = logging.getLogger()
+    logger.info(f"Log file initialized: {log_file}")
+    
     return log_file
 
 
-def set_log(logfileName, rank=-1):
-    """
-    save log
-    """
-    log_file_folder = os.path.dirname(logfileName)
-    time_now = datetime.datetime.now()
-    logfileName = f"{logfileName}_{time_now.year}_{time_now.month}_{time_now.day}_{time_now.hour}_{time_now.minute}.log"
-    if not os.path.exists(log_file_folder):
-        os.makedirs(log_file_folder)
-    else:
-        pass
-
-    logging.basicConfig(
-        level=logging.INFO if rank in [-1, 0] else logging.WARN,
-        format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
-        datefmt="[%X]",
-        handlers=[logging.FileHandler(logfileName), logging.StreamHandler()],
+# Backward compatibility functions
+def set_log(log_file_name, rank=-1):
+    """Deprecated: Use setup_logging instead."""
+    import warnings
+    warnings.warn("set_log is deprecated. Use setup_logging instead.", DeprecationWarning)
+    return setup_logging(
+        log_path=os.path.dirname(log_file_name),
+        log_name=os.path.basename(log_file_name).replace('.log', ''),
+        rank=rank,
+        add_timestamp=False
     )
-    logger = logging.getLogger()
-    return logger
 
 
-def save_ckpt(
-    epoch, model, optimizer, scheduler, losses, model_name, ckpt_folder, iteration=None
-):
-    """
-    save checkpoint
-    """
-    if not os.path.exists(ckpt_folder):
-        os.makedirs(ckpt_folder)
-    ckpt = {
-        "epoch": epoch,
-        "model_state_dict": model.module.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "losses": losses,
-    }
-    # Always save as latest_checkpoint.pth (overwrite)
-    torch.save(ckpt, os.path.join(ckpt_folder, "latest_checkpoint.pth"))
-    # Save with epoch and iteration if provided, else just epoch
-    if iteration is not None:
-        filename = f"{model_name}_{epoch}_{iteration}.pth"
-    else:
-        filename = f"{model_name}_{epoch}.pth"
-    torch.save(ckpt, os.path.join(ckpt_folder, filename))
-
-
-def save_ckpt_fabric(
+def save_checkpoint(
     epoch,
     model,
     optimizer,
     scheduler,
-    model_name,
-    ckpt_folder,
-    fabric,
+    model_name: str,
+    ckpt_folder: str,
     iteration=None,
+    fabric=None,
+    losses=None
 ):
-    if not os.path.exists(ckpt_folder):
-        os.makedirs(ckpt_folder)
-    state = {
-        "model": model,
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "iteration": iteration,
-        "epoch": epoch,
-    }
-    print(f"Saving checkpoint to {os.path.join(ckpt_folder, 'latest_checkpoint.ckpt')}")
-    fabric.save(os.path.join(ckpt_folder, "latest_checkpoint.ckpt"), state)
-    if iteration is not None:
-        filename = f"{model_name}_{epoch}_{iteration}.ckpt"
+    """
+    Unified checkpoint saving function that works with or without Fabric.
+    
+    Args:
+        epoch: Current epoch number
+        model: Model to save
+        optimizer: Optimizer state
+        scheduler: Scheduler state  
+        model_name: Name for the checkpoint file
+        ckpt_folder: Directory to save checkpoints
+        iteration: Optional iteration number
+        fabric: Optional Fabric instance for distributed training
+        losses: Optional losses dict (for non-fabric mode)
+    """
+    os.makedirs(ckpt_folder, exist_ok=True)
+    
+    if fabric is not None:
+        # Fabric mode - use fabric.save()
+        state = {
+            "model": model,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": epoch,
+            "iteration": iteration,
+        }
+        
+        # Save latest checkpoint
+        latest_path = os.path.join(ckpt_folder, "latest_checkpoint.ckpt")
+        logging.info(f"Saving checkpoint to {latest_path}")
+        fabric.save(latest_path, state)
+        
+        # Save numbered checkpoint
+        if iteration is not None:
+            filename = f"{model_name}_{epoch}_{iteration}.ckpt"
+        else:
+            filename = f"{model_name}_{epoch}.ckpt"
+        fabric.save(os.path.join(ckpt_folder, filename), state)
+        
     else:
-        filename = f"{model_name}_{epoch}.ckpt"
-    fabric.save(os.path.join(ckpt_folder, filename), state)
+        # Standard PyTorch mode
+        state = {
+            "epoch": epoch,
+            "model_state_dict": model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "iteration": iteration,
+        }
+        
+        if losses is not None:
+            state["losses"] = losses
+            
+        # Save latest checkpoint
+        latest_path = os.path.join(ckpt_folder, "latest_checkpoint.pth")
+        torch.save(state, latest_path)
+        
+        # Save numbered checkpoint
+        if iteration is not None:
+            filename = f"{model_name}_{epoch}_{iteration}.pth"
+        else:
+            filename = f"{model_name}_{epoch}.pth"
+        torch.save(state, os.path.join(ckpt_folder, filename))
+
+
+# Backward compatibility functions
+def save_ckpt(epoch, model, optimizer, scheduler, losses, model_name, ckpt_folder, iteration=None):
+    """Deprecated: Use save_checkpoint instead."""
+    import warnings
+    warnings.warn("save_ckpt is deprecated. Use save_checkpoint instead.", DeprecationWarning)
+    return save_checkpoint(
+        epoch, model, optimizer, scheduler, model_name, ckpt_folder, 
+        iteration=iteration, losses=losses
+    )
+
+
+def save_ckpt_fabric(epoch, model, optimizer, scheduler, model_name, ckpt_folder, fabric, iteration=None):
+    """Deprecated: Use save_checkpoint instead."""
+    import warnings
+    warnings.warn("save_ckpt_fabric is deprecated. Use save_checkpoint instead.", DeprecationWarning)
+    return save_checkpoint(
+        epoch, model, optimizer, scheduler, model_name, ckpt_folder,
+        iteration=iteration, fabric=fabric
+    )
 
 
 def get_reduced(tensor, current_device, dest_device, world_size):

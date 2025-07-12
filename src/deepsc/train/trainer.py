@@ -20,8 +20,13 @@ from tqdm import tqdm
 import time
 import wandb
 from deepsc.data import DataCollator
-from deepsc.utils import *
-from deepsc.utils.utils import FocalLoss, interval_masked_mse_loss
+from deepsc.utils import (
+    seed_all,
+    save_ckpt_fabric,
+    get_reduced_with_fabric,
+    FocalLoss,
+    interval_masked_mse_loss
+)
 
 
 # timeit decorator
