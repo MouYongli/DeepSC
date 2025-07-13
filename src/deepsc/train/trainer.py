@@ -52,6 +52,18 @@ class Trainer:
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
+        self.init_dataset_and_sampler()
+        # 预先计算class_counts，避免重复计算
+        if (
+            self.args.enable_data_augmentation
+            or self.args.use_ldam_loss
+            or self.args.enable_alternating_ldam_mean_ce_loss
+            or self.args.enable_warm_alternating_ldam_mean_ce_loss
+        ):
+            self.class_counts = self.calculate_class_counts()
+        else:
+            self.class_counts = None
+
         self.load_data()
         self.init_loss_fn()
         self.prepare_model()
@@ -59,6 +71,10 @@ class Trainer:
             self.l0_lambda = 0.0
         else:
             self.l0_lambda = self.args.l0_lambda_target
+        if self.args.adaptive_mse_weight:
+            self.mse_loss_weight = 0.0
+        else:
+            self.mse_loss_weight = self.args.target_mse_loss_weight
 
     def load_all_csr_from_folder(self, datapath):
         """
@@ -76,8 +92,7 @@ class Trainer:
             raise ValueError(f"No .npz files found in {datapath}")
         return scipy.sparse.vstack(matrices)
 
-    @timeit
-    def load_data(self):
+    def init_dataset_and_sampler(self):
         # 支持单个.npz文件或目录
         import scipy.sparse
 
@@ -100,6 +115,15 @@ class Trainer:
         self.val_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=val_csr)
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
         self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
+        # 计算动态掩码概率（使用已缓存的class_counts）
+
+    @timeit
+    def load_data(self):
+        if self.args.enable_data_augmentation:
+            dynamic_mask_probabilities = self.calculate_dynamic_mask_probabilities()
+        else:
+            dynamic_mask_probabilities = None
+
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
@@ -114,7 +138,7 @@ class Trainer:
                 max_length=self.args.sequence_length,
                 num_genes=self.args.model.num_genes,
                 num_bins=self.args.model.num_bins,
-                do_hard_mask=self.args.do_hard_mask,
+                dynamic_mask_probabilities=dynamic_mask_probabilities,
             ),
         )
         val_loader = DataLoader(
@@ -131,7 +155,7 @@ class Trainer:
                 max_length=self.args.sequence_length,
                 num_genes=self.args.model.num_genes,
                 num_bins=self.args.model.num_bins,
-                do_hard_mask=self.args.do_hard_mask,
+                dynamic_mask_probabilities=dynamic_mask_probabilities,
             ),
         )
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
@@ -195,11 +219,11 @@ class Trainer:
             scheduler = CosineAnnealingWarmupRestarts(
                 optimizer,
                 first_cycle_steps=warmup_steps * 3,
-                cycle_mult=1.5,
-                max_lr=5e-3,
+                cycle_mult=1,
+                max_lr=self.args.learning_rate,
                 min_lr=5e-6,
                 warmup_steps=warmup_steps,
-                gamma=0.95,
+                gamma=0.9,
             )
             return scheduler
         elif self.args.use_mogaide_scheduler:
@@ -288,7 +312,7 @@ class Trainer:
             mask=mask,
             y=y,
             ce_loss_weight=self.args.ce_loss_weight,
-            mse_loss_weight=self.args.mse_loss_weight,
+            mse_loss_weight=self.mse_loss_weight,
             l0_lambda=self.l0_lambda,
             is_val=is_val,
         )
@@ -338,7 +362,7 @@ class Trainer:
         print("ce_loss_weight:")
         print(self.args.ce_loss_weight)
         print("mse_loss_weight:")
-        print(self.args.mse_loss_weight)
+        print(self.mse_loss_weight)
         predictions, truths = [], []
         all_expr_embs = []
         all_masked_preds = []  # 新增：收集所有masked预测
@@ -572,8 +596,6 @@ class Trainer:
                 self.iteration = index
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
-                if self.args.adaptive_mse_weight:
-                    self.calculate_adaptive_mse_weight()
                 loss, final, mse_loss, ce_loss, l0_loss, interval_mse = (
                     self._process_batch(data)
                 )
@@ -607,6 +629,8 @@ class Trainer:
                         self.fabric.backward(loss / self.args.grad_acc)
                 else:
                     # 梯度检查（可选，通过配置控制）
+                    if self.args.adaptive_mse_weight:
+                        self.calculate_adaptive_mse_weight()
                     if self.args.enable_l0_warmup:
                         self.l0_lambda = get_l0_lambda(
                             epoch,
@@ -662,15 +686,6 @@ class Trainer:
                     average_mse_loss = sum(accm_mse_loss) / len(accm_mse_loss)
                     average_per_bin_acc = sum(accm_per_bin_acc) / len(accm_per_bin_acc)
                     average_total_acc = sum(accm_total_acc) / len(accm_total_acc)
-                    epoch_step_overall = len(self.train_loader)
-                    if self.args.enable_mse:
-                        weight_grad = self.args.grad_acc / epoch_step_overall
-                        if (epoch == 1 and index > epoch_step_overall / 3) or (
-                            epoch == 2 and index < 2 * epoch_step_overall / 3
-                        ):
-                            self.args.mse_loss_weight = (
-                                weight_grad + self.args.mse_loss_weight
-                            )
                     if self.is_master:
                         num_bins = self.args.model.num_bins
                         pred_dist_str = self.get_top_bins_distribution_str(
@@ -710,7 +725,7 @@ class Trainer:
                                 )
                                 / len(accm_interval_mse["ge7"]),
                                 "TrainLossWeight/ce_loss_weight": self.args.ce_loss_weight,
-                                "TrainLossWeight/mse_loss_weight": self.args.mse_loss_weight,
+                                "TrainLossWeight/mse_loss_weight": self.mse_loss_weight,
                                 "epoch": epoch,
                                 "iteration": index,
                                 "learning_rate": self.optimizer.param_groups[0]["lr"],
@@ -1062,7 +1077,7 @@ class Trainer:
         计算每个bin的样本数量，用于LDAM loss
         返回: torch.Tensor, shape为(num_bins+1,)，包含每个bin的样本数量
         """
-        print("Calculating class counts for LDAM loss...")
+        print("Calculating class counts")
 
         # 初始化计数器
         class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
@@ -1082,7 +1097,7 @@ class Trainer:
                 max_length=self.args.sequence_length,
                 num_genes=self.args.model.num_genes,
                 num_bins=self.args.model.num_bins,
-                do_hard_mask=self.args.do_hard_mask,
+                # 这里不需要dynamic_mask_probabilities，因为我们只是统计分布
             ),
         )
 
@@ -1112,6 +1127,55 @@ class Trainer:
 
         return class_counts
 
+    def calculate_dynamic_mask_probabilities(self):
+        """
+        根据bin的分布比例动态设置掩码概率
+        返回: dict, 包含每个bin的掩码概率
+        """
+        print("Calculating dynamic mask probabilities based on bin distribution...")
+
+        # 使用缓存的class_counts
+        class_counts = self.class_counts
+
+        # 计算总有效样本数（不包括padding）
+        total_samples = class_counts[1:].sum().item()
+
+        # 计算每个bin的比例
+        bin_ratios = {}
+        for bin_idx in range(1, self.args.model.num_bins + 1):
+            ratio = (
+                (class_counts[bin_idx].item() / total_samples * 100)
+                if total_samples > 0
+                else 0
+            )
+            bin_ratios[bin_idx] = ratio
+
+        # 根据比例设置掩码概率
+        mask_probabilities = {}
+        for bin_idx in range(1, self.args.model.num_bins + 1):
+            ratio = bin_ratios[bin_idx]
+            if ratio < 1.0:
+                # 比例小于1%的bin设为掩码概率为0.9
+                mask_probabilities[bin_idx] = 0.9
+            elif ratio < 5.0:
+                # 比例小于5%的bin设为掩码概率为0.7
+                mask_probabilities[bin_idx] = 0.7
+            elif ratio < 10.0:
+                # 比例小于10%的bin设为掩码概率为0.3
+                mask_probabilities[bin_idx] = 0.3
+            else:
+                # 其他的掩码概率0.1
+                mask_probabilities[bin_idx] = 0.1
+
+        # 打印掩码概率设置
+        print("Dynamic mask probabilities:")
+        for bin_idx in range(1, self.args.model.num_bins + 1):
+            ratio = bin_ratios[bin_idx]
+            prob = mask_probabilities[bin_idx]
+            print(f"  Bin {bin_idx}: {ratio:.2f}% -> mask_prob={prob}")
+
+        return mask_probabilities
+
     # need to predefine the weight and also need to ensure that the length of weight corresponding to the number of bins
     def init_weighted_ce_loss(self):
         # 使用原有的加权 CrossEntropyLoss
@@ -1130,7 +1194,8 @@ class Trainer:
 
     def init_ldam_loss(self):
         print("Using LDAM loss...")
-        class_counts = self.calculate_class_counts()
+        # 使用缓存的class_counts
+        class_counts = self.class_counts
         cls_num_list = class_counts.cpu().numpy()
 
         # 确保padding类（第0类）有合理的权重，避免除零错误
@@ -1215,11 +1280,13 @@ class Trainer:
         return self.cross_entropy_loss_fn(logits_reshaped, labels_reshaped)
 
     def calculate_adaptive_mse_weight(self):
-        weight_grad = self.args.grad_acc / self.epoch_length
+        weight_grad = (
+            self.args.target_mse_loss_weight * self.args.grad_acc / self.epoch_length
+        )
         if (self.epoch == 1 and self.iteration > self.epoch_length / 3) or (
             self.epoch == 2 and self.iteration < 2 * self.epoch_length / 3
         ):
-            self.args.mse_loss_weight = weight_grad + self.args.mse_loss_weight
+            self.mse_loss_weight = weight_grad + self.mse_loss_weight
 
     def init_loss_fn(self):
         if (
