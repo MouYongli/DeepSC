@@ -103,14 +103,12 @@ $$
 ##### Gumbel-Softmax采样
 然后我们进行Gumbel-Softmax采样，得到门控矩阵$\mathbf{M}$：
 
-首先，我们采样一个噪声向量$\mathbf{g}_{i,j}$：$\mathbf{g}_{i,j} = -\log(-\log(u_{i,j}))$，其中$u_{i,j} \sim \text{Uniform}(0,1)$。
+首先，我们采样一个噪声$\mathbf{g}$：$\mathbf{g} = -\log(-\log(u))$，其中$u \sim \text{Uniform}(0,1)$。
 
-然后，我们通过上面得到的可学习的参数$\phi_{i,j}$，对Gumbel Softmax重参数化，得到门控矩阵$\mathbf{M}$：($\pi_{i,j}, \tau_{i, j}) = \phi_{i,j}$。
-
-然后，利用Gumbel-Softmax重参数化技巧近似采样出一个“门控”向量，产生近似one-hot的可微分输出：
+然后，我们通过上面得到的可学习的参数$\phi_{i,j}$，对Gumbel Softmax重参数化，得到门控矩阵，即近似采样出一个“门控”向量，产生近似one-hot的可微分输出：
 
 $$
-y_{i,j} = \frac{\exp((\log \pi_{i,j} + g_{i,j})/\tau_{i,j})}{\sum_{k=1}^3 \exp((\log \pi_{i,j} + g_{i,j})/\tau_{i,j})}
+y_{i,j}[k] = \frac{\exp((\log \phi_{i,j}[k] + g)/\tau)}{\sum_{k=0}^{2} \exp((\log \phi_{i,j}[k] + g)/\tau)}
 $$
 
 其中，$\tau_{i,j}$是温度参数，$\tau_{i,j} \to 0$ 时输出趋近one-hot。
