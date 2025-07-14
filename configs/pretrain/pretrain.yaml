@@ -4,30 +4,56 @@ defaults:
   - dataset: tripleca
 
 wandb_project: "DeepSC"
-pretrain_feature: "binned_ce, bin prediction ce_1.0"
+tags: ["l0", "5bin", "normal cellxgene dataset", "ce only", "adaptive ce loss"]
+run_name: "warm_alternating"
 # Loss weights
-enable_l0: False
-enable_mse: False
+enable_l0: True
+enable_mse: True
 enable_ce: True
-l0_lambda: 0.00
 ce_loss_weight: 1.0
-mse_loss_weight: 0
-weighted_ce_loss: True
-mean_ce_loss: False
-use_hard_mse_loss: True
-use_exp_mse_loss: False
-do_hard_mask: False
-regression_loss_type: "huber"
+mse_loss_weight: 1.0
+#control the weight of mse loss
+adaptive_mse_weight: False
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr"
+# L0 loss warmup parameters
+l0_warmup_start_epoch: 3  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
+enable_l0_warmup: True
+l0_lambda_target: 0.1
+# 数据增强相关
+do_hard_mask: True
+
+# 分类任务
+# 最多只能打开一个开关
+weighted_ce_loss: False
+mean_ce_loss: True
+use_ldam_loss: False
+enable_adaptive_ce_loss: False
+enable_alternating_ldam_mean_ce_loss: False
+enable_warm_alternating_ldam_mean_ce_loss: False
+
+# 回归任务
+# 最多只能打开一个开关 选择huber还是mse
+enable_mse_loss: False
+enable_huber_loss: True
+# 回归任务
+# 最多只能打开一个开关 选择普通的还是加权的
+use_normal_regression_loss: True
+use_hard_regression_loss: False
+use_exp_regression_loss: False
+
+#Print details of mse loss in log
+show_mse_loss_details: False
+output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
+
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/partition_0_sparse_norm.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 3
-valid_every: 1000
+valid_every: 500
 model_name: "scbert"
 grad_acc: 20
 learning_rate: 5e-4
-epoch: 4
+epoch: 10
 batch_size: 13
 num_bin: 5
 save_ckpt_every: 3000
@@ -35,7 +61,7 @@ save_ckpt_every: 3000
 log_on_wandb_every: 20
 sequence_length: 1000
 plot_tsne_and_umap: False
-draw_continuous_pred_label_scatter: False
+draw_continuous_pred_label_scatter: True
 
 # 新增warmup相关参数
 use_warmup: False
@@ -43,6 +69,9 @@ warmup_ratio: 0.03
 use_warmup_with_decay: False
 use_scbert_scheduler: False
 use_mogaide_scheduler: True
+
+# 梯度检查相关参数
+check_grad_flow: False  # 是否启用梯度检查
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
   verbose: False
