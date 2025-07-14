@@ -1156,13 +1156,16 @@ class Trainer:
             ratio = bin_ratios[bin_idx]
             if ratio < 1.0:
                 # 比例小于1%的bin设为掩码概率为0.9
-                mask_probabilities[bin_idx] = 0.9
+                mask_probabilities[bin_idx] = 0.7
             elif ratio < 5.0:
                 # 比例小于5%的bin设为掩码概率为0.7
-                mask_probabilities[bin_idx] = 0.7
-            elif ratio < 10.0:
+                mask_probabilities[bin_idx] = 0.6
+            elif ratio < 12.5:
                 # 比例小于10%的bin设为掩码概率为0.3
-                mask_probabilities[bin_idx] = 0.3
+                mask_probabilities[bin_idx] = 0.5
+            elif ratio < 20.0:
+                # 比例小于10%的bin设为掩码概率为0.3
+                mask_probabilities[bin_idx] = 0.4
             else:
                 # 其他的掩码概率0.1
                 mask_probabilities[bin_idx] = 0.1
