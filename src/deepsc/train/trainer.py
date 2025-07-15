@@ -34,7 +34,7 @@ from deepsc.utils import (
     interval_masked_mse_loss,
     log_stats,
     masked_mse_loss,
-    save_ckpt_fabric,
+    save_checkpoint,
     seed_all,
     weighted_masked_mse_loss,
     weighted_masked_mse_loss_v2,
@@ -756,29 +756,29 @@ class Trainer:
                     self.validate(epoch, index)
                     self.model.train()
                 if index % self.args.save_ckpt_every == 0:
-                    save_ckpt_fabric(
-                        epoch,
-                        self.model,
-                        self.optimizer,
-                        self.scheduler,
-                        self.args.model_name,
-                        self.args.ckpt_dir,
-                        self.fabric,
+                    save_checkpoint(
+                        epoch=epoch,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler,
+                        model_name=self.args.model_name,
+                        ckpt_dir=self.args.ckpt_dir,
+                        fabric=self.fabric,
                         iteration=index,
                     )
             # at the end of each epoch, reset the iteration
             self.iteration = 0
             self.validate(epoch)
             self.log_each = False
-            save_ckpt_fabric(
-                epoch + 1,
-                self.model,
-                self.optimizer,
-                self.scheduler,
-                self.args.model_name,
-                self.args.ckpt_dir,
-                self.fabric,
-                iteration=1,  # 重置迭代计数器
+            save_checkpoint(
+                epoch=epoch + 1,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                model_name=self.args.model_name,
+                ckpt_dir=self.args.ckpt_dir,
+                fabric=self.fabric,
+                iteration=self.epoch_length - 1,  # 重置迭代计数器
             )
 
     def calculate_per_bin_ce_loss(self, logits, discrete_expr_label, ignore_index=-100):

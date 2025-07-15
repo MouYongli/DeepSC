@@ -176,22 +176,6 @@ def setup_logging(
     return log_file
 
 
-# Backward compatibility functions
-def set_log(log_file_name, rank=-1):
-    """Deprecated: Use setup_logging instead."""
-    import warnings
-
-    warnings.warn(
-        "set_log is deprecated. Use setup_logging instead.", DeprecationWarning
-    )
-    return setup_logging(
-        log_path=os.path.dirname(log_file_name),
-        log_name=os.path.basename(log_file_name).replace(".log", ""),
-        rank=rank,
-        add_timestamp=False,
-    )
-
-
 def save_checkpoint(
     epoch,
     model,
@@ -270,86 +254,9 @@ def save_checkpoint(
         torch.save(state, os.path.join(ckpt_folder, filename))
 
 
-# Backward compatibility functions
-def save_ckpt(
-    epoch, model, optimizer, scheduler, losses, model_name, ckpt_folder, iteration=None
-):
-    """Deprecated: Use save_checkpoint instead."""
-    import warnings
-
-    warnings.warn(
-        "save_ckpt is deprecated. Use save_checkpoint instead.", DeprecationWarning
-    )
-    return save_checkpoint(
-        epoch,
-        model,
-        optimizer,
-        scheduler,
-        model_name,
-        ckpt_folder,
-        iteration=iteration,
-        losses=losses,
-    )
-
-
-def save_ckpt_fabric(
-    epoch, model, optimizer, scheduler, model_name, ckpt_folder, fabric, iteration=None
-):
-    """Deprecated: Use save_checkpoint instead."""
-    import warnings
-
-    warnings.warn(
-        "save_ckpt_fabric is deprecated. Use save_checkpoint instead.",
-        DeprecationWarning,
-    )
-    return save_checkpoint(
-        epoch,
-        model,
-        optimizer,
-        scheduler,
-        model_name,
-        ckpt_folder,
-        iteration=iteration,
-        fabric=fabric,
-    )
-
-
-def get_reduced(tensor, current_device, dest_device, world_size):
-    """
-    将不同GPU上的变量或tensor集中在主GPU上，并得到均值
-    """
-    tensor = (
-        tensor.clone().detach() if torch.is_tensor(tensor) else torch.tensor(tensor)
-    )
-    tensor = tensor.to(current_device)
-    torch.distributed.reduce(tensor, dst=dest_device)
-    tensor_mean = tensor.item() / world_size
-    return tensor_mean
-
-
 def get_reduced_with_fabric(tensor, fabric):
     reduced_tensor = fabric.all_reduce(tensor, reduce_op="mean")
     return reduced_tensor.item()
-
-
-def get_ndtensor_reduced(tensor, current_device, dest_device, world_size):
-    """
-    将不同GPU上的变量或tensor集中在主GPU上，并得到均值, 需要是2维张量
-    """
-    tensor = (
-        tensor.clone().detach() if torch.is_tensor(tensor) else torch.tensor(tensor)
-    )
-    tensor = tensor.to(current_device)
-    torch.distributed.reduce(tensor, dst=dest_device)
-    tensor_mean = torch.zeros(tensor.shape)
-    if len(tensor.shape) == 2:
-        for i in range(tensor.shape[0]):
-            for j in range(tensor.shape[1]):
-                tensor_mean[i, j] = tensor[i, j].item() / world_size
-    elif len(tensor.shape) == 1:
-        for i in range(tensor.shape[0]):
-            tensor_mean[i] = tensor[i].item() / world_size
-    return tensor_mean
 
 
 def numel(m: torch.nn.Module, only_trainable: bool = False):
@@ -375,52 +282,6 @@ def label_smooth(y, K, epsilon=0.1):
     for index in range(m):
         out[index][y[index] - 1] += 1 - epsilon
     return torch.tensor(out)
-
-
-class SequentialDistributedSampler(torch.utils.data.sampler.Sampler):
-    """
-    Distributed Sampler that subsamples indicies sequentially,
-    making it easier to collate all results at the end.
-    Even though we only use this sampler for eval and predict (no training),
-    which means that the model params won't have to be synced (i.e. will not hang
-    for synchronization even if varied number of forward passes), we still add extra
-    samples to the sampler to make it evenly divisible (like in `DistributedSampler`)
-    to make it easy to `gather` or `reduce` resulting tensors at the end of the loop.
-    """
-
-    def __init__(self, dataset, batch_size, world_size, rank=None, num_replicas=None):
-        if num_replicas is None:
-            if not torch.distributed.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            num_replicas = world_size
-        if rank is None:
-            if not torch.distributed.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            rank = torch.distributed.get_rank()
-        self.dataset = dataset
-        self.num_replicas = num_replicas
-        self.rank = rank
-        self.batch_size = batch_size
-        self.num_samples = (
-            int(
-                math.ceil(len(self.dataset) * 1.0 / self.batch_size / self.num_replicas)
-            )
-            * self.batch_size
-        )
-        self.total_size = self.num_samples * self.num_replicas
-
-    def __iter__(self):
-        indices = list(range(len(self.dataset)))
-        # add extra samples to make it evenly divisible
-        indices += [indices[-1]] * (self.total_size - len(indices))
-        # subsample
-        indices = indices[
-            self.rank * self.num_samples : (self.rank + 1) * self.num_samples
-        ]
-        return iter(indices)
-
-    def __len__(self):
-        return self.num_samples
 
 
 def distributed_concat(tensor, num_total_examples, world_size):
