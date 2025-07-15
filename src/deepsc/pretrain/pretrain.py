@@ -23,7 +23,7 @@ def pretrain(cfg: DictConfig):
     )
     fabric.launch()
     # initialize log
-    setup_logging(fabric.global_rank, "./logs")
+    setup_logging(rank=fabric.global_rank, log_path="./logs")
 
     # wandb only in master
     if fabric.global_rank == 0:

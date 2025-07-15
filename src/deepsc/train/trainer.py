@@ -20,8 +20,8 @@ from tqdm import tqdm
 
 import time
 import wandb
-from deepsc.data import DataCollator
-from deepsc.utils import (
+from src.deepsc.data import DataCollator
+from src.deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     CosineAnnealingWarmupRestarts,
     LDAMLoss,
@@ -1091,53 +1091,61 @@ class Trainer:
         计算每个bin的样本数量，用于LDAM loss
         返回: torch.Tensor, shape为(num_bins+1,)，包含每个bin的样本数量
         """
-        print("Calculating class counts")
+        # 只在主进程中计算，然后广播结果
+        if self.is_master:
+            print("Calculating class counts on master process...")
 
-        # 初始化计数器
-        class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
+            # 初始化计数器
+            class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
 
-        # 遍历训练数据集计算每个bin的样本数量
-        temp_loader = DataLoader(
-            self.train_dataset,
-            batch_size=32,  # 使用较小的batch size以节省内存
-            shuffle=False,
-            num_workers=4,
-            collate_fn=DataCollator(
-                do_padding=True,
-                pad_token_id=0,
-                pad_value=0,
-                do_mlm=False,  # 不使用masking，获取原始数据
-                do_binning=True,
-                max_length=self.args.sequence_length,
-                num_genes=self.args.model.num_genes,
-                num_bins=self.args.model.num_bins,
-                # 这里不需要dynamic_mask_probabilities，因为我们只是统计分布
-            ),
-        )
+            # 遍历训练数据集计算每个bin的样本数量
+            temp_loader = DataLoader(
+                self.train_dataset,
+                batch_size=128,  # 增加 batch size 以减少迭代次数
+                shuffle=False,
+                num_workers=2,  # 减少 worker 数量避免 I/O 竞争
+                collate_fn=DataCollator(
+                    do_padding=True,
+                    pad_token_id=0,
+                    pad_value=0,
+                    do_mlm=False,  # 不使用masking，获取原始数据
+                    do_binning=True,
+                    max_length=self.args.sequence_length,
+                    num_genes=self.args.model.num_genes,
+                    num_bins=self.args.model.num_bins,
+                ),
+            )
 
-        total_samples = 0
-        for batch in tqdm(temp_loader, desc="Counting class samples"):
-            # 获取原始数据，不包含masking
-            discrete_expr = batch[
-                "masked_discrete_expr"
-            ]  # 这里实际上是原始数据，因为do_mlm=False
-            # 统计每个bin的样本数量（不包括pad_value的位置）
-            valid_mask = discrete_expr != 0
-            for bin_idx in range(self.args.model.num_bins + 1):
-                count = ((discrete_expr == bin_idx) & valid_mask).sum().item()
-                class_counts[bin_idx] += count
-                if bin_idx > 0:  # 只对非padding类累加总样本数
-                    total_samples += count
+            total_samples = 0
+            for batch in tqdm(temp_loader, desc="Counting class samples"):
+                # 获取原始数据，不包含masking
+                discrete_expr = batch["masked_discrete_expr"]
+                # 统计每个bin的样本数量（不包括pad_value的位置）
+                valid_mask = discrete_expr != 0
+                for bin_idx in range(self.args.model.num_bins + 1):
+                    count = ((discrete_expr == bin_idx) & valid_mask).sum().item()
+                    class_counts[bin_idx] += count
+                    if bin_idx > 0:  # 只对非padding类累加总样本数
+                        total_samples += count
 
-        # 打印统计信息
-        print(f"Total valid samples (excluding padding): {total_samples}")
-        print("Class distribution:")
-        for i, count in enumerate(class_counts):
-            if i == 0:
-                print(f"  Bin {i} (padding): {count} samples (excluded from LDAM)")
-            else:
-                percentage = (count / total_samples * 100) if total_samples > 0 else 0
-                print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
+            # 打印统计信息
+            print(f"Total valid samples (excluding padding): {total_samples}")
+            print("Class distribution:")
+            for i, count in enumerate(class_counts):
+                if i == 0:
+                    print(f"  Bin {i} (padding): {count} samples (excluded from LDAM)")
+                else:
+                    percentage = (
+                        (count / total_samples * 100) if total_samples > 0 else 0
+                    )
+                    print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
+        else:
+            # 非主进程创建空的 tensor，等待广播
+            class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
+
+        # 将结果从主进程广播到所有进程
+        class_counts = class_counts.to(self.fabric.device)
+        self.fabric.broadcast(class_counts, src=0)
 
         return class_counts
 

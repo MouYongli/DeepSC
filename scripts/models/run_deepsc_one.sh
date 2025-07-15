@@ -5,7 +5,7 @@ export CUDA_VISIBLE_DEVICES=1,2,3
 export OMP_NUM_THREADS=64
 
 NUM_GPUS=3
-MASTER_PORT=12625
+MASTER_PORT=12626
 
 PYTHONPATH=src torchrun \
   --nproc_per_node=$NUM_GPUS \

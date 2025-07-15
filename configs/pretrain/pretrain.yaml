@@ -4,23 +4,23 @@ defaults:
   - dataset: tripleca
 
 wandb_project: "DeepSC"
-tags: ["l0", "5bin", "normal cellxgene dataset", "ce only", "adaptive ce loss"]
-run_name: "warm_alternating"
+tags: ["200hd", "big dataset", "mean ce", "no adaptive mse and l0", "low learning rate"]
+run_name: "mogaide scheduler, mean ce, no adaptive mse and l0,5bin ,hd200, alpha0.3"
 # Loss weights
 enable_l0: True
 enable_mse: True
 enable_ce: True
 ce_loss_weight: 1.0
-mse_loss_weight: 1.0
+target_mse_loss_weight: 3.0
 #control the weight of mse loss
 adaptive_mse_weight: False
 
 # L0 loss warmup parameters
-l0_warmup_start_epoch: 3  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
-enable_l0_warmup: True
+l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
+enable_l0_warmup: False
 l0_lambda_target: 0.1
 # 数据增强相关
-do_hard_mask: True
+enable_data_augmentation: True  # 是否启用数据增强（动态掩码概率）
 
 # 分类任务
 # 最多只能打开一个开关
@@ -49,29 +49,29 @@ data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 3
-valid_every: 500
+valid_every: 2000
 model_name: "scbert"
 grad_acc: 20
-learning_rate: 5e-4
+learning_rate: 1e-4
 epoch: 10
-batch_size: 13
+batch_size: 8
 num_bin: 5
 save_ckpt_every: 3000
 
 log_on_wandb_every: 20
-sequence_length: 1000
-plot_tsne_and_umap: False
+sequence_length: 1024
+plot_tsne_and_umap: True
 draw_continuous_pred_label_scatter: True
 
 # 新增warmup相关参数
 use_warmup: False
 warmup_ratio: 0.03
 use_warmup_with_decay: False
-use_scbert_scheduler: False
-use_mogaide_scheduler: True
+use_scbert_scheduler: True
+use_mogaide_scheduler: False
 
 # 梯度检查相关参数
-check_grad_flow: False  # 是否启用梯度检查
+check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
   verbose: False
