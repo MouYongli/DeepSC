@@ -4,8 +4,8 @@ defaults:
   - dataset: tripleca
 
 wandb_project: "DeepSC"
-tags: ["200hd", "big dataset", "mean ce", "no adaptive mse and l0", "low learning rate"]
-run_name: "mogaide scheduler, mean ce, no adaptive mse and l0,5bin ,hd200, alpha0.3"
+tags: ["256hd", "big dataset", "mean ce", "adaptive mse and no adaptiv0 l0", "medium learning rate"]
+run_name: "mogaide scheduler, mean ce, adaptive mse, 5bin ,hd256, alpha0.3"
 # Loss weights
 enable_l0: True
 enable_mse: True
@@ -13,7 +13,7 @@ enable_ce: True
 ce_loss_weight: 1.0
 target_mse_loss_weight: 3.0
 #control the weight of mse loss
-adaptive_mse_weight: False
+adaptive_mse_weight: True
 
 # L0 loss warmup parameters
 l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
@@ -52,7 +52,7 @@ num_device: 3
 valid_every: 2000
 model_name: "scbert"
 grad_acc: 20
-learning_rate: 1e-4
+learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
