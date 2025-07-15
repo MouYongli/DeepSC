@@ -110,7 +110,7 @@ class Trainer:
         # 支持单个.npz文件或目录
         import scipy.sparse
 
-        from deepsc.data.dataset import GeneExpressionDatasetNew
+        from deepsc.data.dataset import GeneExpressionDataset
 
         if os.path.isdir(self.args.data_path):
             csr_matrix = self.load_all_csr_from_folder(self.args.data_path)
@@ -125,8 +125,8 @@ class Trainer:
         )
         train_csr = csr_matrix[train_idx]
         val_csr = csr_matrix[val_idx]
-        self.train_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=train_csr)
-        self.val_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=val_csr)
+        self.train_dataset: Dataset = GeneExpressionDataset(csr_matrix=train_csr)
+        self.val_dataset: Dataset = GeneExpressionDataset(csr_matrix=val_csr)
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
         self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
         # 计算动态掩码概率（使用已缓存的class_counts）
