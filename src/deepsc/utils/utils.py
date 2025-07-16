@@ -1231,6 +1231,41 @@ def check_grad_flow(
     }
 
 
+def compute_M_from_y(y):
+    """
+    从 Gumbel Softmax 输出 y 计算门控矩阵 M
+    Args:
+        y: Gumbel Softmax 输出, shape: (batch, g, g, 3)
+    Returns:
+        M: 门控矩阵, shape: (batch, g, g)
+    """
+    return y[..., 0] * (-1) + y[..., 1] * 0 + y[..., 2] * (+1)
+
+
+def print_m_matrix(epoch, index, M):
+    print(f"\n=== Epoch {epoch}, Iteration {index}: M Matrix ===")
+    # 只打印第一个batch的第一个样本的M矩阵
+    M_sample = M[0].detach().cpu().numpy()
+    print(f"M matrix shape: {M_sample.shape}")
+
+    total_elements = M_sample.size
+    inhibition_count = np.sum(M_sample == -1)
+    no_relation_count = np.sum(M_sample == 0)
+    activation_count = np.sum(M_sample == 1)
+
+    print("M matrix distribution:")
+    print(
+        f"  Inhibition (-1): {inhibition_count} ({inhibition_count/total_elements*100:.1f}%)"
+    )
+    print(
+        f"  No relation (0): {no_relation_count} ({no_relation_count/total_elements*100:.1f}%)"
+    )
+    print(
+        f"  Activation (1): {activation_count} ({activation_count/total_elements*100:.1f}%)"
+    )
+    print("=" * 50)
+
+
 # 计算每个类别的TP, FP, FN
 def compute_classification_metrics(valid_preds, valid_labels, num_classes, device):
     """

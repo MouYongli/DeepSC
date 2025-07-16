@@ -28,12 +28,13 @@ from src.deepsc.utils import (
     check_grad_flow,
     compute_bin_distribution,
     compute_classification_metrics,
+    compute_M_from_y,
     distributed_concat,
-    get_l0_lambda,
     get_reduced_with_fabric,
     interval_masked_mse_loss,
     log_stats,
     masked_mse_loss,
+    print_m_matrix,
     save_ckpt_fabric,
     seed_all,
     weighted_masked_mse_loss,
@@ -81,10 +82,6 @@ class Trainer:
         self.load_data()
         self.init_loss_fn()
         self.prepare_model()
-        if self.args.enable_l0_warmup:
-            self.l0_lambda = 0.0
-        else:
-            self.l0_lambda = self.args.l0_lambda_target
         if self.args.adaptive_mse_weight:
             self.mse_loss_weight = 0.0
         else:
@@ -328,7 +325,7 @@ class Trainer:
             y=y,
             ce_loss_weight=self.args.ce_loss_weight,
             mse_loss_weight=self.mse_loss_weight,
-            l0_lambda=self.l0_lambda,
+            l0_lambda=self.args.l0_lambda,
             is_val=is_val,
         )
         if logits is not None:
@@ -363,8 +360,9 @@ class Trainer:
                 masked_preds,
                 masked_labels,
                 expr_emb,
+                y,
             )
-        return loss, final, mse_loss, ce_loss, l0_loss, interval_mse
+        return loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y
 
     def validate(self, epoch, iteration=0):
         self.softmax_prob_sum = torch.zeros(
@@ -409,6 +407,7 @@ class Trainer:
                     masked_preds,
                     masked_labels,
                     expr_emb,
+                    y,
                 ) = self._process_batch(data, is_val=True)
                 all_expr_embs.append(expr_emb.cpu())
                 discrete_expr_label = data["discrete_expr_label"]
@@ -611,9 +610,19 @@ class Trainer:
                 self.iteration = index
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
-                loss, final, mse_loss, ce_loss, l0_loss, interval_mse = (
+                loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y = (
                     self._process_batch(data)
                 )
+
+                # 每10个iteration打印M矩阵
+                if (
+                    self.is_master
+                    and index % self.args.log_m_matrix_every == 0
+                    and y is not None
+                ):
+                    M = compute_M_from_y(y)
+                    print_m_matrix(epoch, index, M)
+
                 discrete_expr_label = data["discrete_expr_label"]
                 if interval_mse is None:
                     interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
@@ -646,14 +655,10 @@ class Trainer:
                     # 梯度检查（可选，通过配置控制）
                     if self.args.adaptive_mse_weight:
                         self.calculate_adaptive_mse_weight()
-                    if self.args.enable_l0_warmup:
-                        self.l0_lambda = get_l0_lambda(
-                            epoch,
-                            index,
-                            self.args.l0_warmup_start_epoch,
-                            self.args.l0_lambda_target,
-                            self.epoch_length,
-                        )
+                    # 这玩意似乎没用，cursor瞎加的，改天再试试
+                    # # 添加温度退火
+                    # if hasattr(self.model, 'anneal_temperature'):
+                    #     self.model.anneal_temperature(epoch, self.args.num_epochs)
                     if (
                         hasattr(self.args, "check_grad_flow")
                         and self.args.check_grad_flow
@@ -891,8 +896,11 @@ class Trainer:
                     log_each=is_val and self.args.show_mse_loss_details,
                 )
             total_loss += mse_loss_weight * regression_loss
-        l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
-        total_loss += l0_lambda * l0_loss
+        l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / (
+            y.shape[0] * y.shape[1] * y.shape[2]
+        )
+
+        total_loss += 0.1 * l0_loss
         return total_loss, ce_loss, regression_loss, l0_loss
 
     def get_top_bins_distribution_str(

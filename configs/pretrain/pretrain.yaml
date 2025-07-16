@@ -13,12 +13,17 @@ enable_ce: True
 ce_loss_weight: 1.0
 target_mse_loss_weight: 3.0
 #control the weight of mse loss
-adaptive_mse_weight: True
+adaptive_mse_weight: False
+
+# MoE Regressor settings
+use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简单回归器
+# True:  使用MoE回归器（3个专家网络：low/mid/high expert + gate网络）
+# False: 使用原来的简单回归器（单一sequential网络）
 
 # L0 loss warmup parameters
 l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
 enable_l0_warmup: False
-l0_lambda_target: 0.1
+l0_lambda: 0.1
 # 数据增强相关
 enable_data_augmentation: True  # 是否启用数据增强（动态掩码概率）
 
@@ -45,10 +50,10 @@ use_exp_regression_loss: False
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/partition_0_sparse_norm.npz"
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/small/partition_0_sparse_norm_small.npz"
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 3
+num_device: 1
 valid_every: 2000
 model_name: "scbert"
 grad_acc: 20
@@ -59,6 +64,7 @@ num_bin: 5
 save_ckpt_every: 3000
 
 log_on_wandb_every: 20
+log_m_matrix_every: 100
 sequence_length: 1024
 plot_tsne_and_umap: True
 draw_continuous_pred_label_scatter: True

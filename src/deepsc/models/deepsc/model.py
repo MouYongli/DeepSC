@@ -215,17 +215,24 @@ class FlashGeneAttentionLayer(nn.Module):
             else:
                 attn_mask = None
 
-            # 使用 Flash Attention
-
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
-                # 重新计算注意力权重用于稀疏化
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+
+                # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
+                # 步骤1：对M=0的位置设置负无穷，其他位置不变
+                zero_mask = torch.where(M == 0, -1e9, 0.0)
+                scores = scores + zero_mask
+
+                # 步骤2：softmax（现在M=0的位置权重接近0）
                 attn_weights = F.softmax(scores, dim=-1)
                 attn_weights = self.dropout(attn_weights)
+
+                # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
                 A_sparse = attn_weights * M
                 norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
                 A_bar = A_sparse / norm
+
                 # 重新计算输出
                 output = torch.matmul(A_bar, V)
             else:
@@ -245,6 +252,10 @@ class FlashGeneAttentionLayer(nn.Module):
             if M is not None:
                 if M.dim() == 3:
                     M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+
+                # 对M=0的位置设置负无穷mask
+                zero_mask = torch.where(M == 0, -1e9, 0.0)
+                scores = scores + zero_mask
 
             # 应用 softmax
             attn_weights = F.softmax(scores, dim=-1)
@@ -346,10 +357,18 @@ class FlashExpressionAttentionLayer(nn.Module):
 
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
-                # 重新计算注意力权重用于稀疏化
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+
+                # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
+                # 步骤1：对M=0的位置设置负无穷，其他位置不变
+                zero_mask = torch.where(M == 0, -1e9, 0.0)
+                scores = scores + zero_mask
+
+                # 步骤2：softmax（现在M=0的位置权重接近0）
                 attn_weights = F.softmax(scores, dim=-1)
                 attn_weights = self.dropout(attn_weights)
+
+                # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
                 A_sparse = attn_weights * M
                 norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
                 A_bar = A_sparse / norm
@@ -373,6 +392,10 @@ class FlashExpressionAttentionLayer(nn.Module):
             if M is not None:
                 if M.dim() == 3:
                     M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+
+                # 对M=0的位置设置负无穷mask
+                zero_mask = torch.where(M == 0, -1e9, 0.0)
+                scores = scores + zero_mask
 
             # 应用 softmax
             attn_weights = F.softmax(scores, dim=-1)
@@ -450,6 +473,113 @@ class FeedForward(nn.Module):
             # 最后一层
             h = self.layers[-1](h)  # hidden_dim -> d
             return x + h  # 最终残差连接
+
+
+class MoERegressor(nn.Module):
+    """
+    Mixture of Experts (MoE) 回归器
+
+    包含一个gate网络和三个expert网络：
+    - Expert 1: 专门处理小值（低表达量）
+    - Expert 2: 专门处理中等值（中等表达量）
+    - Expert 3: 专门处理大值（高表达量）
+
+    所有expert使用相同的网络结构，通过gate网络学习专门化
+    """
+
+    def __init__(self, embedding_dim, dropout=0.1):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.num_experts = 3
+
+        # Gate网络：决定每个expert的权重
+        self.gate = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim // 2),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim // 2, self.num_experts),
+            nn.Softmax(dim=-1),
+        )
+
+        # 创建三个相同结构的expert网络
+        self.experts = nn.ModuleList(
+            [
+                self._create_expert(embedding_dim, dropout)
+                for _ in range(self.num_experts)
+            ]
+        )
+
+        # 初始化权重
+        self._initialize_weights()
+
+    def _create_expert(self, embedding_dim, dropout):
+        """创建单个expert网络"""
+        return nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim * 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim * 2),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.ReLU(),
+            nn.LayerNorm(embedding_dim // 2),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim // 2, 1),
+        )
+
+    def _initialize_weights(self):
+        """初始化所有网络的权重"""
+        # 初始化gate网络
+        for m in self.gate:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+        # 初始化所有expert网络
+        for expert in self.experts:
+            for m in expert:
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        """
+        前向传播
+
+        Args:
+            x: 输入特征, shape: (batch_size, seq_len, embedding_dim)
+
+        Returns:
+            output: 回归输出, shape: (batch_size, seq_len)
+            gate_weights: Gate权重, shape: (batch_size, seq_len, num_experts)
+        """
+        # 计算gate权重
+        gate_weights = self.gate(x)  # (batch_size, seq_len, num_experts)
+
+        # 计算每个expert的输出
+        expert_outputs = []
+        for expert in self.experts:
+            expert_output = expert(x)  # (batch_size, seq_len, 1)
+            expert_outputs.append(expert_output)
+
+        # 将expert输出堆叠
+        expert_outputs = torch.stack(
+            expert_outputs, dim=-1
+        )  # (batch_size, seq_len, 1, num_experts)
+        expert_outputs = expert_outputs.squeeze(
+            -2
+        )  # (batch_size, seq_len, num_experts)
+
+        # 加权平均
+        output = torch.sum(
+            gate_weights * expert_outputs, dim=-1
+        )  # (batch_size, seq_len)
+
+        return output, gate_weights
 
 
 class FlashDeepSCTransformerBlock(nn.Module):
@@ -541,6 +671,7 @@ class DeepSC(nn.Module):
         enable_mse=True,
         enable_ce=True,
         num_layers_ffn=2,
+        use_moe_regressor=True,
     ):
         super().__init__()
         self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
@@ -574,21 +705,29 @@ class DeepSC(nn.Module):
             nn.LayerNorm(embedding_dim),
             nn.Linear(embedding_dim, num_bins + 1),  # 输出类别
         )
-        self.regressor = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim * 2),
-            nn.Dropout(0.1),
-            nn.Linear(embedding_dim * 2, embedding_dim),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim),
-            nn.Dropout(0.1),
-            nn.Linear(embedding_dim, embedding_dim // 2),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim // 2),
-            nn.Dropout(0.1),
-            nn.Linear(embedding_dim // 2, 1),
-        )
+
+        # 根据配置选择使用哪种regressor
+        self.use_moe_regressor = use_moe_regressor
+        if self.use_moe_regressor:
+            self.regressor = MoERegressor(embedding_dim)
+        else:
+            # 原来的simple regressor
+            self.regressor = nn.Sequential(
+                nn.Linear(embedding_dim, embedding_dim * 2),
+                nn.ReLU(),
+                nn.LayerNorm(embedding_dim * 2),
+                nn.Dropout(0.1),
+                nn.Linear(embedding_dim * 2, embedding_dim),
+                nn.ReLU(),
+                nn.LayerNorm(embedding_dim),
+                nn.Dropout(0.1),
+                nn.Linear(embedding_dim, embedding_dim // 2),
+                nn.ReLU(),
+                nn.LayerNorm(embedding_dim // 2),
+                nn.Dropout(0.1),
+                nn.Linear(embedding_dim // 2, 1),
+            )
+
         self.enable_l0 = enable_l0
         self.enable_mse = enable_mse
         self.enable_ce = enable_ce
@@ -606,11 +745,13 @@ class DeepSC(nn.Module):
         normalized_expr,
         return_encodings=False,
         return_mask_prob=True,
+        return_gate_weights=False,
     ):
         """
         gene_ids: (batch, g)  # 基因ID序列
         expression_bin: (batch, g)  # 离散化的表达量
         normalized_expr: (batch, g)  # 归一化的表达量
+        return_gate_weights: 是否返回MoE的gate权重
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
@@ -622,16 +763,45 @@ class DeepSC(nn.Module):
             else:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
         final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
-        final_emb = self.fused_emb_proj(final_emb)  # (batch, g,
+        final_emb = self.fused_emb_proj(final_emb)  # (batch, g, d)
         if self.enable_mse and self.enable_ce:
-            regression_output = self.regressor(final_emb)
-            regression_output = regression_output.squeeze(-1)
             logits = self.classifier(final_emb)
-            return logits, regression_output, y, gene_emb, expr_emb
+            if return_gate_weights and self.use_moe_regressor:
+                regression_output, gate_weights = self.get_regressor_output(final_emb)
+                return logits, regression_output, y, gene_emb, expr_emb, gate_weights
+            else:
+                regression_output, _ = self.get_regressor_output(final_emb)
+                return logits, regression_output, y, gene_emb, expr_emb
         elif self.enable_mse:
-            regression_output = self.regressor(final_emb)
-            regression_output = regression_output.squeeze(-1)
-            return regression_output, y, gene_emb, expr_emb
+            if return_gate_weights and self.use_moe_regressor:
+                regression_output, gate_weights = self.get_regressor_output(final_emb)
+                return regression_output, y, gene_emb, expr_emb, gate_weights
+            else:
+                regression_output, _ = self.get_regressor_output(final_emb)
+                return regression_output, y, gene_emb, expr_emb
         elif self.enable_ce:
             logits = self.classifier(final_emb)
             return logits, y, gene_emb, expr_emb
+
+    def get_regressor_output(self, final_emb):
+        """
+        获取回归器输出
+
+        Args:
+            final_emb: 最终融合的嵌入特征
+
+        Returns:
+            regression_output: 回归预测结果
+            gate_weights: MoE的gate权重（如果使用MoE）或None（如果使用简单回归器）
+        """
+        # 根据使用的regressor类型获取输出
+        if self.use_moe_regressor:
+            # MoE regressor返回两个值：regression_output和gate_weights
+            regression_output, gate_weights = self.regressor(final_emb)
+        else:
+            # 原来的regressor只返回一个值
+            regression_output = self.regressor(final_emb)
+            regression_output = regression_output.squeeze(-1)  # 去掉最后一个维度
+            gate_weights = None  # 原来的regressor没有gate_weights
+
+        return regression_output, gate_weights
