@@ -55,7 +55,7 @@ seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
 num_device: 1
 valid_every: 2000
-model_name: "scbert"
+model_name: "DeepSC"
 grad_acc: 20
 learning_rate: 3e-4
 epoch: 10

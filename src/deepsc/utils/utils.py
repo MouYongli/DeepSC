@@ -217,7 +217,22 @@ def save_checkpoint(
         fabric: Optional Fabric instance for distributed training
         losses: Optional losses dict (for non-fabric mode)
     """
+    import wandb
+
     os.makedirs(ckpt_folder, exist_ok=True)
+
+    # Get current wandb run_id and config if wandb is active
+    wandb_run_id = None
+    wandb_config = None
+    if wandb.run is not None:
+        wandb_run_id = wandb.run.id
+        wandb_config = {
+            "project": wandb.run.project,
+            "entity": wandb.run.entity,
+            "name": wandb.run.name,
+            "tags": list(wandb.run.tags) if wandb.run.tags else [],
+            "config": dict(wandb.run.config),
+        }
 
     if fabric is not None:
         # Fabric mode - use fabric.save()
@@ -227,6 +242,8 @@ def save_checkpoint(
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "iteration": iteration,
+            "wandb_run_id": wandb_run_id,
+            "wandb_config": wandb_config,
         }
 
         # Save latest checkpoint
@@ -253,6 +270,8 @@ def save_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "iteration": iteration,
+            "wandb_run_id": wandb_run_id,
+            "wandb_config": wandb_config,
         }
 
         if losses is not None:
