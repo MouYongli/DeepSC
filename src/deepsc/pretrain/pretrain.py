@@ -1,7 +1,7 @@
 import hydra
 import torch.nn as nn
 from lightning.fabric import Fabric
-from lightning.fabric.strategies import FSDPStrategy
+from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
 from deepsc.train.trainer import Trainer
@@ -13,9 +13,11 @@ from deepsc.utils.utils import setup_logging
 )
 def pretrain(cfg: DictConfig):
     # initialize fabric
-    strategy = FSDPStrategy(
-        state_dict_type="full"
-    )  # 改为 "full" 以支持不同 GPU 数量的加载
+    strategy = DDPStrategy(
+        find_unused_parameters=False,
+        static_graph=True,
+    )  # 使用DDP替代FSDP，更好地支持GPU变更
+
     fabric = Fabric(
         accelerator="cuda",
         devices=cfg.num_device,
