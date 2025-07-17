@@ -13,9 +13,7 @@ from deepsc.utils.utils import setup_logging
 )
 def pretrain(cfg: DictConfig):
     # initialize fabric
-    strategy = FSDPStrategy(
-        state_dict_type="full"
-    )  # 改为 "full" 以支持不同 GPU 数量的加载
+    strategy = FSDPStrategy(state_dict_type="sharded")
     fabric = Fabric(
         accelerator="cuda",
         devices=cfg.num_device,

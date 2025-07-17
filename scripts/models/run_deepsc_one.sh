@@ -1,7 +1,7 @@
 #!/usr/bin/zsh
 
 # 使用物理编号为 2 和 3 的 GP
-export CUDA_VISIBLE_DEVICES=2
+export CUDA_VISIBLE_DEVICES=0
 export OMP_NUM_THREADS=64
 
 NUM_GPUS=1

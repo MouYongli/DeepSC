@@ -212,6 +212,11 @@ class FlashGeneAttentionLayer(nn.Module):
                     M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
                 # 创建注意力掩码
                 attn_mask = M
+            else:
+                attn_mask = None
+
+            # 如果有门控矩阵，进行稀疏化处理
+            if M is not None:
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
 
                 # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
@@ -224,16 +229,18 @@ class FlashGeneAttentionLayer(nn.Module):
                 attn_weights = self.dropout(attn_weights)
 
                 # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
-                A_bar = attn_weights * M
+                A_sparse = attn_weights * M
+                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
+                A_bar = A_sparse / norm
 
                 # 重新计算输出
                 output = torch.matmul(A_bar, V)
             else:
-
                 output = scaled_dot_product_attention(
                     Q,
                     K,
                     V,
+                    attn_mask=attn_mask,
                     dropout_p=self.dropout.p if self.training else 0.0,
                     is_causal=False,
                 )
@@ -256,7 +263,9 @@ class FlashGeneAttentionLayer(nn.Module):
 
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
-                A_bar = attn_weights * M
+                A_sparse = attn_weights * M
+                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
+                A_bar = A_sparse / norm
             else:
                 A_bar = attn_weights
 
@@ -343,6 +352,11 @@ class FlashExpressionAttentionLayer(nn.Module):
                     M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
                 # 创建注意力掩码
                 attn_mask = M
+            else:
+                attn_mask = None
+
+            # 如果有门控矩阵，进行稀疏化处理
+            if M is not None:
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
 
                 # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
@@ -355,7 +369,9 @@ class FlashExpressionAttentionLayer(nn.Module):
                 attn_weights = self.dropout(attn_weights)
 
                 # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
-                A_bar = attn_weights * M
+                A_sparse = attn_weights * M
+                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
+                A_bar = A_sparse / norm
                 # 重新计算输出
                 output = torch.matmul(A_bar, V)
             else:
@@ -364,6 +380,7 @@ class FlashExpressionAttentionLayer(nn.Module):
                     Q,
                     K,
                     V,
+                    attn_mask=attn_mask,
                     dropout_p=self.dropout.p if self.training else 0.0,
                     is_causal=False,
                 )
@@ -386,7 +403,9 @@ class FlashExpressionAttentionLayer(nn.Module):
 
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
-                A_bar = attn_weights * M
+                A_sparse = attn_weights * M
+                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
+                A_bar = A_sparse / norm
             else:
                 A_bar = attn_weights
 
