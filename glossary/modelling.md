@@ -8,7 +8,7 @@
 
 单细胞RNA测序数据可以表示为一个矩阵 $\mathbf{X} \in \mathbb{R}^{n \times g}$，其中：
 - $n$ 是细胞数量
-- $g$ 是基因数量  
+- $g$ 是基因数量
 - $x_{i,j}$ 表示第 $i$ 个细胞中第 $j$ 个基因的表达量
 
 对于每个细胞 $i$，我们有基因表达向量 $\mathbf{x}_i = [x_{i,1}, x_{i,2}, ..., x_{i,g}]^T$。
@@ -72,7 +72,7 @@ $$\mathbf{e}^{expr}_{j} = \mathbf{W}_{bin} \cdot \text{OneHot}_{N}(b_{j}) + \alp
 
 首先，我们初始化基因编码分支和表达量编码分支的隐藏状态：
 
-$$\mathbf{H}_{gene}^{(0)} = \mathbf{E}_{gene}$$ 
+$$\mathbf{H}_{gene}^{(0)} = \mathbf{E}_{gene}$$
 
 $$\mathbf{H}_{expr}^{(0)} = \mathbf{E}_{expr}$$
 
@@ -136,27 +136,23 @@ $$
 \mathbf{A}_{gene}^{(l)} = \text{Softmax}\left(\frac{\mathbf{Q}_{gene}^{(l)} \cdot (\mathbf{K}_{gene}^{(l)})^{\top}}{\sqrt{d}}\right) \in \mathbb{R}^{n \times n}
 $$
 
-对我们将注意力权重矩阵与稀疏性门控矩阵进行逐元素相乘，可以得到一个稀疏化之后的注意权重矩阵$\mathbf{A}_{sparse} $，从而实现对调控关系的约束。
+我们引入了门控稀疏矩阵 $\mathbf{M} \in {-1, 0, +1}^{N \times N}$。该矩阵表示正向调控（+1）、无调控（0）与负向调控（-1）三类关系。为避免直接对 softmax 后的稀疏注意力矩阵进行削弱性乘法操作，我们使用门控稀疏矩阵对注意力分数进行如下操作
+
+- 提前掩蔽非调控区域：在注意力分数矩阵$\tilde{\mathbf{A}}{gene}^{(l)}$中，将 $\mathbf{M}{i,j} = 0$ 的位置对应地加上一个极小值屏蔽项 $-1e9$：
+
+- 计算稀疏注意力权重：对掩蔽后的分数矩阵施加 softmax 操作，得到初步稀疏化后的注意力矩阵：
+$$
+\mathbf{A}_{gene}^{(l)}= \text{Softmax}(\tilde{\mathbf{A}}{gene}^{(l)}) \in \mathbb{R}^{N \times N}
+$$
+- 增强正负调控的区分度：将 softmax 后的注意力权重再次与 $\mathbf{M}$ 进行逐元素相乘，以保留正负符号，从而得到符号感知的稀疏注意力矩阵：
 
 $$
 \hat{\mathbf{A}}_{gene}^{(l)} = \mathbf{A}_{gene}^{(l)} \odot \mathbf{M}
 $$
 
-然而，由于 $\mathbf{A}_{\text{gene}}$ 是经过 softmax 归一化的，其值域较小，在门控稀疏化后可能进一步压缩有效信号，在某些情况下会使得其值域更小，影响后续信息传递。
-
-为了应对该问题，我们对得到的稀疏注意力权重矩阵进一步进行带符号的加权归一化（weighted normalization），以增强正负调控信号的区分度，并考虑其在归一化中的贡献权重。此外，无调控的信号保持为0：
-
-$$
-\bar{\mathbf{A}_{gene}}^{(l)} = \frac{\hat{\mathbf{A}_{gene}}_{i, j}^{(l)}}{\sum_{k}^{N} \left| \hat{\mathbf{A}_{gene}}_{i, k}^{(l)} \right| + \epsilon}
-$$
-
-其中：
-- $\hat{\mathbf{A}}_{gene}^{(l)}$ 是稀疏化之后的注意力权重矩阵；
-- 分母中的绝对值确保了所有调控信号（不论正负）均被考虑用于归一化；
-- $\epsilon$ 是一个很小的常数，用于防止除以 0 的数值不稳定。
 
 
-通过将归一化后的稀疏注意力权重矩阵 $\bar{\mathbf{A}}_{gene}^{(l)} \in \mathbb{R}^{N \times N}$ 与值矩阵 $\mathbf{V}_{gene} \in \mathbb{R}^{N \times D}$ 相乘，可以得到注意力输出 $\mathbf{O} \in \mathbb{R}^{N \times D}$：
+通过将稀疏注意力权重矩阵 $\bar{\mathbf{A}}_{gene}^{(l)} \in \mathbb{R}^{N \times N}$ 与值矩阵 $\mathbf{V}_{gene} \in \mathbb{R}^{N \times D}$ 相乘，可以得到注意力输出 $\mathbf{O} \in \mathbb{R}^{N \times D}$：
 
 $$
 \mathbf{O}_{gene}^{(l)} = \mathbf{\hat{A}}_{gene}^{(l)} \cdot \mathbf{V}_{gene}^{(l)}
@@ -428,15 +424,15 @@ $$
   $$
   q(z \neq 0|\phi) = 1 - Q(s \leq 0|\phi)
   $$
-  
+
   即门被激活的概率 = 随机变量大于0的概率（$Q$是累计分布函数）。
-  
+
   新的损失近似目标，其中$g(\cdot)$是硬sigmoid函数：
 
 $$
 R(\hat{\theta}, \phi) = \mathbb{E}_{q(s|\phi)}\left[\frac{1}{N}\sum_i L\big(f_{\hat{\theta} \odot g(s)}(x_i), y_i\big)\right] + \lambda \sum_j (1 - Q(s_j \leq 0|\phi_j))
 $$
-  
+
 ```citation
 @article{louizos2017learning,
   title={Learning sparse neural networks through $ L\_0 $ regularization},
@@ -445,24 +441,3 @@ $$
   year={2017}
 }
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
