@@ -576,6 +576,15 @@ class Trainer:
             print(f"  Bin {i}: {p.item():.4f}")
         del self.softmax_prob_sum
         del self.softmax_total_count
+        
+        # 清理内存
+        if all_expr_embs is not None:
+            del all_expr_embs
+        if all_masked_preds is not None and len(all_masked_preds) > 0:
+            del all_masked_preds
+        if all_masked_labels is not None and len(all_masked_labels) > 0:
+            del all_masked_labels
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     def train(self):
 
@@ -597,8 +606,8 @@ class Trainer:
             self.checkpoint_reload()
 
         self.log_each = False
-        if self.args.model_name == "DeepSC":
-            self.model = torch.compile(self.model)
+        #if self.args.model_name == "DeepSC":
+            #self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         self.epoch_length = len(self.train_loader)
         for epoch in range(start_epoch, self.args.epoch + 1):
@@ -944,9 +953,13 @@ class Trainer:
         }
         remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
 
-        # 手动恢复不可变计数器
-        self.iteration = remainder.get("iteration", 1)
-        self.last_epoch = remainder.get("epoch", 1)
+        if self.args.resume_last_training:
+            # 手动恢复不可变计数器
+            self.iteration = remainder.get("iteration", 1)
+            self.last_epoch = remainder.get("epoch", 1)
+        else:
+            self.iteration = 1
+            self.last_epoch = 1
 
         # 在master进程中处理wandb初始化
         if self.is_master:

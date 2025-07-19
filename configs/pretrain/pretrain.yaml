@@ -50,23 +50,24 @@ use_exp_regression_loss: False
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/heart_normalized_data_csr/small/partition_0_sparse_norm_small.npz"
+data_path: "/hpcwork/p0021245/Data/official_pretraining/blood_others"
 seed: 42
-ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/"
-num_device: 1
-valid_every: 2000
-model_name: "DeepSC"
+ckpt_dir: "/hpcwork/p0021245/pretrain/DeepSC/ckpts/"
+num_device: 4
+num_nodes: 2  # 节点数，与SLURM --nodes配置匹配
+valid_every: 3000
+model_name: "DeepSC_heart9_blood_others_blood"
 grad_acc: 20
 learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
-save_ckpt_every: 3000
+save_ckpt_every: 5000
 
 log_on_wandb_every: 20
-log_m_matrix_every: 100
+log_m_matrix_every: 1000
 sequence_length: 1024
-plot_tsne_and_umap: True
+plot_tsne_and_umap: False
 draw_continuous_pred_label_scatter: True
 
 # 新增warmup相关参数
@@ -75,6 +76,9 @@ warmup_ratio: 0.03
 use_warmup_with_decay: False
 use_scbert_scheduler: True
 use_mogaide_scheduler: False
+
+# 新增checkpoint相关参数
+resume_last_training: False
 
 # 梯度检查相关参数
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用

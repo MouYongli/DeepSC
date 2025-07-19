@@ -196,4 +196,6 @@ tests/test_hydra.py
 
 *bk.md
 tests/test_dummy.py
+.logs/
+logs/
 test_checkpoints/

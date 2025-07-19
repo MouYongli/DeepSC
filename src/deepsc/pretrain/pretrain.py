@@ -13,11 +13,11 @@ from deepsc.utils.utils import setup_logging
 )
 def pretrain(cfg: DictConfig):
     # initialize fabric
-    strategy = FSDPStrategy(state_dict_type="sharded")
     fabric = Fabric(
         accelerator="cuda",
         devices=cfg.num_device,
-        strategy=strategy,
+        num_nodes=cfg.num_nodes,
+        strategy='ddp',
         precision="bf16-mixed",
     )
     fabric.launch()
