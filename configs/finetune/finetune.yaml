@@ -1,0 +1,79 @@
+defaults:
+  - _self_
+  - model: deepsc
+
+# Wandb and logging
+wandb_project: "DeepSC-Finetune"
+tags: ["cell_type_annotation", "finetune", "classification"]
+run_name: "cell_type_annotation_finetune"
+
+# Checkpoint path for pre-trained DeepSC model
+checkpoint_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint.ckpt"  # 使用最新的checkpoint
+
+# Task-specific parameters
+task: "cell_type_annotation"
+num_classes: 10  # 修改为实际的细胞类型数量
+
+# Model configuration (should match pre-trained model)
+model:
+  embedding_dim: 256
+  num_genes: 34682  # 匹配checkpoint中的实际基因数量
+  num_layers: 10    # 匹配checkpoint中的实际层数
+  num_heads: 8
+  attn_dropout: 0.1
+  ffn_dropout: 0.1
+  fused: True
+  num_bins: 5       # 匹配checkpoint中的实际bin数量
+  alpha: 0.3
+  mask_layer_start: 9  # 调整为最后一层
+  enable_l0: True
+  enable_mse: True
+  enable_ce: True
+  num_layers_ffn: 6    # 匹配checkpoint中的实际FFN层数
+  use_moe_regressor: True
+
+# Training configuration
+learning_rate: 1e-4  # Lower learning rate for fine-tuning
+batch_size: 4  # 降低batch size避免CUDA内存问题
+epoch: 20
+grad_acc: 1
+weight_decay: 1e-5
+warmup_ratio: 0.1
+
+# Data configuration
+data_path: "/home/angli/baseline/DeepSC/data/cta/filtered_ms_adata.h5ad"  # 真实数据路径
+sequence_length: 1024  # 降低序列长度避免CUDA内存问题
+
+# Fine-tuning specific settings
+freeze_encoder: True  # 是否冻结encoder
+freeze_layers: 0  # 冻结前几层，0表示不冻结任何层
+dropout_rate: 0.1
+patience: 5  # 早停patience
+
+# Output and checkpointing
+output_dir: "/home/angli/baseline/DeepSC/outputs/finetune"
+ckpt_dir: "/home/angli/baseline/DeepSC/ckpts/finetune/"
+save_ckpt_every: 1000
+valid_every: 500
+
+# Logging
+log_every: 50
+seed: 42
+gpu_id: 1  # 使用第二个GPU（GPU索引从0开始，1表示第二个GPU）
+
+# Loss configuration
+loss_function: "cross_entropy"
+class_weights: null  # 如果需要处理类别不平衡，可以设置权重
+
+# Evaluation metrics
+metrics: ["accuracy", "f1_score", "precision", "recall"]
+
+hydra:
+  verbose: False
+  job_logging:
+    handlers:
+      console:
+        class: logging.StreamHandler
+        stream: ext://sys.stdout
+      file:
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}_${oc.select:hydra.job.num, 0}.log
