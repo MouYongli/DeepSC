@@ -1,11 +1,11 @@
 #!/usr/bin/zsh
 
-# 使用物理编号为 2 和 3 的 GPU
-export CUDA_VISIBLE_DEVICES=1,2,3
+# 使用物理编号为 2 和 3 的 GP
+export CUDA_VISIBLE_DEVICES=0
 export OMP_NUM_THREADS=64
 
-NUM_GPUS=3
-MASTER_PORT=12625
+NUM_GPUS=1
+MASTER_PORT=12620
 
 PYTHONPATH=src torchrun \
   --nproc_per_node=$NUM_GPUS \

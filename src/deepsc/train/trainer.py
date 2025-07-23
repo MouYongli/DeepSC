@@ -20,20 +20,21 @@ from tqdm import tqdm
 
 import time
 import wandb
-from deepsc.data import DataCollator
-from deepsc.utils import (
+from src.deepsc.data import DataCollator
+from src.deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     CosineAnnealingWarmupRestarts,
     LDAMLoss,
     check_grad_flow,
     compute_bin_distribution,
     compute_classification_metrics,
+    compute_M_from_y,
     distributed_concat,
-    get_l0_lambda,
     get_reduced_with_fabric,
     interval_masked_mse_loss,
     log_stats,
     masked_mse_loss,
+    print_m_matrix,
     save_ckpt_fabric,
     seed_all,
     weighted_masked_mse_loss,
@@ -81,10 +82,6 @@ class Trainer:
         self.load_data()
         self.init_loss_fn()
         self.prepare_model()
-        if self.args.enable_l0_warmup:
-            self.l0_lambda = 0.0
-        else:
-            self.l0_lambda = self.args.l0_lambda_target
         if self.args.adaptive_mse_weight:
             self.mse_loss_weight = 0.0
         else:
@@ -137,7 +134,8 @@ class Trainer:
             dynamic_mask_probabilities = self.calculate_dynamic_mask_probabilities()
         else:
             dynamic_mask_probabilities = None
-
+        print("Dynamic mask probabilities in train:")
+        print(dynamic_mask_probabilities)
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
@@ -327,7 +325,7 @@ class Trainer:
             y=y,
             ce_loss_weight=self.args.ce_loss_weight,
             mse_loss_weight=self.mse_loss_weight,
-            l0_lambda=self.l0_lambda,
+            l0_lambda=self.args.l0_lambda,
             is_val=is_val,
         )
         if logits is not None:
@@ -362,8 +360,9 @@ class Trainer:
                 masked_preds,
                 masked_labels,
                 expr_emb,
+                y,
             )
-        return loss, final, mse_loss, ce_loss, l0_loss, interval_mse
+        return loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y
 
     def validate(self, epoch, iteration=0):
         self.softmax_prob_sum = torch.zeros(
@@ -408,6 +407,7 @@ class Trainer:
                     masked_preds,
                     masked_labels,
                     expr_emb,
+                    y,
                 ) = self._process_batch(data, is_val=True)
                 all_expr_embs.append(expr_emb.cpu())
                 discrete_expr_label = data["discrete_expr_label"]
@@ -576,14 +576,38 @@ class Trainer:
             print(f"  Bin {i}: {p.item():.4f}")
         del self.softmax_prob_sum
         del self.softmax_total_count
+        
+        # 清理内存
+        if all_expr_embs is not None:
+            del all_expr_embs
+        if all_masked_preds is not None and len(all_masked_preds) > 0:
+            del all_masked_preds
+        if all_masked_labels is not None and len(all_masked_labels) > 0:
+            del all_masked_labels
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     def train(self):
 
-        # 用于恢复训练,cursor可能会删掉这行，不要让它删掉
-        # self.checkpoint_reload()
+        # 先处理wandb初始化 - 基于checkpoint情况决定是恢复还是新建
+        if self.is_master:
+            checkpoint_loaded = self.checkpoint_reload()
+            if not checkpoint_loaded:
+                # 没有checkpoint或加载失败，创建新的wandb run
+                print("No checkpoint found, initializing new wandb run...")
+                wandb.init(
+                    entity=self.args.get("wandb_team", "rwth_lfb"),
+                    project=self.args.get("wandb_project", "DeepSC"),
+                    name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
+                    tags=self.args.tags,
+                    config=dict(self.args),
+                )
+        else:
+            # 非master进程只需要尝试加载checkpoint
+            self.checkpoint_reload()
+
         self.log_each = False
-        if self.args.model_name == "DeepSC":
-            self.model = torch.compile(self.model)
+        #if self.args.model_name == "DeepSC":
+            #self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         self.epoch_length = len(self.train_loader)
         for epoch in range(start_epoch, self.args.epoch + 1):
@@ -607,12 +631,22 @@ class Trainer:
             average_loss = 0.0
 
             for index, data in enumerate(data_iter, start=1):
-                self.iteration = index
                 if epoch == start_epoch and index < getattr(self, "iteration", 1):
                     continue
-                loss, final, mse_loss, ce_loss, l0_loss, interval_mse = (
+                self.iteration = index
+                loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y = (
                     self._process_batch(data)
                 )
+
+                # 每10个iteration打印M矩阵
+                if (
+                    self.is_master
+                    and index % self.args.log_m_matrix_every == 0
+                    and y is not None
+                ):
+                    M = compute_M_from_y(y)
+                    print_m_matrix(epoch, index, M)
+
                 discrete_expr_label = data["discrete_expr_label"]
                 if interval_mse is None:
                     interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
@@ -645,14 +679,10 @@ class Trainer:
                     # 梯度检查（可选，通过配置控制）
                     if self.args.adaptive_mse_weight:
                         self.calculate_adaptive_mse_weight()
-                    if self.args.enable_l0_warmup:
-                        self.l0_lambda = get_l0_lambda(
-                            epoch,
-                            index,
-                            self.args.l0_warmup_start_epoch,
-                            self.args.l0_lambda_target,
-                            self.epoch_length,
-                        )
+                    # 这玩意似乎没用，cursor瞎加的，改天再试试
+                    # # 添加温度退火
+                    # if hasattr(self.model, 'anneal_temperature'):
+                    #     self.model.anneal_temperature(epoch, self.args.num_epochs)
                     if (
                         hasattr(self.args, "check_grad_flow")
                         and self.args.check_grad_flow
@@ -890,8 +920,11 @@ class Trainer:
                     log_each=is_val and self.args.show_mse_loss_details,
                 )
             total_loss += mse_loss_weight * regression_loss
-        l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / y.numel()
-        total_loss += l0_lambda * l0_loss
+        l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / (
+            y.shape[0] * y.shape[1] * y.shape[2]
+        )
+
+        total_loss += 0.1 * l0_loss
         return total_loss, ce_loss, regression_loss, l0_loss
 
     def get_top_bins_distribution_str(
@@ -920,9 +953,57 @@ class Trainer:
         }
         remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
 
-        # 手动恢复不可变计数器
-        self.iteration = remainder.get("iteration", 1)
-        self.last_epoch = remainder.get("epoch", 1)
+        if self.args.resume_last_training:
+            # 手动恢复不可变计数器
+            self.iteration = remainder.get("iteration", 1)
+            self.last_epoch = remainder.get("epoch", 1)
+        else:
+            self.iteration = 1
+            self.last_epoch = 1
+
+        # 在master进程中处理wandb初始化
+        if self.is_master:
+            saved_run_id = remainder.get("wandb_run_id", None)
+            saved_wandb_config = remainder.get("wandb_config", None)
+
+            if saved_run_id:
+                print(f"[INFO] 找到保存的wandb run_id: {saved_run_id}")
+                print("[INFO] 使用原始run_id恢复wandb会话...")
+
+                # 使用保存的配置，如果没有则使用当前配置
+                if saved_wandb_config:
+                    wandb.init(
+                        id=saved_run_id,
+                        resume="allow",
+                        project=saved_wandb_config.get(
+                            "project", self.args.get("wandb_project", "DeepSC")
+                        ),
+                        entity=saved_wandb_config.get(
+                            "entity", self.args.get("wandb_team", "rwth_lfb")
+                        ),
+                        name=saved_wandb_config.get(
+                            "name",
+                            f"{self.args.run_name}, lr: {self.args.learning_rate}",
+                        ),
+                        tags=saved_wandb_config.get("tags", self.args.tags),
+                        config=saved_wandb_config.get("config", dict(self.args)),
+                    )
+                else:
+                    # 如果没有保存wandb配置，使用当前配置
+                    wandb.init(
+                        id=saved_run_id,
+                        resume="allow",
+                        project=self.args.get("wandb_project", "DeepSC"),
+                        entity=self.args.get("wandb_team", "rwth_lfb"),
+                        name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
+                        tags=self.args.tags,
+                        config=dict(self.args),
+                    )
+
+                print(f"[INFO] 已恢复wandb会话，run_id: {wandb.run.id}")
+                print(f"[INFO] 项目: {wandb.run.project}, 名称: {wandb.run.name}")
+            else:
+                print("[INFO] 检查点中未找到wandb run_id，将创建新的wandb run")
 
         if self.is_master:
             print(
@@ -1169,17 +1250,17 @@ class Trainer:
         for bin_idx in range(1, self.args.model.num_bins + 1):
             ratio = bin_ratios[bin_idx]
             if ratio < 1.0:
-                # 比例小于1%的bin设为掩码概率为0.9
+                # 比例小于1%的bin设为掩码概率为0.7
                 mask_probabilities[bin_idx] = 0.7
             elif ratio < 5.0:
-                # 比例小于5%的bin设为掩码概率为0.7
-                mask_probabilities[bin_idx] = 0.6
+                # 比例小于5%的bin设为掩码概率为0.5
+                mask_probabilities[bin_idx] = 0.5
             elif ratio < 12.5:
                 # 比例小于10%的bin设为掩码概率为0.3
-                mask_probabilities[bin_idx] = 0.5
+                mask_probabilities[bin_idx] = 0.3
             elif ratio < 20.0:
-                # 比例小于10%的bin设为掩码概率为0.3
-                mask_probabilities[bin_idx] = 0.4
+                # 比例小于20%的bin设为掩码概率为0.15
+                mask_probabilities[bin_idx] = 0.15
             else:
                 # 其他的掩码概率0.1
                 mask_probabilities[bin_idx] = 0.1

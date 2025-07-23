@@ -4,7 +4,6 @@ from lightning.fabric import Fabric
 from lightning.fabric.strategies import FSDPStrategy
 from omegaconf import DictConfig
 
-import wandb
 from deepsc.train.trainer import Trainer
 from deepsc.utils.utils import setup_logging
 
@@ -14,26 +13,19 @@ from deepsc.utils.utils import setup_logging
 )
 def pretrain(cfg: DictConfig):
     # initialize fabric
-    strategy = FSDPStrategy(state_dict_type="sharded")
     fabric = Fabric(
         accelerator="cuda",
         devices=cfg.num_device,
-        strategy=strategy,
+        num_nodes=cfg.num_nodes,
+        strategy='ddp',
         precision="bf16-mixed",
     )
     fabric.launch()
     # initialize log
-    setup_logging(fabric.global_rank, "./logs")
+    setup_logging(rank=fabric.global_rank, log_path="./logs")
 
-    # wandb only in master
-    if fabric.global_rank == 0:
-        wandb.init(
-            entity=cfg.get("wandb_team", "rwth_lfb"),
-            project=cfg.get("wandb_project", "DeepSC"),
-            name=f"{cfg.run_name}, lr: {cfg.learning_rate}",
-            tags=cfg.tags,
-            config=dict(cfg),
-        )
+    # wandb initialization will be handled in trainer after checkpoint check
+    # This way we don't create empty runs if we can resume
 
     # model = select_model(cfg)
     # instantiate model
