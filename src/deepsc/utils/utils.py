@@ -13,22 +13,21 @@ from torch import nn
 from torch.nn.modules.loss import _WeightedLoss
 from torch.optim.lr_scheduler import _LRScheduler
 
+import wandb
 from datetime import datetime
-
-
 
 
 def path_of_file(file_path, file_name):
     """
     Find a file in a given directory based on file type.
-    
+
     Args:
         file_path: Path to search in
         file_name: Type of file to search for ('cell' or 'gene')
-        
+
     Returns:
         Path: The found file path
-        
+
     Raises:
         ValueError: If file_name is not 'cell' or 'gene', or if multiple files found
         FileNotFoundError: If no matching file is found
@@ -36,10 +35,10 @@ def path_of_file(file_path, file_name):
     """
     if not isinstance(file_path, Path):
         file_path = Path(file_path)
-    
+
     if not file_path.exists():
         raise FileNotFoundError(f"Directory does not exist: {file_path}")
-    
+
     if not file_path.is_dir():
         raise NotADirectoryError(f"Path is not a directory: {file_path}")
 
@@ -60,20 +59,24 @@ def path_of_file(file_path, file_name):
     search_files = [
         f for f in lower_files if f.startswith(search_key1) and f.endswith(search_key2)
     ]
-    
+
     if search_files:
         if len(search_files) == 1:
             original_file_name = files_in_directory[search_files[0]]
             search_file_path = file_path / original_file_name
             return search_file_path
         else:
-            raise ValueError(f"Multiple {file_name} files found in {file_path}: {search_files}")
+            raise ValueError(
+                f"Multiple {file_name} files found in {file_path}: {search_files}"
+            )
     else:
         # Search in parent directory
         parent_folder = file_path.parent
         if not parent_folder.exists() or not parent_folder.is_dir():
-            raise FileNotFoundError(f"No {file_name} file found in {file_path} and parent directory is invalid")
-            
+            raise FileNotFoundError(
+                f"No {file_name} file found in {file_path} and parent directory is invalid"
+            )
+
         files_in_parent_directory = {
             f.name.lower(): f.name for f in parent_folder.iterdir() if f.is_file()
         }
@@ -83,16 +86,20 @@ def path_of_file(file_path, file_name):
             for f in lower_files_in_parent_directory
             if f.startswith(search_key1) and f.endswith(search_key2)
         ]
-        
+
         if search_files:
             if len(search_files) == 1:
                 original_file_name = files_in_parent_directory[search_files[0]]
                 search_file_path = parent_folder / original_file_name
                 return search_file_path
             else:
-                raise ValueError(f"Multiple {file_name} files found in parent directory {parent_folder}: {search_files}")
+                raise ValueError(
+                    f"Multiple {file_name} files found in parent directory {parent_folder}: {search_files}"
+                )
         else:
-            raise FileNotFoundError(f"No {file_name} file found in {file_path} or its parent directory")
+            raise FileNotFoundError(
+                f"No {file_name} file found in {file_path} or its parent directory"
+            )
 
 
 def seed_all(seed_value, cuda_deterministic=False):
@@ -104,8 +111,9 @@ def seed_all(seed_value, cuda_deterministic=False):
     np.random.seed(seed_value)
     torch.manual_seed(seed_value)
     if torch.cuda.is_available():
+        # torch.manual_seed already calls torch.cuda.manual_seed_all internally
+        # So we only need to call torch.cuda.manual_seed for the current GPU
         torch.cuda.manual_seed(seed_value)
-        torch.cuda.manual_seed_all(seed_value)
     # Speed-reproducibility tradeoff https://pytorch.org/docs/stable/notes/randomness.html
     if cuda_deterministic:  # slower, more reproducible
         torch.backends.cudnn.deterministic = True
@@ -116,58 +124,55 @@ def seed_all(seed_value, cuda_deterministic=False):
 
 
 def setup_logging(
-    log_path: str = "./logs", 
-    log_name: str = "deepsc", 
+    log_path: str = "./logs",
+    log_name: str = "deepsc",
     rank: int = -1,
     add_timestamp: bool = True,
-    log_level: str = "INFO"
+    log_level: str = "INFO",
 ) -> str:
     """
     Setup unified logging configuration.
-    
+
     Args:
         log_path: Directory to store log files
         log_name: Base name for the log file
         rank: Process rank for distributed training (-1 for single process)
         add_timestamp: Whether to add timestamp to log filename
         log_level: Logging level
-        
+
     Returns:
         str: Path to the created log file
     """
     os.makedirs(log_path, exist_ok=True)
-    
+
     # Build log filename
     if add_timestamp:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"{log_name}_{timestamp}.log"
     else:
         time_now = datetime.now()
-        log_filename = f"{log_name}_{time_now.year}_{time_now.month}_{time_now.day}_{time_now.hour}_{time_now.minute}.log"
-    
+        log_filename = f"{log_name}_{time_now.month}_{time_now.day}_{time_now.hour}_{time_now.minute}.log"
+
     log_file = osp.join(log_path, log_filename)
-    
+
     # Set logging level based on rank
     if rank in [-1, 0]:
         level = getattr(logging, log_level.upper())
     else:
         level = logging.WARN
-    
+
     # Configure logging
     logging.basicConfig(
         level=level,
         format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
         datefmt="[%X]",
-        handlers=[
-            logging.FileHandler(log_file, mode='w'),
-            logging.StreamHandler()
-        ],
-        force=True  # Reset any existing logging configuration
+        handlers=[logging.FileHandler(log_file, mode="w"), logging.StreamHandler()],
+        force=True,  # Reset any existing logging configuration
     )
-    
+
     logger = logging.getLogger()
     logger.info(f"Log file initialized: {log_file}")
-    
+
     return log_file
 
 
@@ -175,12 +180,15 @@ def setup_logging(
 def set_log(log_file_name, rank=-1):
     """Deprecated: Use setup_logging instead."""
     import warnings
-    warnings.warn("set_log is deprecated. Use setup_logging instead.", DeprecationWarning)
+
+    warnings.warn(
+        "set_log is deprecated. Use setup_logging instead.", DeprecationWarning
+    )
     return setup_logging(
         log_path=os.path.dirname(log_file_name),
-        log_name=os.path.basename(log_file_name).replace('.log', ''),
+        log_name=os.path.basename(log_file_name).replace(".log", ""),
         rank=rank,
-        add_timestamp=False
+        add_timestamp=False,
     )
 
 
@@ -193,24 +201,39 @@ def save_checkpoint(
     ckpt_folder: str,
     iteration=None,
     fabric=None,
-    losses=None
+    losses=None,
 ):
     """
     Unified checkpoint saving function that works with or without Fabric.
-    
+
     Args:
         epoch: Current epoch number
         model: Model to save
         optimizer: Optimizer state
-        scheduler: Scheduler state  
+        scheduler: Scheduler state
         model_name: Name for the checkpoint file
         ckpt_folder: Directory to save checkpoints
         iteration: Optional iteration number
         fabric: Optional Fabric instance for distributed training
         losses: Optional losses dict (for non-fabric mode)
     """
+    import wandb
+
     os.makedirs(ckpt_folder, exist_ok=True)
-    
+
+    # Get current wandb run_id and config if wandb is active
+    wandb_run_id = None
+    wandb_config = None
+    if wandb.run is not None:
+        wandb_run_id = wandb.run.id
+        wandb_config = {
+            "project": wandb.run.project,
+            "entity": wandb.run.entity,
+            "name": wandb.run.name,
+            "tags": list(wandb.run.tags) if wandb.run.tags else [],
+            "config": dict(wandb.run.config),
+        }
+
     if fabric is not None:
         # Fabric mode - use fabric.save()
         state = {
@@ -219,37 +242,45 @@ def save_checkpoint(
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "iteration": iteration,
+            "wandb_run_id": wandb_run_id,
+            "wandb_config": wandb_config,
         }
-        
+
         # Save latest checkpoint
         latest_path = os.path.join(ckpt_folder, "latest_checkpoint.ckpt")
         logging.info(f"Saving checkpoint to {latest_path}")
         fabric.save(latest_path, state)
-        
+
         # Save numbered checkpoint
         if iteration is not None:
             filename = f"{model_name}_{epoch}_{iteration}.ckpt"
         else:
             filename = f"{model_name}_{epoch}.ckpt"
         fabric.save(os.path.join(ckpt_folder, filename), state)
-        
+
     else:
         # Standard PyTorch mode
         state = {
             "epoch": epoch,
-            "model_state_dict": model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
+            "model_state_dict": (
+                model.module.state_dict()
+                if hasattr(model, "module")
+                else model.state_dict()
+            ),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "iteration": iteration,
+            "wandb_run_id": wandb_run_id,
+            "wandb_config": wandb_config,
         }
-        
+
         if losses is not None:
             state["losses"] = losses
-            
+
         # Save latest checkpoint
         latest_path = os.path.join(ckpt_folder, "latest_checkpoint.pth")
         torch.save(state, latest_path)
-        
+
         # Save numbered checkpoint
         if iteration is not None:
             filename = f"{model_name}_{epoch}_{iteration}.pth"
@@ -259,23 +290,46 @@ def save_checkpoint(
 
 
 # Backward compatibility functions
-def save_ckpt(epoch, model, optimizer, scheduler, losses, model_name, ckpt_folder, iteration=None):
+def save_ckpt(
+    epoch, model, optimizer, scheduler, losses, model_name, ckpt_folder, iteration=None
+):
     """Deprecated: Use save_checkpoint instead."""
     import warnings
-    warnings.warn("save_ckpt is deprecated. Use save_checkpoint instead.", DeprecationWarning)
+
+    warnings.warn(
+        "save_ckpt is deprecated. Use save_checkpoint instead.", DeprecationWarning
+    )
     return save_checkpoint(
-        epoch, model, optimizer, scheduler, model_name, ckpt_folder, 
-        iteration=iteration, losses=losses
+        epoch,
+        model,
+        optimizer,
+        scheduler,
+        model_name,
+        ckpt_folder,
+        iteration=iteration,
+        losses=losses,
     )
 
 
-def save_ckpt_fabric(epoch, model, optimizer, scheduler, model_name, ckpt_folder, fabric, iteration=None):
+def save_ckpt_fabric(
+    epoch, model, optimizer, scheduler, model_name, ckpt_folder, fabric, iteration=None
+):
     """Deprecated: Use save_checkpoint instead."""
     import warnings
-    warnings.warn("save_ckpt_fabric is deprecated. Use save_checkpoint instead.", DeprecationWarning)
+
+    warnings.warn(
+        "save_ckpt_fabric is deprecated. Use save_checkpoint instead.",
+        DeprecationWarning,
+    )
     return save_checkpoint(
-        epoch, model, optimizer, scheduler, model_name, ckpt_folder,
-        iteration=iteration, fabric=fabric
+        epoch,
+        model,
+        optimizer,
+        scheduler,
+        model_name,
+        ckpt_folder,
+        iteration=iteration,
+        fabric=fabric,
     )
 
 
@@ -654,6 +708,7 @@ def masked_mse_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    loss_fn,
     reduction: str = "mean",
 ):
     """
@@ -668,7 +723,7 @@ def masked_mse_loss(
     Returns:
         Tensor: loss 值
     """
-    loss_fn = nn.MSELoss(reduction="none")
+    loss_fn = loss_fn
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
     masked_loss = elementwise_loss[mask]  # 只取被掩码的部分
@@ -691,9 +746,9 @@ def weighted_masked_mse_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    loss_fn,
     reduction: str = "mean",
     log_each: bool = False,
-    loss_type: str = "mse",
 ):
     """
     分区加权 MSE Loss，只在 mask=True 的位置计算。
@@ -703,16 +758,7 @@ def weighted_masked_mse_loss(
         3 <= target < 5   → 1.0
         target >= 5       → 2.0
     加权后进行归一化处理，防止梯度爆炸或 collapse。
-    loss_type: 'mse'（默认）或 'huber'，决定损失函数类型。
     """
-
-    if loss_type == "mse":
-        loss_fn = nn.MSELoss(reduction="none")
-    elif loss_type == "huber":
-        loss_fn = nn.HuberLoss(reduction="none")
-    else:
-        raise ValueError(f"Invalid loss_type: {loss_type}. Supported: 'mse', 'huber'.")
-
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
     with torch.no_grad():
@@ -753,6 +799,7 @@ def weighted_masked_mse_loss_v2(
     pred: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    loss_fn,
     reduction: str = "mean",
     log_each: bool = False,
 ):
@@ -761,7 +808,7 @@ def weighted_masked_mse_loss_v2(
     权重 = 2^(target - shift)
     shift 可调节权重起点，默认为0。
     """
-    loss_fn = nn.MSELoss(reduction="none")
+    loss_fn = loss_fn
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
     # 生成以2为底的指数权重
@@ -817,6 +864,36 @@ def log_stats(
         print("---------------------------------------------")
 
     if print_detailed_stats:
+        recall, precision, f1, macro_f1, average_recall, average_precision = (
+            compute_classification_metrics(
+                valid_preds, valid_labels, num_classes, labels.device
+            )
+        )
+        # INSERT_YOUR_CODE
+        # 将每个类别的recall, precision, f1上传到wandb
+        if "wandb" in globals() and wandb.run is not None:
+            log_dict = {}
+            for i in range(num_classes):
+                log_dict[f"recall/bin{i}"] = recall[i].item()
+                log_dict[f"precision/bin{i}"] = precision[i].item()
+                log_dict[f"f1/bin{i}"] = f1[i].item()
+            log_dict["val/macro_f1"] = macro_f1
+            # 只对非第0类(bin0)求平均
+            log_dict["val/average_recall"] = average_recall
+            log_dict["val/average_precision"] = average_precision
+            wandb.log(log_dict)
+
+        print(f"\n===== Epoch {epoch} Validation Stats =====")
+        print(f"Total non-padded labels (predictions): {valid_preds.numel()}")
+        print(f"{'Class':>8} | {'Recall':>8} | {'Precision':>10} | {'F1':>8}")
+        print("-" * 44)
+        for i in range(num_classes):
+            print(
+                f"{i:>8} | {recall[i].item():>8.4f} | {precision[i].item():>10.4f} | {f1[i].item():>8.4f}"
+            )
+        print("-" * 44)
+        print(f"{'Macro F1':>8} | {macro_f1:>8.4f}")
+        print("================================\n")
         # 1. Label distribution
         label_counts = torch.bincount(valid_labels.to(torch.int), minlength=num_classes)
         label_dist = label_counts.float() / non_padded_count
@@ -1055,3 +1132,224 @@ def interval_masked_mse_loss(pred, target, mask):
         else:
             results[name] = elementwise_loss[interval_mask].mean()
     return results
+
+
+class LDAMLoss(nn.Module):
+    def __init__(self, cls_num_list, max_m=0.5, weight=None, s=30, ignore_index=-100):
+        super(LDAMLoss, self).__init__()
+        # 排除padding类（第0类），只对有效类别计算margin
+        valid_cls_num_list = cls_num_list[1:]  # 排除第0类
+        m_list = 1.0 / np.sqrt(np.sqrt(valid_cls_num_list))
+        m_list = m_list * (max_m / np.max(m_list))
+        # 为padding类（第0类）设置margin为0
+        self.m_list = torch.zeros(len(cls_num_list), dtype=torch.float32)
+        self.m_list[1:] = torch.tensor(m_list, dtype=torch.float32)  # 第0类margin为0
+        self.s = s
+        self.weight = weight
+        self.ignore_index = ignore_index
+
+    def forward(self, x, target):
+        valid_mask = target != self.ignore_index
+        if not valid_mask.any():
+            return torch.tensor(0.0, device=x.device, requires_grad=True)
+
+        x_valid = x[valid_mask]
+        target_valid = target[valid_mask]
+
+        index = torch.zeros_like(x_valid, dtype=torch.bool)
+        index.scatter_(1, target_valid.view(-1, 1), True)
+
+        m_list = self.m_list.to(x.device)
+        batch_m = m_list[target_valid]  # shape: (N,)
+
+        x_m = x_valid.clone()
+        x_m[index] -= batch_m
+
+        return F.cross_entropy(self.s * x_m, target_valid, weight=self.weight)
+
+
+def check_grad_flow(
+    model: nn.Module,
+    loss_tensor: torch.Tensor,
+    verbose: bool = True,
+    retain_graph: bool = False,
+    backward_fn=None,
+):
+    """
+    检查模型的梯度传导是否正常。
+    Args:
+        model: nn.Module
+        loss_tensor: loss
+        verbose: 是否详细打印
+        retain_graph: 是否保留计算图
+        backward_fn: 自定义反向传播函数（如 fabric.backward）
+    """
+    print("=" * 60)
+    print("➡️ [检查开始] 反向传播中梯度传导情况...")
+
+    # 保存原始梯度状态
+    original_grads = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            original_grads[name] = param.grad.clone()
+
+    model.zero_grad()
+
+    try:
+        if backward_fn is not None:
+            backward_fn(loss_tensor, retain_graph=retain_graph)
+        else:
+            loss_tensor.backward(retain_graph=retain_graph)
+    except Exception as e:
+        print(f"[ERROR] 反向传播失败: {e}")
+        # 恢复原始梯度
+        for name, param in model.named_parameters():
+            if name in original_grads:
+                param.grad = original_grads[name]
+        return {"ok": [], "zero": [], "none": []}
+
+    no_grad_names = []
+    zero_grad_names = []
+    ok_grad_names = []
+
+    for name, param in model.named_parameters():
+        try:
+            if param.grad is None:
+                no_grad_names.append(name)
+                if verbose:
+                    print(f"[❌ NONE ] {name}: grad is None")
+            elif torch.all(param.grad == 0):
+                zero_grad_names.append(name)
+                if verbose:
+                    print(f"[⚠️ ZERO] {name}: grad == 0")
+            else:
+                ok_grad_names.append(name)
+                if verbose:
+                    print(
+                        f"[✅ OK  ] {name}: grad max={param.grad.abs().max():.4e}, min={param.grad.abs().min():.4e}"
+                    )
+        except Exception as e:
+            print(f"[ERROR] 检查参数 {name} 梯度时出错: {e}")
+            no_grad_names.append(name)
+
+    print("-" * 60)
+    print(f"✅ 有效梯度参数数：{len(ok_grad_names)}")
+    print(f"⚠️ 梯度为0的参数数：{len(zero_grad_names)}")
+    print(f"❌ grad is None 的参数数：{len(no_grad_names)}")
+    print("=" * 60)
+
+    # 恢复原始梯度
+    for name, param in model.named_parameters():
+        if name in original_grads:
+            param.grad = original_grads[name]
+
+    return {
+        "ok": ok_grad_names,
+        "zero": zero_grad_names,
+        "none": no_grad_names,
+    }
+
+
+def compute_M_from_y(y):
+    """
+    从 Gumbel Softmax 输出 y 计算门控矩阵 M
+    Args:
+        y: Gumbel Softmax 输出, shape: (batch, g, g, 3)
+    Returns:
+        M: 门控矩阵, shape: (batch, g, g)
+    """
+    return y[..., 0] * (-1) + y[..., 1] * 0 + y[..., 2] * (+1)
+
+
+def print_m_matrix(epoch, index, M):
+    print(f"\n=== Epoch {epoch}, Iteration {index}: M Matrix ===")
+    # 只打印第一个batch的第一个样本的M矩阵
+    M_sample = M[0].detach().cpu().numpy()
+    print(f"M matrix shape: {M_sample.shape}")
+
+    total_elements = M_sample.size
+    inhibition_count = np.sum(M_sample == -1)
+    no_relation_count = np.sum(M_sample == 0)
+    activation_count = np.sum(M_sample == 1)
+
+    print("M matrix distribution:")
+    print(
+        f"  Inhibition (-1): {inhibition_count} ({inhibition_count/total_elements*100:.1f}%)"
+    )
+    print(
+        f"  No relation (0): {no_relation_count} ({no_relation_count/total_elements*100:.1f}%)"
+    )
+    print(
+        f"  Activation (1): {activation_count} ({activation_count/total_elements*100:.1f}%)"
+    )
+    print("=" * 50)
+
+
+# 计算每个类别的TP, FP, FN
+def compute_classification_metrics(valid_preds, valid_labels, num_classes, device):
+    """
+    计算每个类别的TP, FP, FN, recall, precision, f1, macro_f1
+    返回: recall, precision, f1, macro_f1
+    注意：不计算bin0（即类别0）的指标
+    """
+    # True Positives (TP): 预测为i且真实为i
+    TP = torch.zeros(num_classes, dtype=torch.long, device=device)
+    for i in range(num_classes):
+        TP[i] = ((valid_preds == i) & (valid_labels == i)).sum()
+
+    # False Positives (FP): 预测为i但真实不是i
+    FP = torch.zeros(num_classes, dtype=torch.long, device=device)
+    for i in range(num_classes):
+        FP[i] = ((valid_preds == i) & (valid_labels != i)).sum()
+
+    # False Negatives (FN): 真实为i但预测不是i
+    FN = torch.zeros(num_classes, dtype=torch.long, device=device)
+    for i in range(num_classes):
+        FN[i] = ((valid_preds != i) & (valid_labels == i)).sum()
+
+    # Recall, Precision, F1
+    recall = torch.zeros(num_classes, dtype=torch.float, device=device)
+    precision = torch.zeros(num_classes, dtype=torch.float, device=device)
+    f1 = torch.zeros(num_classes, dtype=torch.float, device=device)
+    for i in range(num_classes):
+        recall[i] = (
+            TP[i].float() / (TP[i] + FN[i]).float()
+            if (TP[i] + FN[i]) > 0
+            else torch.tensor(0.0, device=device)
+        )
+        precision[i] = (
+            TP[i].float() / (TP[i] + FP[i]).float()
+            if (TP[i] + FP[i]) > 0
+            else torch.tensor(0.0, device=device)
+        )
+        if recall[i] + precision[i] > 0:
+            f1[i] = 2 * recall[i] * precision[i] / (recall[i] + precision[i])
+        else:
+            f1[i] = torch.tensor(0.0, device=device)
+    # 只计算bin1~num_classes-1的macro_f1
+    macro_f1 = f1[1:].mean().item()
+    average_recall = recall[1:].mean().item()
+    average_precision = precision[1:].mean().item()
+
+    return recall, precision, f1, macro_f1, average_recall, average_precision
+
+
+def get_l0_lambda(epoch, index, l0_warmup_start_epoch, l0_lambda_target, epoch_length):
+    """
+    计算l0 lambda，使用warmup策略
+    """
+    if epoch < l0_warmup_start_epoch:
+        return 0.0
+    elif epoch > l0_warmup_start_epoch:
+        return l0_lambda_target
+    else:
+        return calculate_l0_lambda_with_warmup_fine_grained(
+            index, l0_lambda_target, epoch_length
+        )
+
+
+def calculate_l0_lambda_with_warmup_fine_grained(index, l0_lambda_target, epoch_length):
+    """
+    计算当前的l0 lambda 按index在l0_warmup_start_epoch到l0_warmup_start_epoch + 1之间线性增加到l0_lambda_target
+    """
+    return l0_lambda_target * (index / epoch_length)
