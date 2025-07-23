@@ -25,7 +25,7 @@ def get_parse():
     return parser.parse_args()
 
 
-def getTargetDatasets(root_folder):
+def get_target_datasets(root_folder):
     """
     Find the dataset that is suitable for DeepSC project
     """
@@ -206,5 +206,5 @@ def anndata_generate(target_datasets):
 
 if __name__ == "__main__":
     args = get_parse()
-    target_datasets = getTargetDatasets(args.dataset_root_path)
+    target_datasets = get_target_datasets(args.dataset_root_path)
     anndata_generate(target_datasets)

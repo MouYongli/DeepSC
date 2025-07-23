@@ -30,10 +30,11 @@ class DataCollator:
             special tokens have been added to the beginning of the sequence.
             Default to 1.
         gene_from_zero (:obj:`bool`): whether to add 1 to gene tokens and set pad_token_id to 0.
+        dynamic_mask_probabilities (:obj:`dict`, optional): dictionary containing mask probabilities for each bin.
+            If provided, will override the default hardcoded probabilities.
     """
 
     num_bins: int
-    do_hard_mask: bool
     pad_token_id: int = 0
     pad_value: int = 0
     num_genes: int = 34682
@@ -45,6 +46,7 @@ class DataCollator:
     sampling: bool = True
     keep_first_n_tokens: int = 1
     gene_from_zero: bool = True
+    dynamic_mask_probabilities: Optional[dict] = None
 
     def __post_init__(self):
         self.cls_token_id = self.num_genes + 1
@@ -63,6 +65,17 @@ class DataCollator:
                 "`keep_first_n_tokens` must be between 0 and `max_length` "
                 f"({self.max_length})."
             )
+
+        # 验证dynamic_mask_probabilities
+        if self.dynamic_mask_probabilities is not None:
+            for bin_idx in range(1, self.num_bins + 1):
+                if bin_idx not in self.dynamic_mask_probabilities:
+                    raise ValueError(f"Missing mask probability for bin {bin_idx}")
+                prob = self.dynamic_mask_probabilities[bin_idx]
+                if not (0 <= prob <= 1):
+                    raise ValueError(
+                        f"Invalid mask probability {prob} for bin {bin_idx}"
+                    )
 
     def __call__(
         self, examples: List[Dict[str, torch.Tensor]]
@@ -185,11 +198,18 @@ class DataCollator:
         """
         device = expressions.device
         shape = expressions.shape
-        if self.do_hard_mask:
-            probability_matrix = torch.full(shape, self.mlm_probability)
+        if self.dynamic_mask_probabilities is None:
+            probability_matrix = torch.full(
+                shape, self.mlm_probability, dtype=torch.float
+            )
         else:
-            bin_x = expressions.float()
-            probability_matrix = self.mlm_probability * (0.2 + ((bin_x - 1) ** 2) / 6.3)
+            probability_matrix = torch.zeros(shape, dtype=torch.float, device=device)
+            for bin_idx in range(1, self.num_bins + 1):
+                if bin_idx in self.dynamic_mask_probabilities:
+                    probability_matrix[expressions == bin_idx] = (
+                        self.dynamic_mask_probabilities[bin_idx]
+                    )
+
         # set padded postion probability to 0
         probability_matrix[expressions.eq(self.pad_value)] = 0
         if self.keep_first_n_tokens > 0:
@@ -368,15 +388,15 @@ class DataCollator:
         bin_indices = torch.zeros_like(expr, dtype=torch.long)
 
         # bin1: 小于3
-        mask_bin1 = expr < 3
+        mask_bin1 = expr <= 2
         bin_indices[mask_bin1] = 1
 
         # bin2: 大于等于3且小于6.7
-        mask_bin2 = (expr >= 3) & (expr < 6.7)
+        mask_bin2 = (expr > 2) & (expr < 5.5)
         bin_indices[mask_bin2] = 2
 
         # bin3: 大于等于6.7
-        mask_bin3 = expr >= 6.7
+        mask_bin3 = expr >= 5.5
         bin_indices[mask_bin3] = 3
 
         return bin_indices

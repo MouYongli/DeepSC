@@ -1,3 +1,2 @@
 _target_: deepsc.data.dataset.GeneExpressionDataset
 num_bin: ${num_bin}
-coo_tensor: ???
