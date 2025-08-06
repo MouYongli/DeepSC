@@ -199,3 +199,4 @@ tests/test_dummy.py
 .logs/
 logs/
 test_checkpoints/
+data/
