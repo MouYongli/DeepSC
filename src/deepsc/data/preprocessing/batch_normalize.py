@@ -12,7 +12,7 @@ def normalize_tensor_no_scale(csr):
     valid_cells = np.diff(csr.indptr) >= 200
     csr = csr[valid_cells]
     print(f"Valid cells: {valid_cells.sum()}")
-    csr.data = np.log2(1 + csr.data)
+    csr.data = np.log1p(csr.data)
     print(f"Normalized data: {csr.data}")
     return csr
 
