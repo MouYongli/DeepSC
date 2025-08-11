@@ -202,6 +202,7 @@ def save_checkpoint(
     iteration=None,
     fabric=None,
     losses=None,
+    chunk_idx=0,
 ):
     """
     Unified checkpoint saving function that works with or without Fabric.
@@ -237,13 +238,18 @@ def save_checkpoint(
     if fabric is not None:
         # Fabric mode - use fabric.save()
         state = {
-            "model": model,
+            "model": (
+                model.module.state_dict()
+                if hasattr(model, "module")
+                else model.state_dict()
+            ),
             "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "epoch": epoch,
             "iteration": iteration,
             "wandb_run_id": wandb_run_id,
             "wandb_config": wandb_config,
+            "chunk_idx": chunk_idx,  # 保存chunk索引
         }
 
         # Save latest checkpoint
@@ -257,36 +263,6 @@ def save_checkpoint(
         else:
             filename = f"{model_name}_{epoch}.ckpt"
         fabric.save(os.path.join(ckpt_folder, filename), state)
-
-    else:
-        # Standard PyTorch mode
-        state = {
-            "epoch": epoch,
-            "model_state_dict": (
-                model.module.state_dict()
-                if hasattr(model, "module")
-                else model.state_dict()
-            ),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "iteration": iteration,
-            "wandb_run_id": wandb_run_id,
-            "wandb_config": wandb_config,
-        }
-
-        if losses is not None:
-            state["losses"] = losses
-
-        # Save latest checkpoint
-        latest_path = os.path.join(ckpt_folder, "latest_checkpoint.pth")
-        torch.save(state, latest_path)
-
-        # Save numbered checkpoint
-        if iteration is not None:
-            filename = f"{model_name}_{epoch}_{iteration}.pth"
-        else:
-            filename = f"{model_name}_{epoch}.pth"
-        torch.save(state, os.path.join(ckpt_folder, filename))
 
 
 # Backward compatibility functions
@@ -312,7 +288,15 @@ def save_ckpt(
 
 
 def save_ckpt_fabric(
-    epoch, model, optimizer, scheduler, model_name, ckpt_folder, fabric, iteration=None
+    epoch,
+    model,
+    optimizer,
+    scheduler,
+    model_name,
+    ckpt_folder,
+    fabric,
+    iteration=None,
+    chunk_idx=0,
 ):
     """Deprecated: Use save_checkpoint instead."""
     import warnings
@@ -330,6 +314,7 @@ def save_ckpt_fabric(
         ckpt_folder,
         iteration=iteration,
         fabric=fabric,
+        chunk_idx=chunk_idx,  # 保存chunk索引
     )
 
 

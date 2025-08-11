@@ -30,7 +30,7 @@ l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epo
 enable_l0_warmup: False
 l0_lambda: 0.1
 # 数据增强相关
-enable_data_augmentation: False  # 是否启用数据增强（动态掩码概率）
+enable_data_augmentation: True  # 是否启用数据增强（动态掩码概率）
 
 # 分类任务
 # 最多只能打开一个开关
@@ -55,19 +55,20 @@ use_exp_regression_loss: False
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/npz_data_after_shuffel"
+data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_shuffeled_dataset"
+data_length: 5000
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
 num_device: 3
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
-valid_every: 3000
+valid_every: 200
 model_name: "DeepSC_heart9_blood_others_blood"
 grad_acc: 20
 learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
-save_ckpt_every: 5000
+save_ckpt_every: 200
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
@@ -83,7 +84,7 @@ use_scbert_scheduler: True
 use_mogaide_scheduler: False
 
 # 新增checkpoint相关参数
-resume_last_training: False
+resume_last_training: True
 
 # 梯度检查相关参数
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用

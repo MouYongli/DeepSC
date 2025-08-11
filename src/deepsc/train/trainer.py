@@ -56,6 +56,13 @@ def timeit(func):
 
 class Trainer:
     def __init__(self, args, fabric, model):
+        self.number_of_files = len(
+            [
+                f
+                for f in os.listdir(args.data_path)
+                if os.path.isfile(os.path.join(args.data_path, f))
+            ]
+        )
         self.log_each = False
         self.args = args
         self.fabric = fabric
@@ -63,13 +70,12 @@ class Trainer:
         self.epoch = 1  # 添加epoch类变量
         self.epoch_length = 0
         self.iteration = 0
+        self.last_iteration = 0
+        self.last_chunk_idx = 0  # 用于记录上次处理的chunk索引
         seed_all(args.seed + self.fabric.global_rank)
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
-        # ------- 改造开始：延迟加载数据，支持分块训练 -------
-        # 不在 __init__ 里一次性把整个目录拼成一个大 CSR
-        # 而是在 train() 里按 “文件分块” 动态加载与训练
         self.data_is_directory = os.path.isdir(self.args.data_path)
         self.all_files = None  # 目录下的全部 .npz 文件清单
         self.file_chunks = None  # 按 chunk_size 切分后的文件子集列表
@@ -83,6 +89,8 @@ class Trainer:
             self.mse_loss_weight = 0.0
         else:
             self.mse_loss_weight = self.args.target_mse_loss_weight
+        self.prepare_model()
+        self.scheduler = self.create_scheduler(self.optimizer, self.args)
 
     # def load_all_csr_from_folder(self, datapath):
     #     """
@@ -284,9 +292,12 @@ class Trainer:
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
-    def create_scheduler(self, optimizer, args, train_loader):
+    def create_scheduler(self, optimizer, args):
 
-        total_steps = args.epoch * math.ceil(len(train_loader) / args.grad_acc)
+        total_steps = args.epoch * math.ceil(
+            (self.number_of_files * args.data_length)
+            / (args.batch_size * self.world_size * args.grad_acc)
+        )
         warmup_ratio = self.args.warmup_ratio
         warmup_steps = math.ceil(total_steps * warmup_ratio)
         main_steps = total_steps - warmup_steps
@@ -434,11 +445,6 @@ class Trainer:
         self.softmax_total_count = 0
         self.log_each = True
         self.model.eval()
-        print("the loss weights are:")
-        print("ce_loss_weight:")
-        print(self.args.ce_loss_weight)
-        print("mse_loss_weight:")
-        print(self.mse_loss_weight)
         predictions, truths = [], []
         all_expr_embs = []
         all_masked_preds = []  # 新增：收集所有masked预测
@@ -676,24 +682,39 @@ class Trainer:
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.epoch = epoch  # 更新类变量epoch
             self._prepare_file_plan()
+            # 确定本epoch从哪个chunk开始（仅当从checkpoint恢复且仍在同一epoch时跳过已完成的chunk）
+            start_chunk_idx = (
+                self.last_chunk_idx if epoch == getattr(self, "last_epoch", 1) else 0
+            )
             # 标记：scheduler 是否已创建；class_count 是否已计算
-            created_scheduler = hasattr(self, "scheduler") and (
-                self.scheduler is not None
-            )  # 这里还没加上scheduler，不知道什么时候初始化
             did_compute_class_counts = self.class_counts is not None
-            self.iteration = 0
-            for chunk_idx, files_subset in enumerate(
-                self.file_chunks, start=1
-            ):  # start = 1是chunk_idx从1开始, 看看后面会怎么用到
+            chunk_total = len(self.file_chunks)
+            chunk_bar = tqdm(
+                total=chunk_total,
+                initial=start_chunk_idx,  # 立刻显示，并把进度拨到恢复点
+                desc="Chunks",
+                position=0,
+                leave=True,
+                dynamic_ncols=True,
+                disable=not self.is_master,  # 只在master上画
+            )
+            if start_chunk_idx > 0:
+                chunk_bar.update(start_chunk_idx)
+            for chunk_idx, files_subset in enumerate(self.file_chunks):
+                if chunk_idx < start_chunk_idx:
+                    # 跳过已完成的 chunk
+                    print(f"Skipping chunk {chunk_idx} (already processed)")
+                    logging.info("Skipping chunk %d (already processed)", chunk_idx)
+                    continue
+                self.current_chunk_idx = chunk_idx  # 更新当前处理的chunk索引
                 self._build_datasets_from_files(files_subset)
-
                 if not did_compute_class_counts and (
                     self.args.enable_data_augmentation
                     or self.args.use_ldam_loss
                     or self.args.enable_alternating_ldam_mean_ce_loss
                     or self.args.enable_warm_alternating_ldam_mean_ce_loss
                 ):
-                    self.classcounts = self.calculate_class_counts()
+                    self.class_counts = self.calculate_class_counts()
                     self.init_loss_fn()
                     self.dynamic_mask_probabilities = (
                         self.calculate_dynamic_mask_probabilities()
@@ -705,13 +726,6 @@ class Trainer:
                     self.init_loss_fn()
                     did_compute_class_counts = True
                 self.load_data()
-
-                if not created_scheduler:
-                    self.prepare_model()
-                    self.scheduler = self.create_scheduler(
-                        self.optimizer, self.args, self.train_loader
-                    )
-                    created_scheduler = True
                 self.epoch_length = len(
                     self.train_loader
                 )  # epoch的长度，我不确定这样对不对。。。
@@ -720,7 +734,10 @@ class Trainer:
                 data_iter = self.train_loader
                 if self.is_master:
                     data_iter = tqdm(
-                        self.train_loader, desc=f"Epoch {epoch} [train]", ncols=300
+                        self.train_loader,
+                        desc=f"Epoch {epoch} [train] {self.current_chunk_idx}/{chunk_total} Chunks",
+                        ncols=300,
+                        position=1,
                     )
 
                 accm_loss, accm_ce_loss, accm_l0_loss, accm_mse_loss = [], [], [], []
@@ -729,7 +746,9 @@ class Trainer:
                 accm_interval_mse = {k: [] for k in interval_mse}
                 average_loss = 0.0
 
-                for index, data in enumerate(data_iter, start=1):
+                for index, data in enumerate(data_iter):
+                    if index < self.last_iteration:
+                        continue
                     self.iteration = index
                     loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y = (
                         self._process_batch(data)
@@ -890,10 +909,10 @@ class Trainer:
                         accm_mse_loss.clear()
                         accm_per_bin_acc.clear()
                         accm_total_acc.clear()
-                    if index % self.args.valid_every == 0:
+                    if index != 0 and index % self.args.valid_every == 0:
                         self.validate(epoch, index)
                         self.model.train()
-                    if index % self.args.save_ckpt_every == 0:
+                    if index != 0 and index % self.args.save_ckpt_every == 0:
                         save_ckpt_fabric(
                             epoch,
                             self.model,
@@ -902,10 +921,28 @@ class Trainer:
                             self.args.model_name,
                             self.args.ckpt_dir,
                             self.fabric,
-                            iteration=index,
+                            iteration=index + 1,
+                            chunk_idx=self.current_chunk_idx,
                         )
+                    self.last_iteration = 0
+                chunk_bar.update(1)
+                self.validate(epoch, index)
+                self.model.train()
+                save_ckpt_fabric(
+                    epoch,
+                    self.model,
+                    self.optimizer,
+                    getattr(self, "scheduler", None),
+                    self.args.model_name,
+                    self.args.ckpt_dir,
+                    self.fabric,
+                    iteration=0,
+                    chunk_idx=self.current_chunk_idx + 1,
+                )
                 # at the end of each epoch, reset the iteration
                 self.iteration = 0
+            chunk_bar.close()
+            self.last_chunk_idx = 0
             self.validate(epoch)
             self.log_each = False
             save_ckpt_fabric(
@@ -917,6 +954,7 @@ class Trainer:
                 self.args.ckpt_dir,
                 self.fabric,
                 iteration=0,  # 重置迭代计数器
+                chunk_idx=0,  # 重置chunk索引
             )
 
     def calculate_per_bin_ce_loss(self, logits, discrete_expr_label, ignore_index=-100):
@@ -1053,23 +1091,32 @@ class Trainer:
                 print(f"[WARN] 未找到检查点 {ckpt_file}")
             return False
 
-        # 只传可 in-place 恢复的对象
-        state = {
-            "model": self.model,
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-        }
-        remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
+        # 直接读取 state dict
+        remainder = self.fabric.load(ckpt_file)
 
+        # 恢复模型、优化器、调度器的参数
+        if "model" in remainder:
+            self.model.load_state_dict(remainder["model"])
+        if "optimizer" in remainder and self.optimizer is not None:
+            self.optimizer.load_state_dict(remainder["optimizer"])
+        if (
+            "scheduler" in remainder
+            and self.scheduler is not None
+            and remainder["scheduler"] is not None
+        ):
+            self.scheduler.load_state_dict(remainder["scheduler"])
+
+        # 恢复计数器
         if self.args.resume_last_training:
-            # 手动恢复不可变计数器
-            self.iteration = remainder.get("iteration", 1)
+            self.last_iteration = remainder.get("iteration", 0)
             self.last_epoch = remainder.get("epoch", 1)
+            self.last_chunk_idx = remainder.get("chunk_idx", 0)
         else:
-            self.iteration = 1
+            self.last_iteration = 0
             self.last_epoch = 1
+            self.last_chunk_idx = 0
 
-        # 在master进程中处理wandb初始化
+        # 恢复 wandb 会话
         if self.is_master:
             saved_run_id = remainder.get("wandb_run_id", None)
             saved_wandb_config = remainder.get("wandb_config", None)
@@ -1077,8 +1124,6 @@ class Trainer:
             if saved_run_id:
                 print(f"[INFO] 找到保存的wandb run_id: {saved_run_id}")
                 print("[INFO] 使用原始run_id恢复wandb会话...")
-
-                # 使用保存的配置，如果没有则使用当前配置
                 if saved_wandb_config:
                     wandb.init(
                         id=saved_run_id,
@@ -1097,7 +1142,6 @@ class Trainer:
                         config=saved_wandb_config.get("config", dict(self.args)),
                     )
                 else:
-                    # 如果没有保存wandb配置，使用当前配置
                     wandb.init(
                         id=saved_run_id,
                         resume="allow",
@@ -1107,7 +1151,6 @@ class Trainer:
                         tags=self.args.tags,
                         config=dict(self.args),
                     )
-
                 print(f"[INFO] 已恢复wandb会话，run_id: {wandb.run.id}")
                 print(f"[INFO] 项目: {wandb.run.project}, 名称: {wandb.run.name}")
             else:
@@ -1115,8 +1158,7 @@ class Trainer:
 
         if self.is_master:
             print(
-                f"[INFO] 成功恢复到 epoch={self.last_epoch}, iter={self.iteration} "
-                f"from {ckpt_file}"
+                f"[INFO] reload epoch={self.last_epoch}, chunk={self.last_chunk_idx}, iter={self.last_iteration}"
             )
         return True
 
