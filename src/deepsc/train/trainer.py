@@ -56,6 +56,13 @@ def timeit(func):
 
 class Trainer:
     def __init__(self, args, fabric, model):
+        self.number_of_files = len(
+            [
+                f
+                for f in os.listdir(args.data_path)
+                if os.path.isfile(os.path.join(args.data_path, f))
+            ]
+        )
         self.log_each = False
         self.args = args
         self.fabric = fabric
@@ -63,45 +70,116 @@ class Trainer:
         self.epoch = 1  # 添加epoch类变量
         self.epoch_length = 0
         self.iteration = 0
+        self.last_iteration = 0
+        self.last_chunk_idx = 0  # 用于记录上次处理的chunk索引
         seed_all(args.seed + self.fabric.global_rank)
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
-        self.init_dataset_and_sampler()
-        # 预先计算class_counts，避免重复计算
-        if (
-            self.args.enable_data_augmentation
-            or self.args.use_ldam_loss
-            or self.args.enable_alternating_ldam_mean_ce_loss
-            or self.args.enable_warm_alternating_ldam_mean_ce_loss
-        ):
-            self.class_counts = self.calculate_class_counts()
-        else:
-            self.class_counts = None
-
-        self.load_data()
-        self.init_loss_fn()
-        self.prepare_model()
+        self.data_is_directory = os.path.isdir(self.args.data_path)
+        self.all_files = None  # 目录下的全部 .npz 文件清单
+        self.file_chunks = None  # 按 chunk_size 切分后的文件子集列表
+        self.chunk_size = getattr(self.args, "chunk_size", 4)  # 每次训练处理的文件数
+        self.shuffle_files_each_epoch = getattr(
+            self.args, "shuffle_files_each_epoch", True
+        )
+        self.class_counts = None
+        self.dynamic_mask_probabilities = None
         if self.args.adaptive_mse_weight:
             self.mse_loss_weight = 0.0
         else:
             self.mse_loss_weight = self.args.target_mse_loss_weight
+        self.prepare_model()
+        self.scheduler = self.create_scheduler(self.optimizer, self.args)
 
-    def load_all_csr_from_folder(self, datapath):
-        """
-        加载文件夹内所有.npz文件，并拼接为一个csr_matrix
-        """
+    # def load_all_csr_from_folder(self, datapath):
+    #     """
+    #     加载文件夹内所有.npz文件，并拼接为一个csr_matrix
+    #     """
+    #     import scipy.sparse
+
+    #     matrices = []
+    #     for file in os.listdir(datapath):
+    #         if file.endswith(".npz"):
+    #             path = os.path.join(datapath, file)
+    #             matrix = scipy.sparse.load_npz(path)
+    #             matrices.append(matrix)
+    #     if not matrices:
+    #         raise ValueError(f"No .npz files found in {datapath}")
+    #     return scipy.sparse.vstack(matrices)
+    def _load_all_csr_from_files(self, files):
         import scipy.sparse
 
         matrices = []
-        for file in os.listdir(datapath):
-            if file.endswith(".npz"):
-                path = os.path.join(datapath, file)
-                matrix = scipy.sparse.load_npz(path)
-                matrices.append(matrix)
+        for file in files:
+            m = scipy.sparse.load_npz(file)
+            print(f"Loaded {file} with shape {m.shape}")
+            matrices.append(m)
         if not matrices:
-            raise ValueError(f"No .npz files found in {datapath}")
+            raise ValueError(f"No .npz files found in {files}")
         return scipy.sparse.vstack(matrices)
+
+    def _build_datasets_from_files(self, files_subset):
+        import scipy.sparse
+
+        from deepsc.data.dataset import GeneExpressionDatasetNew
+
+        if isinstance(files_subset, (str, os.PathLike)):
+            files_subset = [str(files_subset)]
+        files_subset = list(files_subset)
+
+        if len(files_subset) == 1 and not self.data_is_directory:
+            # 单文件路径：兼容旧逻辑
+            csr_matrix = scipy.sparse.load_npz(files_subset[0])
+        else:
+            csr_matrix = self._load_all_csr_from_files(files_subset)
+        row_indices = np.arange(csr_matrix.shape[0])
+        print(
+            f"Loaded CSR matrix with shape {csr_matrix.shape} from {len(files_subset)} files."
+        )
+        train_idx, val_idx = train_test_split(
+            row_indices, test_size=0.05, random_state=self.args.seed
+        )
+        train_csr = csr_matrix[train_idx]
+        val_csr = csr_matrix[val_idx]
+        self.train_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=train_csr)
+        self.val_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=val_csr)
+        self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
+        self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
+        # 计算动态掩码概率（使用已缓存的class_counts）
+
+    def _prepare_file_plan(self):
+        """当 data_path 是目录时，准备全量文件清单并按 chunk 顺序切分（不打乱，便于从checkpoint恢复）。"""
+        if not self.data_is_directory:
+            # 单文件：一个 chunk
+            self.all_files = [self.args.data_path]
+            self.file_chunks = [self.all_files]
+            return
+
+        # 收集全部 .npz
+        all_files = []
+        for fn in os.listdir(self.args.data_path):
+            if fn.endswith(".npz"):
+                all_files.append(os.path.join(self.args.data_path, fn))
+        if not all_files:
+            raise ValueError(f"No .npz files found in directory: {self.args.data_path}")
+
+        # —— 关键：稳定的确定性顺序 —— #
+        # 为避免不同平台/文件系统返回顺序差异，这里做“自然排序”，保证 file_2 在 file_10 之前
+        import re
+
+        def _nat_key(s: str):
+            return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+        all_files = sorted(all_files, key=_nat_key)
+
+        # 顺序切分为连续 chunk
+        chunks = []
+        for i in range(0, len(all_files), self.chunk_size):
+            chunks.append(all_files[i : i + self.chunk_size])
+
+        self.all_files = all_files
+        self.file_chunks = chunks
 
     def init_dataset_and_sampler(self):
         # 支持单个.npz文件或目录
@@ -130,10 +208,7 @@ class Trainer:
 
     @timeit
     def load_data(self):
-        if self.args.enable_data_augmentation:
-            dynamic_mask_probabilities = self.calculate_dynamic_mask_probabilities()
-        else:
-            dynamic_mask_probabilities = None
+        dynamic_mask_probabilities = self.dynamic_mask_probabilities
         print("Dynamic mask probabilities in train:")
         print(dynamic_mask_probabilities)
         train_loader = DataLoader(
@@ -213,17 +288,16 @@ class Trainer:
 
     def prepare_model(self):
         args = self.args
-        # 是否应该让optimizer, lossfunction, scheduler customizable?
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
         self.softmax = nn.Softmax(dim=-1)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
-        self.scheduler = self.create_scheduler(
-            self.optimizer, self.args, self.train_loader
+
+    def create_scheduler(self, optimizer, args):
+
+        total_steps = args.epoch * math.ceil(
+            (self.number_of_files * args.data_length)
+            / (args.batch_size * self.world_size * args.grad_acc)
         )
-
-    def create_scheduler(self, optimizer, args, train_loader):
-
-        total_steps = args.epoch * math.ceil(len(train_loader) / args.grad_acc)
         warmup_ratio = self.args.warmup_ratio
         warmup_steps = math.ceil(total_steps * warmup_ratio)
         main_steps = total_steps - warmup_steps
@@ -371,11 +445,6 @@ class Trainer:
         self.softmax_total_count = 0
         self.log_each = True
         self.model.eval()
-        print("the loss weights are:")
-        print("ce_loss_weight:")
-        print(self.args.ce_loss_weight)
-        print("mse_loss_weight:")
-        print(self.mse_loss_weight)
         predictions, truths = [], []
         all_expr_embs = []
         all_masked_preds = []  # 新增：收集所有masked预测
@@ -576,7 +645,7 @@ class Trainer:
             print(f"  Bin {i}: {p.item():.4f}")
         del self.softmax_prob_sum
         del self.softmax_total_count
-        
+
         # 清理内存
         if all_expr_embs is not None:
             del all_expr_embs
@@ -606,198 +675,274 @@ class Trainer:
             self.checkpoint_reload()
 
         self.log_each = False
-        #if self.args.model_name == "DeepSC":
-            #self.model = torch.compile(self.model)
+        # if self.args.model_name == "DeepSC":
+        # self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
-        self.epoch_length = len(self.train_loader)
+        self.epoch_length = 0
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.epoch = epoch  # 更新类变量epoch
-            self.train_loader.sampler.set_epoch(epoch)
-            self.model.train()
-            data_iter = self.train_loader
-            if self.is_master:
-                data_iter = tqdm(
-                    self.train_loader, desc=f"Epoch {epoch} [train]", ncols=300
-                )
-
-            accm_loss = []
-            accm_ce_loss = []
-            accm_l0_loss = []
-            accm_mse_loss = []
-            accm_per_bin_acc = []
-            accm_total_acc = []
-            interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
-            accm_interval_mse = {k: [] for k in interval_mse}
-            average_loss = 0.0
-
-            for index, data in enumerate(data_iter, start=1):
-                if epoch == start_epoch and index < getattr(self, "iteration", 1):
+            self._prepare_file_plan()
+            # 确定本epoch从哪个chunk开始（仅当从checkpoint恢复且仍在同一epoch时跳过已完成的chunk）
+            start_chunk_idx = (
+                self.last_chunk_idx if epoch == getattr(self, "last_epoch", 1) else 0
+            )
+            # 标记：scheduler 是否已创建；class_count 是否已计算
+            did_compute_class_counts = self.class_counts is not None
+            chunk_total = len(self.file_chunks)
+            chunk_bar = tqdm(
+                total=chunk_total,
+                initial=start_chunk_idx,  # 立刻显示，并把进度拨到恢复点
+                desc="Chunks",
+                position=0,
+                leave=True,
+                dynamic_ncols=True,
+                disable=not self.is_master,  # 只在master上画
+            )
+            if start_chunk_idx > 0:
+                chunk_bar.update(start_chunk_idx)
+            for chunk_idx, files_subset in enumerate(self.file_chunks):
+                if chunk_idx < start_chunk_idx:
+                    # 跳过已完成的 chunk
+                    print(f"Skipping chunk {chunk_idx} (already processed)")
+                    logging.info("Skipping chunk %d (already processed)", chunk_idx)
                     continue
-                self.iteration = index
-                loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y = (
-                    self._process_batch(data)
-                )
-
-                # 每10个iteration打印M矩阵
-                if (
-                    self.is_master
-                    and index % self.args.log_m_matrix_every == 0
-                    and y is not None
+                self.current_chunk_idx = chunk_idx  # 更新当前处理的chunk索引
+                self._build_datasets_from_files(files_subset)
+                if not did_compute_class_counts and (
+                    self.args.enable_data_augmentation
+                    or self.args.use_ldam_loss
+                    or self.args.enable_alternating_ldam_mean_ce_loss
+                    or self.args.enable_warm_alternating_ldam_mean_ce_loss
                 ):
-                    M = compute_M_from_y(y)
-                    print_m_matrix(epoch, index, M)
-
-                discrete_expr_label = data["discrete_expr_label"]
-                if interval_mse is None:
-                    interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
-                per_bin_accuracy = self._calculate_per_bin_accuracy(
-                    final, discrete_expr_label, self.args.model.num_bins
-                )
-                self.accumulate_or_log_classification_metrics(
-                    final, discrete_expr_label
-                )
-                total_acc = self._calculate_accuracy(final, discrete_expr_label)
-                accm_loss.append(loss.item())
-                accm_ce_loss.append(ce_loss.item())
-                accm_l0_loss.append(l0_loss.item())
-                accm_mse_loss.append(mse_loss.item())
-                accm_per_bin_acc.append(per_bin_accuracy)
-                accm_total_acc.append(total_acc)
-                # 新增：累加区间 MSE
-                if index == 1:
-                    accm_interval_mse = {k: [] for k in interval_mse}
-                for k in interval_mse:
-                    accm_interval_mse[k].append(float(interval_mse[k]))
-
-                is_accumulating = index % self.args.grad_acc != 0
-                if is_accumulating:
-                    with self.fabric.no_backward_sync(
-                        self.model, enabled=is_accumulating
-                    ):
-                        self.fabric.backward(loss / self.args.grad_acc)
-                else:
-                    # 梯度检查（可选，通过配置控制）
-                    if self.args.adaptive_mse_weight:
-                        self.calculate_adaptive_mse_weight()
-                    # 这玩意似乎没用，cursor瞎加的，改天再试试
-                    # # 添加温度退火
-                    # if hasattr(self.model, 'anneal_temperature'):
-                    #     self.model.anneal_temperature(epoch, self.args.num_epochs)
-                    if (
-                        hasattr(self.args, "check_grad_flow")
-                        and self.args.check_grad_flow
-                        and index % 100 == 0
-                    ):
-                        print(f"\n[梯度检查] Epoch {epoch}, Iteration {index}")
-                        try:
-                            grad_stats = check_grad_flow(
-                                self.model,
-                                loss / self.args.grad_acc,
-                                verbose=True,
-                                retain_graph=True,
-                                backward_fn=self.fabric.backward,
-                            )
-                            if self.is_master:
-                                wandb.log(
-                                    {
-                                        "grad_check/ok_params": len(grad_stats["ok"]),
-                                        "grad_check/zero_params": len(
-                                            grad_stats["zero"]
-                                        ),
-                                        "grad_check/none_params": len(
-                                            grad_stats["none"]
-                                        ),
-                                    }
-                                )
-                        except Exception as e:
-                            print(f"[WARNING] 梯度检查失败: {e}")
-                            if self.is_master:
-                                wandb.log(
-                                    {
-                                        "grad_check/error": 1,
-                                    }
-                                )
-
-                    self.fabric.backward(loss / self.args.grad_acc)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
-                    self.optimizer.step()
-                    self.scheduler.step()  # 每次optimizer.step()后更新学习率
-                    self.optimizer.zero_grad()
-
-                    average_loss = sum(accm_loss) / len(accm_loss)
-                    average_ce_loss = sum(accm_ce_loss) / len(accm_ce_loss)
-                    average_l0_loss = sum(accm_l0_loss) / len(accm_l0_loss)
-                    average_mse_loss = sum(accm_mse_loss) / len(accm_mse_loss)
-                    average_per_bin_acc = sum(accm_per_bin_acc) / len(accm_per_bin_acc)
-                    average_total_acc = sum(accm_total_acc) / len(accm_total_acc)
-                    if self.is_master:
-                        num_bins = self.args.model.num_bins
-                        pred_dist_str = self.get_top_bins_distribution_str(
-                            final, discrete_expr_label, num_bins, topk=5
-                        )
-                        # 新增：区间 MSE 展示
-                        interval_mse_str = ", ".join(
-                            [
-                                f"{k}:{sum(accm_interval_mse[k])/len(accm_interval_mse[k]):.4f}"
-                                for k in accm_interval_mse
-                            ]
-                        )
-                        data_iter.set_postfix(
-                            loss=average_loss,
-                            mse_loss=average_mse_loss,
-                            total_acc=average_total_acc,
-                            per_bin_acc=average_per_bin_acc,
-                            ce_loss=average_ce_loss,
-                            l0_loss=average_l0_loss,
-                            pred_dist=pred_dist_str,
-                            interval_mse=interval_mse_str,
-                        )
-                        wandb.log(
-                            {
-                                "train/loss": average_loss,
-                                "train/mse_loss": average_mse_loss,
-                                "train/per_bin_acc": average_per_bin_acc,
-                                "train/total_acc": average_total_acc,
-                                "train/ce_loss": average_ce_loss,
-                                "train/l0_loss": average_l0_loss,
-                                "TrainRegressionMetrics/interval_mse_5to7": sum(
-                                    accm_interval_mse["5to7"]
-                                )
-                                / len(accm_interval_mse["5to7"]),
-                                "TrainRegressionMetrics/interval_mse_ge7": sum(
-                                    accm_interval_mse["ge7"]
-                                )
-                                / len(accm_interval_mse["ge7"]),
-                                "TrainLossWeight/ce_loss_weight": self.args.ce_loss_weight,
-                                "TrainLossWeight/mse_loss_weight": self.mse_loss_weight,
-                                "epoch": epoch,
-                                "iteration": index,
-                                "learning_rate": self.optimizer.param_groups[0]["lr"],
-                            }
-                        )
-
-                    accm_loss.clear()
-                    accm_ce_loss.clear()
-                    accm_l0_loss.clear()
-                    accm_mse_loss.clear()
-                    accm_per_bin_acc.clear()
-                    accm_total_acc.clear()
-                if index % self.args.valid_every == 0:
-                    self.validate(epoch, index)
-                    self.model.train()
-                if index % self.args.save_ckpt_every == 0:
-                    save_ckpt_fabric(
-                        epoch,
-                        self.model,
-                        self.optimizer,
-                        self.scheduler,
-                        self.args.model_name,
-                        self.args.ckpt_dir,
-                        self.fabric,
-                        iteration=index,
+                    self.class_counts = self.calculate_class_counts()
+                    self.init_loss_fn()
+                    self.dynamic_mask_probabilities = (
+                        self.calculate_dynamic_mask_probabilities()
+                        if self.args.enable_data_augmentation
+                        else None
                     )
-            # at the end of each epoch, reset the iteration
-            self.iteration = 0
+                    did_compute_class_counts = True
+                elif not did_compute_class_counts:
+                    self.init_loss_fn()
+                    did_compute_class_counts = True
+                self.load_data()
+                self.epoch_length = len(
+                    self.train_loader
+                )  # epoch的长度，我不确定这样对不对。。。
+                self.train_loader.sampler.set_epoch(epoch)
+                self.model.train()
+                data_iter = self.train_loader
+                if self.is_master:
+                    data_iter = tqdm(
+                        self.train_loader,
+                        desc=f"Epoch {epoch} [train] {self.current_chunk_idx}/{chunk_total} Chunks",
+                        ncols=300,
+                        position=1,
+                    )
+
+                accm_loss, accm_ce_loss, accm_l0_loss, accm_mse_loss = [], [], [], []
+                accm_per_bin_acc, accm_total_acc = [], []
+                interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
+                accm_interval_mse = {k: [] for k in interval_mse}
+                average_loss = 0.0
+
+                for index, data in enumerate(data_iter):
+                    if index < self.last_iteration:
+                        continue
+                    self.iteration = index
+                    loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y = (
+                        self._process_batch(data)
+                    )
+
+                    # 每10个iteration打印M矩阵
+                    if (
+                        self.is_master
+                        and index % self.args.log_m_matrix_every == 0
+                        and y is not None
+                    ):
+                        M = compute_M_from_y(y)
+                        print_m_matrix(epoch, index, M)
+
+                    discrete_expr_label = data["discrete_expr_label"]
+                    if interval_mse is None:
+                        interval_mse = {
+                            "lt3": 0.0,
+                            "3to5": 0.0,
+                            "5to7": 0.0,
+                            "ge7": 0.0,
+                        }
+                    per_bin_accuracy = self._calculate_per_bin_accuracy(
+                        final, discrete_expr_label, self.args.model.num_bins
+                    )
+                    self.accumulate_or_log_classification_metrics(
+                        final, discrete_expr_label
+                    )
+                    total_acc = self._calculate_accuracy(final, discrete_expr_label)
+                    accm_loss.append(loss.item())
+                    accm_ce_loss.append(ce_loss.item())
+                    accm_l0_loss.append(l0_loss.item())
+                    accm_mse_loss.append(mse_loss.item())
+                    accm_per_bin_acc.append(per_bin_accuracy)
+                    accm_total_acc.append(total_acc)
+                    # 新增：累加区间 MSE
+                    if index == 1:
+                        accm_interval_mse = {k: [] for k in interval_mse}
+                    for k in interval_mse:
+                        accm_interval_mse[k].append(float(interval_mse[k]))
+
+                    is_accumulating = index % self.args.grad_acc != 0
+                    if is_accumulating:
+                        with self.fabric.no_backward_sync(
+                            self.model, enabled=is_accumulating
+                        ):
+                            self.fabric.backward(loss / self.args.grad_acc)
+                    else:
+                        # 梯度检查（可选，通过配置控制）
+                        if self.args.adaptive_mse_weight:
+                            self.calculate_adaptive_mse_weight()
+                        # 这玩意似乎没用，cursor瞎加的，改天再试试
+                        # # 添加温度退火
+                        # if hasattr(self.model, 'anneal_temperature'):
+                        #     self.model.anneal_temperature(epoch, self.args.num_epochs)
+                        if (
+                            hasattr(self.args, "check_grad_flow")
+                            and self.args.check_grad_flow
+                            and index % 100 == 0
+                        ):
+                            print(f"\n[梯度检查] Epoch {epoch}, Iteration {index}")
+                            try:
+                                grad_stats = check_grad_flow(
+                                    self.model,
+                                    loss / self.args.grad_acc,
+                                    verbose=True,
+                                    retain_graph=True,
+                                    backward_fn=self.fabric.backward,
+                                )
+                                if self.is_master:
+                                    wandb.log(
+                                        {
+                                            "grad_check/ok_params": len(
+                                                grad_stats["ok"]
+                                            ),
+                                            "grad_check/zero_params": len(
+                                                grad_stats["zero"]
+                                            ),
+                                            "grad_check/none_params": len(
+                                                grad_stats["none"]
+                                            ),
+                                        }
+                                    )
+                            except Exception as e:
+                                print(f"[WARNING] 梯度检查失败: {e}")
+                                if self.is_master:
+                                    wandb.log(
+                                        {
+                                            "grad_check/error": 1,
+                                        }
+                                    )
+
+                        self.fabric.backward(loss / self.args.grad_acc)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
+                        self.optimizer.step()
+                        self.scheduler.step()  # 每次optimizer.step()后更新学习率
+                        self.optimizer.zero_grad()
+
+                        average_loss = sum(accm_loss) / len(accm_loss)
+                        average_ce_loss = sum(accm_ce_loss) / len(accm_ce_loss)
+                        average_l0_loss = sum(accm_l0_loss) / len(accm_l0_loss)
+                        average_mse_loss = sum(accm_mse_loss) / len(accm_mse_loss)
+                        average_per_bin_acc = sum(accm_per_bin_acc) / len(
+                            accm_per_bin_acc
+                        )
+                        average_total_acc = sum(accm_total_acc) / len(accm_total_acc)
+                        if self.is_master:
+                            num_bins = self.args.model.num_bins
+                            pred_dist_str = self.get_top_bins_distribution_str(
+                                final, discrete_expr_label, num_bins, topk=5
+                            )
+                            # 新增：区间 MSE 展示
+                            interval_mse_str = ", ".join(
+                                [
+                                    f"{k}:{sum(accm_interval_mse[k])/len(accm_interval_mse[k]):.4f}"
+                                    for k in accm_interval_mse
+                                ]
+                            )
+                            data_iter.set_postfix(
+                                loss=average_loss,
+                                mse_loss=average_mse_loss,
+                                total_acc=average_total_acc,
+                                per_bin_acc=average_per_bin_acc,
+                                ce_loss=average_ce_loss,
+                                l0_loss=average_l0_loss,
+                                pred_dist=pred_dist_str,
+                                interval_mse=interval_mse_str,
+                            )
+                            wandb.log(
+                                {
+                                    "train/loss": average_loss,
+                                    "train/mse_loss": average_mse_loss,
+                                    "train/per_bin_acc": average_per_bin_acc,
+                                    "train/total_acc": average_total_acc,
+                                    "train/ce_loss": average_ce_loss,
+                                    "train/l0_loss": average_l0_loss,
+                                    "TrainRegressionMetrics/interval_mse_5to7": sum(
+                                        accm_interval_mse["5to7"]
+                                    )
+                                    / len(accm_interval_mse["5to7"]),
+                                    "TrainRegressionMetrics/interval_mse_ge7": sum(
+                                        accm_interval_mse["ge7"]
+                                    )
+                                    / len(accm_interval_mse["ge7"]),
+                                    "TrainLossWeight/ce_loss_weight": self.args.ce_loss_weight,
+                                    "TrainLossWeight/mse_loss_weight": self.mse_loss_weight,
+                                    "epoch": epoch,
+                                    "iteration": index,
+                                    "learning_rate": self.optimizer.param_groups[0][
+                                        "lr"
+                                    ],
+                                }
+                            )
+
+                        accm_loss.clear()
+                        accm_ce_loss.clear()
+                        accm_l0_loss.clear()
+                        accm_mse_loss.clear()
+                        accm_per_bin_acc.clear()
+                        accm_total_acc.clear()
+                    if index != 0 and index % self.args.valid_every == 0:
+                        self.validate(epoch, index)
+                        self.model.train()
+                    if index != 0 and index % self.args.save_ckpt_every == 0:
+                        save_ckpt_fabric(
+                            epoch,
+                            self.model,
+                            self.optimizer,
+                            self.scheduler,
+                            self.args.model_name,
+                            self.args.ckpt_dir,
+                            self.fabric,
+                            iteration=index + 1,
+                            chunk_idx=self.current_chunk_idx,
+                        )
+                    self.last_iteration = 0
+                chunk_bar.update(1)
+                self.validate(epoch, index)
+                self.model.train()
+                save_ckpt_fabric(
+                    epoch,
+                    self.model,
+                    self.optimizer,
+                    getattr(self, "scheduler", None),
+                    self.args.model_name,
+                    self.args.ckpt_dir,
+                    self.fabric,
+                    iteration=0,
+                    chunk_idx=self.current_chunk_idx + 1,
+                )
+                # at the end of each epoch, reset the iteration
+                self.iteration = 0
+            chunk_bar.close()
+            self.last_chunk_idx = 0
             self.validate(epoch)
             self.log_each = False
             save_ckpt_fabric(
@@ -808,7 +953,8 @@ class Trainer:
                 self.args.model_name,
                 self.args.ckpt_dir,
                 self.fabric,
-                iteration=1,  # 重置迭代计数器
+                iteration=0,  # 重置迭代计数器
+                chunk_idx=0,  # 重置chunk索引
             )
 
     def calculate_per_bin_ce_loss(self, logits, discrete_expr_label, ignore_index=-100):
@@ -945,23 +1091,32 @@ class Trainer:
                 print(f"[WARN] 未找到检查点 {ckpt_file}")
             return False
 
-        # 只传可 in-place 恢复的对象
-        state = {
-            "model": self.model,
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-        }
-        remainder = self.fabric.load(ckpt_file, state)  # ← 其余条目会返回
+        # 直接读取 state dict
+        remainder = self.fabric.load(ckpt_file)
 
+        # 恢复模型、优化器、调度器的参数
+        if "model" in remainder:
+            self.model.load_state_dict(remainder["model"])
+        if "optimizer" in remainder and self.optimizer is not None:
+            self.optimizer.load_state_dict(remainder["optimizer"])
+        if (
+            "scheduler" in remainder
+            and self.scheduler is not None
+            and remainder["scheduler"] is not None
+        ):
+            self.scheduler.load_state_dict(remainder["scheduler"])
+
+        # 恢复计数器
         if self.args.resume_last_training:
-            # 手动恢复不可变计数器
-            self.iteration = remainder.get("iteration", 1)
+            self.last_iteration = remainder.get("iteration", 0)
             self.last_epoch = remainder.get("epoch", 1)
+            self.last_chunk_idx = remainder.get("chunk_idx", 0)
         else:
-            self.iteration = 1
+            self.last_iteration = 0
             self.last_epoch = 1
+            self.last_chunk_idx = 0
 
-        # 在master进程中处理wandb初始化
+        # 恢复 wandb 会话
         if self.is_master:
             saved_run_id = remainder.get("wandb_run_id", None)
             saved_wandb_config = remainder.get("wandb_config", None)
@@ -969,8 +1124,6 @@ class Trainer:
             if saved_run_id:
                 print(f"[INFO] 找到保存的wandb run_id: {saved_run_id}")
                 print("[INFO] 使用原始run_id恢复wandb会话...")
-
-                # 使用保存的配置，如果没有则使用当前配置
                 if saved_wandb_config:
                     wandb.init(
                         id=saved_run_id,
@@ -989,7 +1142,6 @@ class Trainer:
                         config=saved_wandb_config.get("config", dict(self.args)),
                     )
                 else:
-                    # 如果没有保存wandb配置，使用当前配置
                     wandb.init(
                         id=saved_run_id,
                         resume="allow",
@@ -999,7 +1151,6 @@ class Trainer:
                         tags=self.args.tags,
                         config=dict(self.args),
                     )
-
                 print(f"[INFO] 已恢复wandb会话，run_id: {wandb.run.id}")
                 print(f"[INFO] 项目: {wandb.run.project}, 名称: {wandb.run.name}")
             else:
@@ -1007,8 +1158,7 @@ class Trainer:
 
         if self.is_master:
             print(
-                f"[INFO] 成功恢复到 epoch={self.last_epoch}, iter={self.iteration} "
-                f"from {ckpt_file}"
+                f"[INFO] reload epoch={self.last_epoch}, chunk={self.last_chunk_idx}, iter={self.last_iteration}"
             )
         return True
 
