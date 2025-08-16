@@ -59,7 +59,7 @@ data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_shuffeled_dataset"
 data_length: 5000
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
-num_device: 3
+num_device: 2
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 valid_every: 200
 model_name: "DeepSC_heart9_blood_others_blood"
@@ -84,7 +84,7 @@ use_scbert_scheduler: True
 use_mogaide_scheduler: False
 
 # 新增checkpoint相关参数
-resume_last_training: True
+resume_last_training: False
 
 # 梯度检查相关参数
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用

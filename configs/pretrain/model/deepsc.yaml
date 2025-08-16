@@ -8,7 +8,7 @@ fused: true
 num_bins: ${num_bin}
 alpha: 0.3
 num_heads: 8
-mask_layer_start: 8
+mask_layer_start: 2
 enable_l0: ${enable_l0}
 enable_mse: ${enable_mse}
 enable_ce: ${enable_ce}

@@ -240,7 +240,7 @@ class FlashGeneAttentionLayer(nn.Module):
                     Q,
                     K,
                     V,
-                    attn_mask=attn_mask,
+                    attn_mask=None,
                     dropout_p=self.dropout.p if self.training else 0.0,
                     is_causal=False,
                 )
@@ -291,6 +291,17 @@ class FlashExpressionAttentionLayer(nn.Module):
     """
 
     def __init__(self, d, num_heads, attn_dropout=0.1, fused: bool = True):
+        """
+        Args:
+            d: 嵌入维度
+            num_heads: 注意力头数
+            attn_dropout: 注意力dropout率
+            fused: 是否使用融合的基因和表达嵌入
+            注意力计算分为三种方式：cross_attention, fused_self_attention, self_attention
+            cross_attention: 基因和表达嵌入之间的注意力计算
+            fused_self_attention: 融合的基因和表达嵌入之间的注意力计算
+            self_attention: 表达嵌入之间的注意力计算
+        """
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = d // num_heads
@@ -298,7 +309,7 @@ class FlashExpressionAttentionLayer(nn.Module):
         self.fused = fused
 
         # 融合投影（如果启用）
-        if fused:
+        if self.fused:
             self.fused_emb_proj = nn.Linear(2 * d, d)
 
         # Q, K, V 投影矩阵
@@ -315,7 +326,14 @@ class FlashExpressionAttentionLayer(nn.Module):
         # 缩放因子
         self.scale = self.head_dim**-0.5
 
-    def forward(self, gene_emb, expr_emb, M=None, eps: float = 1e-8):
+    def forward(
+        self,
+        gene_emb,
+        expr_emb,
+        M=None,
+        eps: float = 1e-8,
+        self_attention: bool = False,
+    ):
         """
         Args:
             gene_emb: 基因嵌入, shape: (batch_size, seq_len, d)
@@ -327,16 +345,30 @@ class FlashExpressionAttentionLayer(nn.Module):
         """
         batch_size, seq_len, _ = gene_emb.shape
 
-        # 融合基因和表达嵌入（如果启用）
-        if self.fused:
+        if self_attention and self.fused:
+            # 不计算gene，且之前用的是fused
+            attention_Q_emb = expr_emb
+            attention_K_emb = expr_emb
+        elif self_attention and not self.fused:
+            # 不计算gene，且之前用的不是fused
+            attention_Q_emb = expr_emb
+            attention_K_emb = expr_emb
+        elif not self_attention and self.fused:
+            # 计算gene，且之前用的是fused
             fused_emb = torch.cat([gene_emb, expr_emb], dim=-1)
-            fused_emb = self.fused_emb_proj(fused_emb)
+            attention_Q_emb = self.fused_emb_proj(fused_emb)
+            attention_K_emb = attention_Q_emb
         else:
-            fused_emb = gene_emb
+            # 不计算gene，且之前用的不是fused
+            attention_Q_emb = gene_emb
+            attention_K_emb = expr_emb
 
-        # 计算 Q, K, V
-        Q = self.W_Q(fused_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
-        K = self.W_K(fused_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        Q = self.W_Q(attention_Q_emb).view(
+            batch_size, seq_len, self.num_heads, self.head_dim
+        )
+        K = self.W_K(attention_K_emb).view(
+            batch_size, seq_len, self.num_heads, self.head_dim
+        )
         V = self.W_V(expr_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # 转置以便进行注意力计算
@@ -380,7 +412,7 @@ class FlashExpressionAttentionLayer(nn.Module):
                     Q,
                     K,
                     V,
-                    attn_mask=attn_mask,
+                    attn_mask=None,
                     dropout_p=self.dropout.p if self.training else 0.0,
                     is_causal=False,
                 )
@@ -487,10 +519,10 @@ class MoERegressor(nn.Module):
     所有expert使用相同的网络结构，通过gate网络学习专门化
     """
 
-    def __init__(self, embedding_dim, dropout=0.1):
+    def __init__(self, embedding_dim, dropout=0.1, number_of_experts=3):
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.num_experts = 3
+        self.num_experts = number_of_experts
 
         # Gate网络：决定每个expert的权重
         self.gate = nn.Sequential(
@@ -524,11 +556,7 @@ class MoERegressor(nn.Module):
             nn.ReLU(),
             nn.LayerNorm(embedding_dim),
             nn.Dropout(dropout),
-            nn.Linear(embedding_dim, embedding_dim // 2),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim // 2),
-            nn.Dropout(dropout),
-            nn.Linear(embedding_dim // 2, 1),
+            nn.Linear(embedding_dim, 1),
         )
 
     def _initialize_weights(self):
@@ -603,7 +631,7 @@ class FlashDeepSCTransformerBlock(nn.Module):
         # 使用 Flash Attention 层
         self.gene_attn = FlashGeneAttentionLayer(embedding_dim, num_heads, attn_dropout)
         self.expr_attn = FlashExpressionAttentionLayer(
-            embedding_dim, num_heads, attn_dropout, fused
+            embedding_dim, num_heads, attn_dropout, False
         )
 
         # Norm
@@ -631,7 +659,6 @@ class FlashDeepSCTransformerBlock(nn.Module):
             out_gene: 更新后的基因嵌入
             out_expr: 更新后的表达嵌入
         """
-        # Gene branch
         x = self.norm_gene1(gene_emb)
         attn_gene = self.gene_attn(x, M)
         x = gene_emb + self.dropout(attn_gene)
@@ -639,15 +666,64 @@ class FlashDeepSCTransformerBlock(nn.Module):
         ffn_gene = self.ffn_gene(x_ln)
         out_gene = x + self.dropout(ffn_gene)
 
-        # Expression branch
         y = self.norm_expr1(expr_emb)
-        attn_expr = self.expr_attn(gene_emb, y, M)
+        attn_expr = self.expr_attn(gene_emb, y, M, self_attention=False)
         y = expr_emb + self.dropout(attn_expr)
         y_ln = self.norm_expr2(y)
         ffn_expr = self.ffn_expr(y_ln)
         out_expr = y + self.dropout(ffn_expr)
 
         return out_gene, out_expr
+
+
+class FlashDeepSCTransformerExpressionBlock(nn.Module):
+    """
+    使用 Flash Attention v2 的Transformer块
+    """
+
+    def __init__(
+        self,
+        embedding_dim,
+        num_heads,
+        attn_dropout,
+        ffn_dropout,
+        fused,
+        num_layers_ffn=2,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.embedding_dim = embedding_dim
+
+        self.expr_attn = FlashExpressionAttentionLayer(
+            embedding_dim, num_heads, attn_dropout, fused
+        )
+        self.norm_expr1 = nn.LayerNorm(embedding_dim)
+        self.norm_expr2 = nn.LayerNorm(embedding_dim)
+
+        self.ffn_expr = FeedForward(
+            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        )
+        self.dropout = nn.Dropout(ffn_dropout)
+
+    def forward(self, expr_emb, M=None):
+        """
+        Args:
+            gene_emb: 基因嵌入, shape: (batch_size, seq_len, embedding_dim)
+            expr_emb: 表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
+        Returns:
+            out_gene: 更新后的基因嵌入
+            out_expr: 更新后的表达嵌入
+        """
+
+        y = self.norm_expr1(expr_emb)
+        attn_expr = self.expr_attn(y, y, M, self_attention=True)
+        y = expr_emb + self.dropout(attn_expr)
+        y_ln = self.norm_expr2(y)
+        ffn_expr = self.ffn_expr(y_ln)
+        out_expr = y + self.dropout(ffn_expr)
+
+        return out_expr
 
 
 class DeepSC(nn.Module):
@@ -672,12 +748,18 @@ class DeepSC(nn.Module):
         enable_ce=True,
         num_layers_ffn=2,
         use_moe_regressor=True,
+        number_of_experts=3,
+        use_M_matrix=True,
+        gene_embedding_participate_til_layer=3,
     ):
         super().__init__()
+        self.use_M_matrix = use_M_matrix
+        self.gene_embedding_participate_til_layer = gene_embedding_participate_til_layer
         self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
         self.expr_embedding = ExpressionEmbedding(
             embedding_dim, num_bins=num_bins, alpha=alpha
         )
+        num_layers_expr = num_layers - gene_embedding_participate_til_layer
         self.num_heads = num_heads
         self.layers = nn.ModuleList(
             [
@@ -690,6 +772,19 @@ class DeepSC(nn.Module):
                     num_layers_ffn,
                 )
                 for _ in range(num_layers)
+            ]
+        )
+        self.expression_layers = nn.ModuleList(
+            [
+                FlashDeepSCTransformerExpressionBlock(
+                    embedding_dim,
+                    num_heads,
+                    attn_dropout,
+                    ffn_dropout,
+                    False,
+                    num_layers_ffn,
+                )
+                for _ in range(num_layers_expr)
             ]
         )
         self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
@@ -709,7 +804,11 @@ class DeepSC(nn.Module):
         # 根据配置选择使用哪种regressor
         self.use_moe_regressor = use_moe_regressor
         if self.use_moe_regressor:
-            self.regressor = MoERegressor(embedding_dim)
+            self.regressor = MoERegressor(
+                embedding_dim=embedding_dim,
+                dropout=ffn_dropout,
+                number_of_experts=number_of_experts,
+            )
         else:
             # 原来的simple regressor
             self.regressor = nn.Sequential(
@@ -755,13 +854,22 @@ class DeepSC(nn.Module):
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
-        M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
+        if self.use_M_matrix:
+            M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
+        else:
+            M = None
+            y = None
 
         for i, layer in enumerate(self.layers):
             if i >= self.mask_layer_start:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, M)
             else:
                 gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
+        for i, layer in enumerate(self.expression_layers):
+            if i >= self.mask_layer_start:
+                expr_emb = layer(expr_emb, M)
+            else:
+                expr_emb = layer(expr_emb, None)
         final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
         final_emb = self.fused_emb_proj(final_emb)  # (batch, g, d)
         if self.enable_mse and self.enable_ce:

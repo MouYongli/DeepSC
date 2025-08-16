@@ -656,13 +656,27 @@ class Trainer:
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     def train(self):
-
         # 先处理wandb初始化 - 基于checkpoint情况决定是恢复还是新建
-        if self.is_master:
-            checkpoint_loaded = self.checkpoint_reload()
-            if not checkpoint_loaded:
-                # 没有checkpoint或加载失败，创建新的wandb run
-                print("No checkpoint found, initializing new wandb run...")
+        if self.args.resume_last_training:
+            if self.is_master:
+                checkpoint_loaded = self.checkpoint_reload()
+                if not checkpoint_loaded:
+                    # 没有checkpoint或加载失败，创建新的wandb run
+                    print("No checkpoint found, initializing new wandb run...")
+                    wandb.init(
+                        entity=self.args.get("wandb_team", "rwth_lfb"),
+                        project=self.args.get("wandb_project", "DeepSC"),
+                        name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
+                        tags=self.args.tags,
+                        config=dict(self.args),
+                    )
+            else:
+                # 非master进程只需要尝试加载checkpoint
+                self.checkpoint_reload()
+        else:
+            # resume_last_training = False，直接新建wandb run
+            if self.is_master:
+                print("resume_last_training=False, initializing new wandb run...")
                 wandb.init(
                     entity=self.args.get("wandb_team", "rwth_lfb"),
                     project=self.args.get("wandb_project", "DeepSC"),
@@ -670,10 +684,6 @@ class Trainer:
                     tags=self.args.tags,
                     config=dict(self.args),
                 )
-        else:
-            # 非master进程只需要尝试加载checkpoint
-            self.checkpoint_reload()
-
         self.log_each = False
         # if self.args.model_name == "DeepSC":
         # self.model = torch.compile(self.model)
@@ -1066,11 +1076,13 @@ class Trainer:
                     log_each=is_val and self.args.show_mse_loss_details,
                 )
             total_loss += mse_loss_weight * regression_loss
-        l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / (
-            y.shape[0] * y.shape[1] * y.shape[2]
-        )
-
-        total_loss += 0.1 * l0_loss
+        if y is not None:
+            l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / (
+                y.shape[0] * y.shape[1] * y.shape[2]
+            )
+            total_loss += 0.1 * l0_loss
+        else:
+            l0_loss = torch.tensor(0.0)  # 保证是 Tensor
         return total_loss, ce_loss, regression_loss, l0_loss
 
     def get_top_bins_distribution_str(
