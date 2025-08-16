@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
+import scanpy as sc
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -1338,3 +1339,23 @@ def calculate_l0_lambda_with_warmup_fine_grained(index, l0_lambda_target, epoch_
     计算当前的l0 lambda 按index在l0_warmup_start_epoch到l0_warmup_start_epoch + 1之间线性增加到l0_lambda_target
     """
     return l0_lambda_target * (index / epoch_length)
+
+
+def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
+    """
+    统计 h5ad 文件中 obs 的 cell_type 列的唯一值数量
+
+    Args:
+        h5ad_path (str): h5ad 文件路径
+        cell_type_col (str): obs 中细胞类型列名（默认 "cell_type"）
+
+    Returns:
+        int: 唯一 cell_type 的数量
+    """
+    adata = sc.read_h5ad(h5ad_path)
+
+    if cell_type_col not in adata.obs.columns:
+        raise ValueError(f"obs 中不存在列: {cell_type_col}")
+
+    unique_count = adata.obs[cell_type_col].nunique()
+    return unique_count

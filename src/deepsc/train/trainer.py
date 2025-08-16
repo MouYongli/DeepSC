@@ -790,7 +790,7 @@ class Trainer:
                     for k in interval_mse:
                         accm_interval_mse[k].append(float(interval_mse[k]))
 
-                    is_accumulating = index % self.args.grad_acc != 0
+                    is_accumulating = (index + 1) % self.args.grad_acc != 0
                     if is_accumulating:
                         with self.fabric.no_backward_sync(
                             self.model, enabled=is_accumulating
