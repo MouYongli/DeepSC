@@ -75,7 +75,7 @@ log_m_matrix_every: 1000
 sequence_length: 1024
 plot_tsne_and_umap: False
 draw_continuous_pred_label_scatter: True
-
+use_M_matrix: True
 # 新增warmup相关参数
 use_warmup: False
 warmup_ratio: 0.03

@@ -390,6 +390,8 @@ class FlashExpressionAttentionLayer(nn.Module):
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+                print(scores.shape)
+                print(M.shape)
 
                 # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
                 # 步骤1：对M=0的位置设置负无穷，其他位置不变
@@ -399,13 +401,16 @@ class FlashExpressionAttentionLayer(nn.Module):
                 # 步骤2：softmax（现在M=0的位置权重接近0）
                 attn_weights = F.softmax(scores, dim=-1)
                 attn_weights = self.dropout(attn_weights)
-
+                print(attn_weights.shape)
                 # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
                 A_sparse = attn_weights * M
+                print(A_sparse.shape)
+
                 norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
                 A_bar = A_sparse / norm
                 # 重新计算输出
                 output = torch.matmul(A_bar, V)
+                breakpoint()
             else:
                 # 使用 Flash Attention
                 output = scaled_dot_product_attention(
@@ -787,7 +792,8 @@ class DeepSC(nn.Module):
                 for _ in range(num_layers_expr)
             ]
         )
-        self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
+        if self.use_M_matrix:
+            self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )

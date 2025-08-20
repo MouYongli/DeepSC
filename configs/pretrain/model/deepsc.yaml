@@ -14,3 +14,4 @@ enable_mse: ${enable_mse}
 enable_ce: ${enable_ce}
 num_layers_ffn: 6
 use_moe_regressor: ${use_moe_regressor}
+use_M_matrix: ${use_M_matrix}
