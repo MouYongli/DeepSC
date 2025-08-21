@@ -1,7 +1,7 @@
 import hydra
 import torch.nn as nn
 from lightning.fabric import Fabric
-from lightning.fabric.strategies import FSDPStrategy
+from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
 from deepsc.train.trainer import Trainer
@@ -17,7 +17,7 @@ def pretrain(cfg: DictConfig):
         accelerator="cuda",
         devices=cfg.num_device,
         num_nodes=cfg.num_nodes,
-        strategy='ddp',
+        strategy=DDPStrategy(find_unused_parameters=True),
         precision="bf16-mixed",
     )
     fabric.launch()

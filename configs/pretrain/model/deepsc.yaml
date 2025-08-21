@@ -15,3 +15,20 @@ enable_ce: ${enable_ce}
 num_layers_ffn: 6
 use_moe_regressor: ${use_moe_regressor}
 use_M_matrix: ${use_M_matrix}
+
+moe:
+  expert_parallelism: ${expert_parallelism}
+  n_moe_layers: 1
+  use_moe_ffn: ${use_moe_ffn}
+  dim: ${..embedding_dim}
+  moe_inter_dim: 512
+  n_routed_experts: 8
+  n_activated_experts: 2
+  n_expert_groups: 1
+  topk_groups: 1
+  n_limited_groups: 1
+  n_shared_experts: 1
+  score_func: "softmax"
+  route_scale: 1.0
+  world_size: ${oc.env:WORLD_SIZE,1}
+  rank: ${oc.env:RANK,0}

@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -390,8 +391,6 @@ class FlashExpressionAttentionLayer(nn.Module):
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-                print(scores.shape)
-                print(M.shape)
 
                 # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
                 # 步骤1：对M=0的位置设置负无穷，其他位置不变
@@ -401,16 +400,13 @@ class FlashExpressionAttentionLayer(nn.Module):
                 # 步骤2：softmax（现在M=0的位置权重接近0）
                 attn_weights = F.softmax(scores, dim=-1)
                 attn_weights = self.dropout(attn_weights)
-                print(attn_weights.shape)
                 # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
                 A_sparse = attn_weights * M
-                print(A_sparse.shape)
 
                 norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
                 A_bar = A_sparse / norm
                 # 重新计算输出
                 output = torch.matmul(A_bar, V)
-                breakpoint()
             else:
                 # 使用 Flash Attention
                 output = scaled_dot_product_attention(
@@ -615,6 +611,278 @@ class MoERegressor(nn.Module):
         return output, gate_weights
 
 
+from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+
+
+@dataclass
+class MoECfg:
+    dim: int
+    n_routed_experts: int
+    n_activated_experts: int
+    moe_inter_dim: int
+    n_groups: int = 1
+    topk_groups: int = 1
+    n_shared_experts: int = 1
+    route_scale: float = 1.0
+    world_size: int = 1
+    rank: int = 0
+    expert_parallelism: bool = False
+
+
+# def build_moe_from_cfg(moe_cfg: MoECfg):
+#     # 你自己的 MoE 模块
+#     moe = MoE(
+#         dim=moe_cfg.dim,
+#         n_routed_experts=E,
+#         n_activated_experts=k,
+#         moe_inter_dim=moe_cfg.moe_inter_dim,
+#         n_groups=G,
+#         topk_groups=moe_cfg.topk_groups,
+#         n_shared_experts=moe_cfg.n_shared_experts,
+#         route_scale=moe_cfg.route_scale,
+#         world_size=ws,
+#         rank=int(moe_cfg.rank),
+#     )
+#     return moe, n_local
+
+
+class MLP(nn.Module):
+    """
+    Multi-Layer Perceptron (MLP) used as a feed-forward layer.
+
+    Attributes:
+        w1 (nn.Module): Linear layer for input-to-hidden transformation.
+        w2 (nn.Module): Linear layer for hidden-to-output transformation.
+        w3 (nn.Module): Additional linear layer for feature transformation.
+    """
+
+    def __init__(self, dim: int, inter_dim: int):
+        """
+        Initializes the MLP layer.
+
+        Args:
+            dim (int): Input and output dimensionality.
+            inter_dim (int): Hidden layer dimensionality.
+        """
+        super().__init__()
+        self.w1 = nn.Linear(dim, inter_dim)
+        self.w2 = nn.Linear(inter_dim, dim)
+        self.w3 = nn.Linear(dim, inter_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the MLP layer.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after MLP computation.
+        """
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class Gate(nn.Module):
+    def __init__(self, moe_cfg):
+        super().__init__()
+        self.dim = moe_cfg.dim
+        self.topk = moe_cfg.n_activated_experts
+        self.n_expert_groups = moe_cfg.n_expert_groups
+        self.topk_groups = moe_cfg.topk_groups
+        self.score_func = moe_cfg.score_func
+        self.route_scale = moe_cfg.route_scale
+        self.n_routed_experts = int(moe_cfg.n_routed_experts)
+        self.proj = nn.Linear(self.dim, self.n_routed_experts, bias=True)
+
+    def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: [B, dim]
+        Returns:
+            weights: [B, topk]
+            indices: [B, topk]
+        """
+        # [B, n_experts]
+        scores = self.proj(x)
+
+        # softmax/sigmoid
+        if self.score_func == "softmax":
+            scores = scores.softmax(dim=-1, dtype=torch.float32)
+        else:
+            scores = scores.sigmoid()
+
+        original_scores = scores
+
+        if self.n_expert_groups > 1:
+            # [B, n_groups, experts_per_group]
+            scores = scores.view(x.size(0), self.n_expert_groups, -1)
+
+            #     # 每个 group 打个分
+            group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
+
+            #     # 选 topk_groups
+            indices = group_scores.topk(self.topk_groups, dim=-1)[1]
+
+            #     # 建 mask，没选中的 group 全屏蔽
+            mask = scores.new_ones(x.size(0), self.n_expert_groups, dtype=torch.bool)
+            mask.scatter_(1, indices, False)
+            scores = scores.masked_fill(mask.unsqueeze(-1), float("-inf")).flatten(1)
+
+        indices = torch.topk(scores, self.topk, dim=-1)[1]  # [B, topk]
+        weights = original_scores.gather(1, indices)  # [B, topk]
+
+        # # 归一化
+        if self.score_func == "sigmoid":
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+
+        weights = weights * self.route_scale
+        return weights.type_as(x), indices
+
+
+class Expert(nn.Module):
+    def __init__(self, moe_cfg, p_dropout: float = 0.0, use_bias: bool = True):
+        super().__init__()
+        self.w1 = nn.Linear(moe_cfg.dim, moe_cfg.moe_inter_dim, bias=use_bias)
+        self.w3 = nn.Linear(moe_cfg.dim, moe_cfg.moe_inter_dim, bias=use_bias)
+        self.w2 = nn.Linear(moe_cfg.moe_inter_dim, moe_cfg.dim, bias=use_bias)
+        self.dropout = nn.Dropout(p_dropout)
+
+        # 可选：与你其他模块一致的初始化
+        nn.init.xavier_uniform_(self.w1.weight)
+        nn.init.zeros_(self.w1.bias)
+        nn.init.xavier_uniform_(self.w3.weight)
+        nn.init.zeros_(self.w3.bias)
+        nn.init.xavier_uniform_(self.w2.weight)
+        nn.init.zeros_(self.w2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # SwiGLU / Gated-MLP
+        h = F.silu(self.w1(x)) * self.w3(x)
+        h = self.dropout(h)
+        out = self.w2(h)
+        return out
+
+
+class MoE(nn.Module):
+    """
+    Mixture-of-Experts (MoE) module.
+
+    Attributes:
+        dim (int): Dimensionality of input features.
+        n_routed_experts (int): Total number of experts in the model.
+        n_local_experts (int): Number of experts handled locally in distributed systems.
+        n_activated_experts (int): Number of experts activated for each input.
+        gate (nn.Module): Gating mechanism to route inputs to experts.
+        experts (nn.ModuleList): List of expert modules.
+        shared_experts (nn.Module): Shared experts applied to all inputs.
+    """
+
+    def __init__(
+        self,
+        moe_cfg,
+        dim=None,
+        n_routed_experts=None,
+        n_local_experts=None,
+        n_activated_experts=None,
+        moe_inter_dim=None,
+        n_shared_experts=None,
+        world_size=1,
+        rank=0,
+    ):
+        """
+        Initializes the MoE module.
+
+        Args:
+            args (ModelArgs): Model arguments containing MoE parameters.
+        """
+        super().__init__()
+        self.dim = moe_cfg.dim
+        self.n_routed_experts = int(moe_cfg.n_routed_experts)
+        self.n_activated_experts = int(moe_cfg.n_activated_experts)
+        self.moe_inter_dim = int(moe_cfg.moe_inter_dim)
+        self.n_expert_groups = int(moe_cfg.n_expert_groups)
+        self.n_shared_experts = int(moe_cfg.n_shared_experts)
+        self.route_scale = float(moe_cfg.route_scale)
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
+        self.expert_parallelism = bool(moe_cfg.expert_parallelism)
+        self.moe_cfg = moe_cfg
+        assert (
+            self.n_routed_experts % self.world_size == 0
+        ), f"Number experts must be divisible by (world_size={self.world_size})"
+        self.n_local_experts = self.n_routed_experts // self.world_size
+        self.experts_start_idx = self.rank * self.n_local_experts
+        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
+        self.gate = Gate(self.moe_cfg)
+
+        # 根据expert_parallelism决定如何初始化专家
+        if self.expert_parallelism and self.world_size > 1:
+            # 专家并行模式：只创建本地分配的专家
+            self.experts = nn.ModuleList(
+                [
+                    (
+                        Expert(self.moe_cfg)
+                        if self.experts_start_idx <= i < self.experts_end_idx
+                        else None
+                    )
+                    for i in range(self.n_routed_experts)
+                ]
+            )
+        else:
+            # 标准模式：创建所有专家
+            self.experts = nn.ModuleList(
+                [Expert(self.moe_cfg) for i in range(self.n_routed_experts)]
+            )
+        self.shared_experts = MLP(self.dim, self.n_shared_experts * self.moe_inter_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the MoE module.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after expert routing and computation.
+        """
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        weights, indices = self.gate(x)
+        y = torch.zeros_like(x)
+
+        if self.expert_parallelism and self.world_size > 1:
+            # 专家并行模式：只计算本地分配的专家
+            counts = torch.bincount(
+                indices.flatten(), minlength=self.n_routed_experts
+            ).tolist()
+            for i in range(self.experts_start_idx, self.experts_end_idx):
+                if counts[i] == 0:
+                    continue
+                expert = self.experts[i]
+                idx, top = torch.where(indices == i)
+                y[idx] += expert(x[idx]) * weights[idx, top, None]
+            z = self.shared_experts(x)
+            # 在专家并行模式下，需要聚合所有节点的专家输出
+            dist.all_reduce(y)
+            return (y + z).view(shape)
+        else:
+            # 标准模式：所有专家都在本地计算
+            counts = torch.bincount(
+                indices.flatten(), minlength=self.n_routed_experts
+            ).tolist()
+            for i in range(self.n_routed_experts):
+                if counts[i] == 0:
+                    continue
+                expert = self.experts[i]
+                idx, top = torch.where(indices == i)
+                y[idx] += expert(x[idx]) * weights[idx, top, None]
+            z = self.shared_experts(x)
+            return (y + z).view(shape)
+
+
 class FlashDeepSCTransformerBlock(nn.Module):
     """
     使用 Flash Attention v2 的Transformer块
@@ -628,11 +896,13 @@ class FlashDeepSCTransformerBlock(nn.Module):
         ffn_dropout,
         fused,
         num_layers_ffn=2,
+        moe_cfg=None,
+        moe_layer=False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
-
+        self.use_moe_ffn = bool(moe_layer)
         # 使用 Flash Attention 层
         self.gene_attn = FlashGeneAttentionLayer(embedding_dim, num_heads, attn_dropout)
         self.expr_attn = FlashExpressionAttentionLayer(
@@ -646,13 +916,27 @@ class FlashDeepSCTransformerBlock(nn.Module):
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
 
         # FFN
-        self.ffn_gene = FeedForward(
-            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
-        )
-        self.ffn_expr = FeedForward(
-            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
-        )
+        # self.ffn_gene = FeedForward(
+        #     embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        # )
+        # self.ffn_expr = FeedForward(
+        #     embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        # )
         self.dropout = nn.Dropout(ffn_dropout)
+        self.ffn_gene = (
+            MoE(moe_cfg)
+            if self.use_moe_ffn
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
+        )
+        self.ffn_expr = (
+            MoE(moe_cfg)
+            if self.use_moe_ffn
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
+        )
 
     def forward(self, gene_emb, expr_emb, M=None):
         """
@@ -694,19 +978,25 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
         ffn_dropout,
         fused,
         num_layers_ffn=2,
+        moe_cfg=None,
+        use_moe_in_layer=False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
-
+        self.use_moe_in_layer = use_moe_in_layer
         self.expr_attn = FlashExpressionAttentionLayer(
             embedding_dim, num_heads, attn_dropout, fused
         )
         self.norm_expr1 = nn.LayerNorm(embedding_dim)
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
 
-        self.ffn_expr = FeedForward(
-            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        self.ffn_expr = (
+            MoE(moe_cfg)
+            if self.use_moe_in_layer
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
         )
         self.dropout = nn.Dropout(ffn_dropout)
 
@@ -756,6 +1046,7 @@ class DeepSC(nn.Module):
         number_of_experts=3,
         use_M_matrix=True,
         gene_embedding_participate_til_layer=3,
+        moe=None,
     ):
         super().__init__()
         self.use_M_matrix = use_M_matrix
@@ -766,8 +1057,9 @@ class DeepSC(nn.Module):
         )
         num_layers_expr = num_layers - gene_embedding_participate_til_layer
         self.num_heads = num_heads
-        self.layers = nn.ModuleList(
-            [
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(
                 FlashDeepSCTransformerBlock(
                     embedding_dim,
                     num_heads,
@@ -775,23 +1067,28 @@ class DeepSC(nn.Module):
                     ffn_dropout,
                     fused,
                     num_layers_ffn,
+                    moe,
                 )
-                for _ in range(num_layers)
-            ]
-        )
-        self.expression_layers = nn.ModuleList(
-            [
+            )
+        self.expression_layers = nn.ModuleList()
+        for i in range(num_layers_expr):
+            moe_layer = i >= (num_layers_expr - moe.n_moe_layers)
+            self.expression_layers.append(
                 FlashDeepSCTransformerExpressionBlock(
                     embedding_dim,
                     num_heads,
                     attn_dropout,
                     ffn_dropout,
-                    False,
+                    fused,
                     num_layers_ffn,
+                    moe,
+                    use_moe_in_layer=moe_layer and moe.use_moe_ffn,
                 )
-                for _ in range(num_layers_expr)
-            ]
-        )
+            )
+
+        # 如果你用的是 DictConfig
+        # moe_cfg = MoECfg(**cfg.moe)
+        # self.moe, self.n_local_experts = build_moe_from_cfg(moe_cfg)
         if self.use_M_matrix:
             self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
         self.mask_layer_start = (

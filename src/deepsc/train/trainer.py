@@ -664,8 +664,8 @@ class Trainer:
                     # 没有checkpoint或加载失败，创建新的wandb run
                     print("No checkpoint found, initializing new wandb run...")
                     wandb.init(
-                        entity=self.args.get("wandb_team", "rwth_lfb"),
-                        project=self.args.get("wandb_project", "DeepSC"),
+                        # entity=self.args.get("wandb_team", "rwth_lfb"),
+                        project=self.args.get("wandb_project", "DeepSCNewProj"),
                         name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
                         tags=self.args.tags,
                         config=dict(self.args),
@@ -678,8 +678,8 @@ class Trainer:
             if self.is_master:
                 print("resume_last_training=False, initializing new wandb run...")
                 wandb.init(
-                    entity=self.args.get("wandb_team", "rwth_lfb"),
-                    project=self.args.get("wandb_project", "DeepSC"),
+                    # entity=self.args.get("wandb_team", "rwth_lfb"),
+                    project=self.args.get("wandb_project", "DeepSCNewProj"),
                     name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
                     tags=self.args.tags,
                     config=dict(self.args),
