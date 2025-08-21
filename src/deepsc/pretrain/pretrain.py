@@ -17,7 +17,7 @@ def pretrain(cfg: DictConfig):
         accelerator="cuda",
         devices=cfg.num_device,
         num_nodes=cfg.num_nodes,
-        strategy=DDPStrategy(find_unused_parameters=True),
+        strategy=DDPStrategy(find_unused_parameters=False),
         precision="bf16-mixed",
     )
     fabric.launch()

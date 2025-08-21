@@ -4,7 +4,7 @@ num_genes: 34682
 num_layers: 10 # remember to check gene_embedding_participate_til_layer and n_moe_layers
 attn_dropout: 0.1
 ffn_dropout: 0.1
-fused: true
+fused: False
 num_bins: ${num_bin}
 alpha: 0.3
 num_heads: 8
