@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -611,42 +610,8 @@ class MoERegressor(nn.Module):
         return output, gate_weights
 
 
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
-
-
-@dataclass
-class MoECfg:
-    dim: int
-    n_routed_experts: int
-    n_activated_experts: int
-    moe_inter_dim: int
-    n_groups: int = 1
-    topk_groups: int = 1
-    n_shared_experts: int = 1
-    route_scale: float = 1.0
-    world_size: int = 1
-    rank: int = 0
-    expert_parallelism: bool = False
-
-
-# def build_moe_from_cfg(moe_cfg: MoECfg):
-#     # 你自己的 MoE 模块
-#     moe = MoE(
-#         dim=moe_cfg.dim,
-#         n_routed_experts=E,
-#         n_activated_experts=k,
-#         moe_inter_dim=moe_cfg.moe_inter_dim,
-#         n_groups=G,
-#         topk_groups=moe_cfg.topk_groups,
-#         n_shared_experts=moe_cfg.n_shared_experts,
-#         route_scale=moe_cfg.route_scale,
-#         world_size=ws,
-#         rank=int(moe_cfg.rank),
-#     )
-#     return moe, n_local
 
 
 class MLP(nn.Module):
@@ -690,12 +655,14 @@ class Gate(nn.Module):
         super().__init__()
         self.dim = moe_cfg.dim
         self.topk = moe_cfg.n_activated_experts
-        self.n_expert_groups = moe_cfg.n_expert_groups
-        self.topk_groups = moe_cfg.topk_groups
         self.score_func = moe_cfg.score_func
         self.route_scale = moe_cfg.route_scale
         self.n_routed_experts = int(moe_cfg.n_routed_experts)
         self.proj = nn.Linear(self.dim, self.n_routed_experts, bias=True)
+
+        # 用于统计专家使用情况
+        self.register_buffer("expert_usage_count", torch.zeros(self.n_routed_experts))
+        self.register_buffer("total_tokens", torch.zeros(1))
 
     def forward(self, x: torch.Tensor):
         """
@@ -713,23 +680,7 @@ class Gate(nn.Module):
             scores = scores.softmax(dim=-1, dtype=torch.float32)
         else:
             scores = scores.sigmoid()
-
         original_scores = scores
-
-        if self.n_expert_groups > 1:
-            # [B, n_groups, experts_per_group]
-            scores = scores.view(x.size(0), self.n_expert_groups, -1)
-
-            #     # 每个 group 打个分
-            group_scores = scores.topk(2, dim=-1)[0].sum(dim=-1)
-
-            #     # 选 topk_groups
-            indices = group_scores.topk(self.topk_groups, dim=-1)[1]
-
-            #     # 建 mask，没选中的 group 全屏蔽
-            mask = scores.new_ones(x.size(0), self.n_expert_groups, dtype=torch.bool)
-            mask.scatter_(1, indices, False)
-            scores = scores.masked_fill(mask.unsqueeze(-1), float("-inf")).flatten(1)
 
         indices = torch.topk(scores, self.topk, dim=-1)[1]  # [B, topk]
         weights = original_scores.gather(1, indices)  # [B, topk]
@@ -739,7 +690,82 @@ class Gate(nn.Module):
             weights = weights / weights.sum(dim=-1, keepdim=True)
 
         weights = weights * self.route_scale
+
+        # 统计专家使用情况（仅在训练时）
+        if self.training:
+            batch_size = x.size(0)
+            # 修正：每个token选择topk个专家，所以总的专家选择次数是 batch_size * topk
+            self.total_tokens += batch_size * self.topk
+
+            # 统计每个专家被选中的次数
+            for expert_idx in range(self.n_routed_experts):
+                count = (indices == expert_idx).sum().float()
+                self.expert_usage_count[expert_idx] += count
+
         return weights.type_as(x), indices
+
+    def get_expert_usage_stats(self):
+        """
+        获取专家使用统计信息
+
+        Returns:
+            dict: 包含各种统计指标的字典
+        """
+        if self.total_tokens == 0:
+            return {
+                "expert_usage_ratio": torch.zeros(self.n_routed_experts),
+                "max_usage_ratio": 0.0,
+                "min_usage_ratio": 0.0,
+                "usage_variance": 0.0,
+                "collapse_ratio": 0.0,
+                "entropy": 0.0,
+                "total_tokens": 0,
+            }
+
+        # 计算每个专家的使用比例
+        usage_ratio = self.expert_usage_count / self.total_tokens
+
+        # 计算统计指标
+        max_usage = usage_ratio.max().item()
+        min_usage = usage_ratio.min().item()
+        usage_variance = usage_ratio.var().item()
+
+        # 计算塌缩比例（最常用专家的使用比例）
+        collapse_ratio = max_usage
+
+        # 计算熵（衡量专家使用的均匀程度）
+        # 避免log(0)的情况
+        epsilon = 1e-10
+        usage_ratio_safe = usage_ratio + epsilon
+        entropy = -(usage_ratio_safe * torch.log(usage_ratio_safe)).sum().item()
+
+        return {
+            "expert_usage_ratio": usage_ratio,
+            "max_usage_ratio": max_usage,
+            "min_usage_ratio": min_usage,
+            "usage_variance": usage_variance,
+            "collapse_ratio": collapse_ratio,
+            "entropy": entropy,
+            "total_tokens": self.total_tokens.item(),
+        }
+
+    def reset_usage_stats(self):
+        """重置使用统计"""
+        self.expert_usage_count.zero_()
+        self.total_tokens.zero_()
+
+    def is_collapsed(self, threshold=0.8):
+        """
+        判断MoE是否塌缩
+
+        Args:
+            threshold: 塌缩阈值，如果某个专家使用比例超过此阈值则认为塌缩
+
+        Returns:
+            bool: 是否塌缩
+        """
+        stats = self.get_expert_usage_stats()
+        return stats["collapse_ratio"] > threshold
 
 
 class Expert(nn.Module):
@@ -783,14 +809,6 @@ class MoE(nn.Module):
     def __init__(
         self,
         moe_cfg,
-        dim=None,
-        n_routed_experts=None,
-        n_local_experts=None,
-        n_activated_experts=None,
-        moe_inter_dim=None,
-        n_shared_experts=None,
-        world_size=1,
-        rank=0,
     ):
         """
         Initializes the MoE module.
@@ -803,39 +821,14 @@ class MoE(nn.Module):
         self.n_routed_experts = int(moe_cfg.n_routed_experts)
         self.n_activated_experts = int(moe_cfg.n_activated_experts)
         self.moe_inter_dim = int(moe_cfg.moe_inter_dim)
-        self.n_expert_groups = int(moe_cfg.n_expert_groups)
         self.n_shared_experts = int(moe_cfg.n_shared_experts)
         self.route_scale = float(moe_cfg.route_scale)
-        self.world_size = dist.get_world_size()
-        self.rank = dist.get_rank()
-        self.expert_parallelism = bool(moe_cfg.expert_parallelism)
         self.moe_cfg = moe_cfg
-        assert (
-            self.n_routed_experts % self.world_size == 0
-        ), f"Number experts must be divisible by (world_size={self.world_size})"
-        self.n_local_experts = self.n_routed_experts // self.world_size
-        self.experts_start_idx = self.rank * self.n_local_experts
-        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.gate = Gate(self.moe_cfg)
 
-        # 根据expert_parallelism决定如何初始化专家
-        if self.expert_parallelism and self.world_size > 1:
-            # 专家并行模式：只创建本地分配的专家
-            self.experts = nn.ModuleList(
-                [
-                    (
-                        Expert(self.moe_cfg)
-                        if self.experts_start_idx <= i < self.experts_end_idx
-                        else None
-                    )
-                    for i in range(self.n_routed_experts)
-                ]
-            )
-        else:
-            # 标准模式：创建所有专家
-            self.experts = nn.ModuleList(
-                [Expert(self.moe_cfg) for i in range(self.n_routed_experts)]
-            )
+        self.experts = nn.ModuleList(
+            [Expert(self.moe_cfg) for i in range(self.n_routed_experts)]
+        )
         self.shared_experts = MLP(self.dim, self.n_shared_experts * self.moe_inter_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -853,34 +846,29 @@ class MoE(nn.Module):
         weights, indices = self.gate(x)
         y = torch.zeros_like(x)
 
-        if self.expert_parallelism and self.world_size > 1:
-            # 专家并行模式：只计算本地分配的专家
-            counts = torch.bincount(
-                indices.flatten(), minlength=self.n_routed_experts
-            ).tolist()
-            for i in range(self.experts_start_idx, self.experts_end_idx):
-                if counts[i] == 0:
-                    continue
-                expert = self.experts[i]
-                idx, top = torch.where(indices == i)
-                y[idx] += expert(x[idx]) * weights[idx, top, None]
-            z = self.shared_experts(x)
-            # 在专家并行模式下，需要聚合所有节点的专家输出
-            dist.all_reduce(y)
-            return (y + z).view(shape)
-        else:
-            # 标准模式：所有专家都在本地计算
-            counts = torch.bincount(
-                indices.flatten(), minlength=self.n_routed_experts
-            ).tolist()
-            for i in range(self.n_routed_experts):
-                if counts[i] == 0:
-                    continue
-                expert = self.experts[i]
-                idx, top = torch.where(indices == i)
-                y[idx] += expert(x[idx]) * weights[idx, top, None]
-            z = self.shared_experts(x)
-            return (y + z).view(shape)
+        counts = torch.bincount(
+            indices.flatten(), minlength=self.n_routed_experts
+        ).tolist()
+        for i in range(self.n_routed_experts):
+            if counts[i] == 0:
+                continue
+            expert = self.experts[i]
+            idx, top = torch.where(indices == i)
+            y[idx] += expert(x[idx]) * weights[idx, top, None]
+        z = self.shared_experts(x)
+        return (y + z).view(shape)
+
+    def get_expert_usage_stats(self):
+        """获取专家使用统计信息"""
+        return self.gate.get_expert_usage_stats()
+
+    def reset_usage_stats(self):
+        """重置使用统计"""
+        self.gate.reset_usage_stats()
+
+    def is_collapsed(self, threshold=0.8):
+        """判断MoE是否塌缩"""
+        return self.gate.is_collapsed(threshold)
 
 
 class FlashDeepSCTransformerBlock(nn.Module):
@@ -1216,3 +1204,141 @@ class DeepSC(nn.Module):
             gate_weights = None  # 原来的regressor没有gate_weights
 
         return regression_output, gate_weights
+
+    def get_all_moe_stats(self):
+        """
+        获取模型中所有MoE层的统计信息
+
+        Returns:
+            dict: 包含所有MoE层统计信息的字典
+        """
+        moe_stats = {}
+
+        # 检查transformer层中的MoE
+        for i, layer in enumerate(self.layers):
+            if hasattr(layer, "ffn_gene") and isinstance(layer.ffn_gene, MoE):
+                moe_stats[f"transformer_layer_{i}_gene_ffn"] = (
+                    layer.ffn_gene.get_expert_usage_stats()
+                )
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                moe_stats[f"transformer_layer_{i}_expr_ffn"] = (
+                    layer.ffn_expr.get_expert_usage_stats()
+                )
+
+        # 检查expression层中的MoE
+        for i, layer in enumerate(self.expression_layers):
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                moe_stats[f"expression_layer_{i}_expr_ffn"] = (
+                    layer.ffn_expr.get_expert_usage_stats()
+                )
+
+        # 检查MoE regressor
+        if self.use_moe_regressor and hasattr(self.regressor, "gate"):
+            moe_stats["moe_regressor"] = {
+                "expert_usage_ratio": (
+                    self.regressor.gate_weights_history
+                    if hasattr(self.regressor, "gate_weights_history")
+                    else "Not available"
+                )
+            }
+
+        return moe_stats
+
+    def check_moe_collapse(self, threshold=0.8):
+        """
+        检查模型中是否有MoE层发生塌缩
+
+        Args:
+            threshold: 塌缩阈值
+
+        Returns:
+            dict: 包含塌缩检测结果的字典
+        """
+        collapse_results = {}
+        moe_stats = self.get_all_moe_stats()
+
+        for layer_name, stats in moe_stats.items():
+            if isinstance(stats, dict) and "collapse_ratio" in stats:
+                is_collapsed = stats["collapse_ratio"] > threshold
+                collapse_results[layer_name] = {
+                    "is_collapsed": is_collapsed,
+                    "collapse_ratio": stats["collapse_ratio"],
+                    "entropy": stats["entropy"],
+                    "expert_usage_ratio": (
+                        stats["expert_usage_ratio"].tolist()
+                        if hasattr(stats["expert_usage_ratio"], "tolist")
+                        else stats["expert_usage_ratio"]
+                    ),
+                }
+
+        return collapse_results
+
+    def reset_all_moe_stats(self):
+        """重置所有MoE层的使用统计"""
+        # 重置transformer层中的MoE
+        for layer in self.layers:
+            if hasattr(layer, "ffn_gene") and isinstance(layer.ffn_gene, MoE):
+                layer.ffn_gene.reset_usage_stats()
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                layer.ffn_expr.reset_usage_stats()
+
+        # 重置expression层中的MoE
+        for layer in self.expression_layers:
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                layer.ffn_expr.reset_usage_stats()
+
+    def print_moe_collapse_report(self, threshold=0.8):
+        """
+        打印MoE塌缩检测报告
+
+        Args:
+            threshold: 塌缩阈值
+        """
+        print(f"\n{'='*60}")
+        print("MoE Collapse Detection Report")
+        print(f"{'='*60}")
+        print(f"Collapse Threshold: {threshold}")
+
+        collapse_results = self.check_moe_collapse(threshold)
+
+        if not collapse_results:
+            print("No MoE layers found in the model.")
+            return
+
+        collapsed_layers = []
+        healthy_layers = []
+
+        for layer_name, result in collapse_results.items():
+            if result["is_collapsed"]:
+                collapsed_layers.append((layer_name, result))
+            else:
+                healthy_layers.append((layer_name, result))
+
+        print(f"\nTotal MoE layers: {len(collapse_results)}")
+        print(f"Collapsed layers: {len(collapsed_layers)}")
+        print(f"Healthy layers: {len(healthy_layers)}")
+
+        if collapsed_layers:
+            print("\n🚨 COLLAPSED LAYERS:")
+            for layer_name, result in collapsed_layers:
+                print(f"  - {layer_name}:")
+                print(f"    Collapse Ratio: {result['collapse_ratio']:.4f}")
+                print(f"    Entropy: {result['entropy']:.4f}")
+                print(
+                    f"    Expert Usage: {[f'{x:.3f}' for x in result['expert_usage_ratio']]}"
+                )
+
+        if healthy_layers:
+            print("\n✅ HEALTHY LAYERS:")
+            for layer_name, result in healthy_layers:
+                print(f"  - {layer_name}:")
+                print(f"    Collapse Ratio: {result['collapse_ratio']:.4f}")
+                print(f"    Entropy: {result['entropy']:.4f}")
+                print(
+                    f"    Expert Usage: {[f'{x:.3f}' for x in result['expert_usage_ratio']]}"
+                )
+
+        print(f"\n{'='*60}")
+
+        # 返回是否有塌缩
+        return len(collapsed_layers) > 0

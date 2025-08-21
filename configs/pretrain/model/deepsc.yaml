@@ -1,7 +1,7 @@
 _target_: src.deepsc.models.deepsc.model.DeepSC
 embedding_dim: 256
 num_genes: 34682
-num_layers: 10
+num_layers: 10 # remember to check gene_embedding_participate_til_layer and n_moe_layers
 attn_dropout: 0.1
 ffn_dropout: 0.1
 fused: true
@@ -15,18 +15,15 @@ enable_ce: ${enable_ce}
 num_layers_ffn: 6
 use_moe_regressor: ${use_moe_regressor}
 use_M_matrix: ${use_M_matrix}
+gene_embedding_participate_til_layer: 3
 
 moe:
-  expert_parallelism: ${expert_parallelism}
-  n_moe_layers: 1
+  n_moe_layers: 4
   use_moe_ffn: ${use_moe_ffn}
   dim: ${..embedding_dim}
   moe_inter_dim: 512
-  n_routed_experts: 8
+  n_routed_experts: 2
   n_activated_experts: 2
-  n_expert_groups: 1
-  topk_groups: 1
-  n_limited_groups: 1
   n_shared_experts: 1
   score_func: "softmax"
   route_scale: 1.0

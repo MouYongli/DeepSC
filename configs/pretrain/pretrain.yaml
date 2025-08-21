@@ -71,10 +71,11 @@ learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
-save_ckpt_every: 200
+save_ckpt_every: 20000
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
+log_moe_collapse_every: 500  # 每500次iteration检查一次MoE塌缩
 sequence_length: 1024
 plot_tsne_and_umap: False
 draw_continuous_pred_label_scatter: True
