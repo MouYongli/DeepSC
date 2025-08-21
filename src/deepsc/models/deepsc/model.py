@@ -390,8 +390,6 @@ class FlashExpressionAttentionLayer(nn.Module):
             # 如果有门控矩阵，进行稀疏化处理
             if M is not None:
                 scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-                print(scores.shape)
-                print(M.shape)
 
                 # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
                 # 步骤1：对M=0的位置设置负无穷，其他位置不变
@@ -401,16 +399,13 @@ class FlashExpressionAttentionLayer(nn.Module):
                 # 步骤2：softmax（现在M=0的位置权重接近0）
                 attn_weights = F.softmax(scores, dim=-1)
                 attn_weights = self.dropout(attn_weights)
-                print(attn_weights.shape)
                 # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
                 A_sparse = attn_weights * M
-                print(A_sparse.shape)
 
                 norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
                 A_bar = A_sparse / norm
                 # 重新计算输出
                 output = torch.matmul(A_bar, V)
-                breakpoint()
             else:
                 # 使用 Flash Attention
                 output = scaled_dot_product_attention(
@@ -615,6 +610,267 @@ class MoERegressor(nn.Module):
         return output, gate_weights
 
 
+import torch
+import torch.nn as nn
+
+
+class MLP(nn.Module):
+    """
+    Multi-Layer Perceptron (MLP) used as a feed-forward layer.
+
+    Attributes:
+        w1 (nn.Module): Linear layer for input-to-hidden transformation.
+        w2 (nn.Module): Linear layer for hidden-to-output transformation.
+        w3 (nn.Module): Additional linear layer for feature transformation.
+    """
+
+    def __init__(self, dim: int, inter_dim: int):
+        """
+        Initializes the MLP layer.
+
+        Args:
+            dim (int): Input and output dimensionality.
+            inter_dim (int): Hidden layer dimensionality.
+        """
+        super().__init__()
+        self.w1 = nn.Linear(dim, inter_dim)
+        self.w2 = nn.Linear(inter_dim, dim)
+        self.w3 = nn.Linear(dim, inter_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the MLP layer.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after MLP computation.
+        """
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+
+class Gate(nn.Module):
+    def __init__(self, moe_cfg):
+        super().__init__()
+        self.dim = moe_cfg.dim
+        self.topk = moe_cfg.n_activated_experts
+        self.score_func = moe_cfg.score_func
+        self.route_scale = moe_cfg.route_scale
+        self.n_routed_experts = int(moe_cfg.n_routed_experts)
+        self.proj = nn.Linear(self.dim, self.n_routed_experts, bias=True)
+
+        # 用于统计专家使用情况
+        self.register_buffer("expert_usage_count", torch.zeros(self.n_routed_experts))
+        self.register_buffer("total_tokens", torch.zeros(1))
+
+    def forward(self, x: torch.Tensor):
+        """
+        Args:
+            x: [B, dim]
+        Returns:
+            weights: [B, topk]
+            indices: [B, topk]
+        """
+        # [B, n_experts]
+        scores = self.proj(x)
+
+        # softmax/sigmoid
+        if self.score_func == "softmax":
+            scores = scores.softmax(dim=-1, dtype=torch.float32)
+        else:
+            scores = scores.sigmoid()
+        original_scores = scores
+
+        indices = torch.topk(scores, self.topk, dim=-1)[1]  # [B, topk]
+        weights = original_scores.gather(1, indices)  # [B, topk]
+
+        # # 归一化
+        if self.score_func == "sigmoid":
+            weights = weights / weights.sum(dim=-1, keepdim=True)
+
+        weights = weights * self.route_scale
+
+        # 统计专家使用情况（仅在训练时）
+        if self.training:
+            batch_size = x.size(0)
+            # 修正：每个token选择topk个专家，所以总的专家选择次数是 batch_size * topk
+            self.total_tokens += batch_size * self.topk
+
+            # 统计每个专家被选中的次数
+            for expert_idx in range(self.n_routed_experts):
+                count = (indices == expert_idx).sum().float()
+                self.expert_usage_count[expert_idx] += count
+
+        return weights.type_as(x), indices
+
+    def get_expert_usage_stats(self):
+        """
+        获取专家使用统计信息
+
+        Returns:
+            dict: 包含各种统计指标的字典
+        """
+        if self.total_tokens == 0:
+            return {
+                "expert_usage_ratio": torch.zeros(self.n_routed_experts),
+                "max_usage_ratio": 0.0,
+                "min_usage_ratio": 0.0,
+                "usage_variance": 0.0,
+                "collapse_ratio": 0.0,
+                "entropy": 0.0,
+                "total_tokens": 0,
+            }
+
+        # 计算每个专家的使用比例
+        usage_ratio = self.expert_usage_count / self.total_tokens
+
+        # 计算统计指标
+        max_usage = usage_ratio.max().item()
+        min_usage = usage_ratio.min().item()
+        usage_variance = usage_ratio.var().item()
+
+        # 计算塌缩比例（最常用专家的使用比例）
+        collapse_ratio = max_usage
+
+        # 计算熵（衡量专家使用的均匀程度）
+        # 避免log(0)的情况
+        epsilon = 1e-10
+        usage_ratio_safe = usage_ratio + epsilon
+        entropy = -(usage_ratio_safe * torch.log(usage_ratio_safe)).sum().item()
+
+        return {
+            "expert_usage_ratio": usage_ratio,
+            "max_usage_ratio": max_usage,
+            "min_usage_ratio": min_usage,
+            "usage_variance": usage_variance,
+            "collapse_ratio": collapse_ratio,
+            "entropy": entropy,
+            "total_tokens": self.total_tokens.item(),
+        }
+
+    def reset_usage_stats(self):
+        """重置使用统计"""
+        self.expert_usage_count.zero_()
+        self.total_tokens.zero_()
+
+    def is_collapsed(self, threshold=0.8):
+        """
+        判断MoE是否塌缩
+
+        Args:
+            threshold: 塌缩阈值，如果某个专家使用比例超过此阈值则认为塌缩
+
+        Returns:
+            bool: 是否塌缩
+        """
+        stats = self.get_expert_usage_stats()
+        return stats["collapse_ratio"] > threshold
+
+
+class Expert(nn.Module):
+    def __init__(self, moe_cfg, p_dropout: float = 0.0, use_bias: bool = True):
+        super().__init__()
+        self.w1 = nn.Linear(moe_cfg.dim, moe_cfg.moe_inter_dim, bias=use_bias)
+        self.w3 = nn.Linear(moe_cfg.dim, moe_cfg.moe_inter_dim, bias=use_bias)
+        self.w2 = nn.Linear(moe_cfg.moe_inter_dim, moe_cfg.dim, bias=use_bias)
+        self.dropout = nn.Dropout(p_dropout)
+
+        # 可选：与你其他模块一致的初始化
+        nn.init.xavier_uniform_(self.w1.weight)
+        nn.init.zeros_(self.w1.bias)
+        nn.init.xavier_uniform_(self.w3.weight)
+        nn.init.zeros_(self.w3.bias)
+        nn.init.xavier_uniform_(self.w2.weight)
+        nn.init.zeros_(self.w2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # SwiGLU / Gated-MLP
+        h = F.silu(self.w1(x)) * self.w3(x)
+        h = self.dropout(h)
+        out = self.w2(h)
+        return out
+
+
+class MoE(nn.Module):
+    """
+    Mixture-of-Experts (MoE) module.
+
+    Attributes:
+        dim (int): Dimensionality of input features.
+        n_routed_experts (int): Total number of experts in the model.
+        n_local_experts (int): Number of experts handled locally in distributed systems.
+        n_activated_experts (int): Number of experts activated for each input.
+        gate (nn.Module): Gating mechanism to route inputs to experts.
+        experts (nn.ModuleList): List of expert modules.
+        shared_experts (nn.Module): Shared experts applied to all inputs.
+    """
+
+    def __init__(
+        self,
+        moe_cfg,
+    ):
+        """
+        Initializes the MoE module.
+
+        Args:
+            args (ModelArgs): Model arguments containing MoE parameters.
+        """
+        super().__init__()
+        self.dim = moe_cfg.dim
+        self.n_routed_experts = int(moe_cfg.n_routed_experts)
+        self.n_activated_experts = int(moe_cfg.n_activated_experts)
+        self.moe_inter_dim = int(moe_cfg.moe_inter_dim)
+        self.n_shared_experts = int(moe_cfg.n_shared_experts)
+        self.route_scale = float(moe_cfg.route_scale)
+        self.moe_cfg = moe_cfg
+        self.gate = Gate(self.moe_cfg)
+
+        self.experts = nn.ModuleList(
+            [Expert(self.moe_cfg) for i in range(self.n_routed_experts)]
+        )
+        self.shared_experts = MLP(self.dim, self.n_shared_experts * self.moe_inter_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the MoE module.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after expert routing and computation.
+        """
+        shape = x.size()
+        x = x.view(-1, self.dim)
+        weights, indices = self.gate(x)
+        y = torch.zeros_like(x)
+
+        counts = torch.bincount(
+            indices.flatten(), minlength=self.n_routed_experts
+        ).tolist()
+        for i in range(self.n_routed_experts):
+            if counts[i] == 0:
+                continue
+            expert = self.experts[i]
+            idx, top = torch.where(indices == i)
+            y[idx] += expert(x[idx]) * weights[idx, top, None]
+        z = self.shared_experts(x)
+        return (y + z).view(shape)
+
+    def get_expert_usage_stats(self):
+        """获取专家使用统计信息"""
+        return self.gate.get_expert_usage_stats()
+
+    def reset_usage_stats(self):
+        """重置使用统计"""
+        self.gate.reset_usage_stats()
+
+    def is_collapsed(self, threshold=0.8):
+        """判断MoE是否塌缩"""
+        return self.gate.is_collapsed(threshold)
+
+
 class FlashDeepSCTransformerBlock(nn.Module):
     """
     使用 Flash Attention v2 的Transformer块
@@ -628,11 +884,13 @@ class FlashDeepSCTransformerBlock(nn.Module):
         ffn_dropout,
         fused,
         num_layers_ffn=2,
+        moe_cfg=None,
+        moe_layer=False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
-
+        self.use_moe_ffn = bool(moe_layer)
         # 使用 Flash Attention 层
         self.gene_attn = FlashGeneAttentionLayer(embedding_dim, num_heads, attn_dropout)
         self.expr_attn = FlashExpressionAttentionLayer(
@@ -646,13 +904,27 @@ class FlashDeepSCTransformerBlock(nn.Module):
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
 
         # FFN
-        self.ffn_gene = FeedForward(
-            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
-        )
-        self.ffn_expr = FeedForward(
-            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
-        )
+        # self.ffn_gene = FeedForward(
+        #     embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        # )
+        # self.ffn_expr = FeedForward(
+        #     embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        # )
         self.dropout = nn.Dropout(ffn_dropout)
+        self.ffn_gene = (
+            MoE(moe_cfg)
+            if self.use_moe_ffn
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
+        )
+        self.ffn_expr = (
+            MoE(moe_cfg)
+            if self.use_moe_ffn
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
+        )
 
     def forward(self, gene_emb, expr_emb, M=None):
         """
@@ -694,19 +966,25 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
         ffn_dropout,
         fused,
         num_layers_ffn=2,
+        moe_cfg=None,
+        use_moe_in_layer=False,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
-
+        self.use_moe_in_layer = use_moe_in_layer
         self.expr_attn = FlashExpressionAttentionLayer(
             embedding_dim, num_heads, attn_dropout, fused
         )
         self.norm_expr1 = nn.LayerNorm(embedding_dim)
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
 
-        self.ffn_expr = FeedForward(
-            embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+        self.ffn_expr = (
+            MoE(moe_cfg)
+            if self.use_moe_in_layer
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
         )
         self.dropout = nn.Dropout(ffn_dropout)
 
@@ -756,6 +1034,7 @@ class DeepSC(nn.Module):
         number_of_experts=3,
         use_M_matrix=True,
         gene_embedding_participate_til_layer=3,
+        moe=None,
     ):
         super().__init__()
         self.use_M_matrix = use_M_matrix
@@ -766,8 +1045,9 @@ class DeepSC(nn.Module):
         )
         num_layers_expr = num_layers - gene_embedding_participate_til_layer
         self.num_heads = num_heads
-        self.layers = nn.ModuleList(
-            [
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(
                 FlashDeepSCTransformerBlock(
                     embedding_dim,
                     num_heads,
@@ -775,23 +1055,28 @@ class DeepSC(nn.Module):
                     ffn_dropout,
                     fused,
                     num_layers_ffn,
+                    moe,
                 )
-                for _ in range(num_layers)
-            ]
-        )
-        self.expression_layers = nn.ModuleList(
-            [
+            )
+        self.expression_layers = nn.ModuleList()
+        for i in range(num_layers_expr):
+            moe_layer = i >= (num_layers_expr - moe.n_moe_layers)
+            self.expression_layers.append(
                 FlashDeepSCTransformerExpressionBlock(
                     embedding_dim,
                     num_heads,
                     attn_dropout,
                     ffn_dropout,
-                    False,
+                    fused,
                     num_layers_ffn,
+                    moe,
+                    use_moe_in_layer=moe_layer and moe.use_moe_ffn,
                 )
-                for _ in range(num_layers_expr)
-            ]
-        )
+            )
+
+        # 如果你用的是 DictConfig
+        # moe_cfg = MoECfg(**cfg.moe)
+        # self.moe, self.n_local_experts = build_moe_from_cfg(moe_cfg)
         if self.use_M_matrix:
             self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
         self.mask_layer_start = (
@@ -919,3 +1204,141 @@ class DeepSC(nn.Module):
             gate_weights = None  # 原来的regressor没有gate_weights
 
         return regression_output, gate_weights
+
+    def get_all_moe_stats(self):
+        """
+        获取模型中所有MoE层的统计信息
+
+        Returns:
+            dict: 包含所有MoE层统计信息的字典
+        """
+        moe_stats = {}
+
+        # 检查transformer层中的MoE
+        for i, layer in enumerate(self.layers):
+            if hasattr(layer, "ffn_gene") and isinstance(layer.ffn_gene, MoE):
+                moe_stats[f"transformer_layer_{i}_gene_ffn"] = (
+                    layer.ffn_gene.get_expert_usage_stats()
+                )
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                moe_stats[f"transformer_layer_{i}_expr_ffn"] = (
+                    layer.ffn_expr.get_expert_usage_stats()
+                )
+
+        # 检查expression层中的MoE
+        for i, layer in enumerate(self.expression_layers):
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                moe_stats[f"expression_layer_{i}_expr_ffn"] = (
+                    layer.ffn_expr.get_expert_usage_stats()
+                )
+
+        # 检查MoE regressor
+        if self.use_moe_regressor and hasattr(self.regressor, "gate"):
+            moe_stats["moe_regressor"] = {
+                "expert_usage_ratio": (
+                    self.regressor.gate_weights_history
+                    if hasattr(self.regressor, "gate_weights_history")
+                    else "Not available"
+                )
+            }
+
+        return moe_stats
+
+    def check_moe_collapse(self, threshold=0.8):
+        """
+        检查模型中是否有MoE层发生塌缩
+
+        Args:
+            threshold: 塌缩阈值
+
+        Returns:
+            dict: 包含塌缩检测结果的字典
+        """
+        collapse_results = {}
+        moe_stats = self.get_all_moe_stats()
+
+        for layer_name, stats in moe_stats.items():
+            if isinstance(stats, dict) and "collapse_ratio" in stats:
+                is_collapsed = stats["collapse_ratio"] > threshold
+                collapse_results[layer_name] = {
+                    "is_collapsed": is_collapsed,
+                    "collapse_ratio": stats["collapse_ratio"],
+                    "entropy": stats["entropy"],
+                    "expert_usage_ratio": (
+                        stats["expert_usage_ratio"].tolist()
+                        if hasattr(stats["expert_usage_ratio"], "tolist")
+                        else stats["expert_usage_ratio"]
+                    ),
+                }
+
+        return collapse_results
+
+    def reset_all_moe_stats(self):
+        """重置所有MoE层的使用统计"""
+        # 重置transformer层中的MoE
+        for layer in self.layers:
+            if hasattr(layer, "ffn_gene") and isinstance(layer.ffn_gene, MoE):
+                layer.ffn_gene.reset_usage_stats()
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                layer.ffn_expr.reset_usage_stats()
+
+        # 重置expression层中的MoE
+        for layer in self.expression_layers:
+            if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
+                layer.ffn_expr.reset_usage_stats()
+
+    def print_moe_collapse_report(self, threshold=0.8):
+        """
+        打印MoE塌缩检测报告
+
+        Args:
+            threshold: 塌缩阈值
+        """
+        print(f"\n{'='*60}")
+        print("MoE Collapse Detection Report")
+        print(f"{'='*60}")
+        print(f"Collapse Threshold: {threshold}")
+
+        collapse_results = self.check_moe_collapse(threshold)
+
+        if not collapse_results:
+            print("No MoE layers found in the model.")
+            return
+
+        collapsed_layers = []
+        healthy_layers = []
+
+        for layer_name, result in collapse_results.items():
+            if result["is_collapsed"]:
+                collapsed_layers.append((layer_name, result))
+            else:
+                healthy_layers.append((layer_name, result))
+
+        print(f"\nTotal MoE layers: {len(collapse_results)}")
+        print(f"Collapsed layers: {len(collapsed_layers)}")
+        print(f"Healthy layers: {len(healthy_layers)}")
+
+        if collapsed_layers:
+            print("\n🚨 COLLAPSED LAYERS:")
+            for layer_name, result in collapsed_layers:
+                print(f"  - {layer_name}:")
+                print(f"    Collapse Ratio: {result['collapse_ratio']:.4f}")
+                print(f"    Entropy: {result['entropy']:.4f}")
+                print(
+                    f"    Expert Usage: {[f'{x:.3f}' for x in result['expert_usage_ratio']]}"
+                )
+
+        if healthy_layers:
+            print("\n✅ HEALTHY LAYERS:")
+            for layer_name, result in healthy_layers:
+                print(f"  - {layer_name}:")
+                print(f"    Collapse Ratio: {result['collapse_ratio']:.4f}")
+                print(f"    Entropy: {result['entropy']:.4f}")
+                print(
+                    f"    Expert Usage: {[f'{x:.3f}' for x in result['expert_usage_ratio']]}"
+                )
+
+        print(f"\n{'='*60}")
+
+        # 返回是否有塌缩
+        return len(collapsed_layers) > 0
