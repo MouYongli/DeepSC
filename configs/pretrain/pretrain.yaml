@@ -26,7 +26,8 @@ use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简
 # False: 使用原来的简单回归器（单一sequential网络）
 use_M_matrix: False
 use_moe_ffn: True
-expert_parallelism: True
+expert_parallelism: False
+use_compile: True
 
 # L0 loss warmup parameters
 l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
@@ -71,7 +72,7 @@ learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
-save_ckpt_every: 20000
+save_ckpt_every: 200
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
@@ -86,9 +87,10 @@ use_warmup_with_decay: False
 use_scbert_scheduler: True
 use_mogaide_scheduler: False
 
+save_ckpt: True
 
 # 新增checkpoint相关参数
-resume_last_training: False
+resume_last_training: True
 
 # 梯度检查相关参数
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用

@@ -290,6 +290,8 @@ class Trainer:
         args = self.args
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
         self.softmax = nn.Softmax(dim=-1)
+        if self.args.use_compile:
+            self.model = torch.compile(self.model)  # 在 setup 之前
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
     def create_scheduler(self, optimizer, args):
@@ -678,7 +680,7 @@ class Trainer:
             if self.is_master:
                 print("resume_last_training=False, initializing new wandb run...")
                 wandb.init(
-                    # entity=self.args.get("wandb_team", "rwth_lfb"),
+                    entity=self.args.get("wandb_team", "rwth_lfb"),
                     project=self.args.get("wandb_project", "DeepSCNewProj"),
                     name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
                     tags=self.args.tags,
