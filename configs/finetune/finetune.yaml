@@ -60,7 +60,7 @@ data_path_eval: "/home/angli/baseline/DeepSC/data/cta/cxg_finetune/mPancreas_tes
 var_name_in_h5ad: "feature_name"
 obs_celltype_col: "cell_type"
 cell_type_count: 0
-
+use_moe_ffn: True
 data_length: 5000
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
