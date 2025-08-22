@@ -37,7 +37,7 @@ class DataCollator:
     num_bins: int
     pad_token_id: int = 0
     pad_value: int = 0
-    num_genes: int = 34682
+    num_genes: int = 34683
     do_padding: bool = True
     do_mlm: bool = True
     do_binning: bool = True
@@ -47,6 +47,8 @@ class DataCollator:
     keep_first_n_tokens: int = 1
     gene_from_zero: bool = True
     dynamic_mask_probabilities: Optional[dict] = None
+    use_max_cell_length: bool = True
+    cell_type: bool = False
 
     def __post_init__(self):
         self.cls_token_id = self.num_genes + 1
@@ -91,8 +93,19 @@ class DataCollator:
         """
         if not isinstance(examples[0], Mapping):
             return NotImplementedError
-        max_ori_len = max(len(example["genes"]) for example in examples)
-        _max_length = self.max_length if max_ori_len >= self.max_length else max_ori_len
+        if self.use_max_cell_length:
+            max_ori_len = max(len(example["genes"]) for example in examples)
+            _max_length = (
+                self.max_length if max_ori_len >= self.max_length else max_ori_len
+            )
+        else:
+            _max_length = self.max_length
+        if self.cell_type:
+            if "cell_type_id" not in examples[0]:
+                raise ValueError("`cell_type_id` is required when `cell_type` is True.")
+            cell_type_ids = torch.tensor(
+                [example["cell_type_id"] for example in examples], dtype=torch.long
+            )
         padded_genes = []
         padded_discrete_expr = []
         padded_continuous_expr = []
@@ -187,7 +200,8 @@ class DataCollator:
         discrete_expr_label[mask] = padded_discrete_expr[mask]
         data_dict["discrete_expr_label"] = discrete_expr_label
         data_dict["mask"] = mask
-
+        if self.cell_type:
+            data_dict["cell_type_id"] = cell_type_ids
         return data_dict
 
     def _mask(

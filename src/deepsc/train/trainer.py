@@ -290,6 +290,8 @@ class Trainer:
         args = self.args
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
         self.softmax = nn.Softmax(dim=-1)
+        if self.args.use_compile:
+            self.model = torch.compile(self.model)  # 在 setup 之前
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
     def create_scheduler(self, optimizer, args):
@@ -656,24 +658,34 @@ class Trainer:
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     def train(self):
-
         # 先处理wandb初始化 - 基于checkpoint情况决定是恢复还是新建
-        if self.is_master:
-            checkpoint_loaded = self.checkpoint_reload()
-            if not checkpoint_loaded:
-                # 没有checkpoint或加载失败，创建新的wandb run
-                print("No checkpoint found, initializing new wandb run...")
+        if self.args.resume_last_training:
+            if self.is_master:
+                checkpoint_loaded = self.checkpoint_reload()
+                if not checkpoint_loaded:
+                    # 没有checkpoint或加载失败，创建新的wandb run
+                    print("No checkpoint found, initializing new wandb run...")
+                    wandb.init(
+                        # entity=self.args.get("wandb_team", "rwth_lfb"),
+                        project=self.args.get("wandb_project", "DeepSCNewProj"),
+                        name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
+                        tags=self.args.tags,
+                        config=dict(self.args),
+                    )
+            else:
+                # 非master进程只需要尝试加载checkpoint
+                self.checkpoint_reload()
+        else:
+            # resume_last_training = False，直接新建wandb run
+            if self.is_master:
+                print("resume_last_training=False, initializing new wandb run...")
                 wandb.init(
                     entity=self.args.get("wandb_team", "rwth_lfb"),
-                    project=self.args.get("wandb_project", "DeepSC"),
+                    project=self.args.get("wandb_project", "DeepSCNewProj"),
                     name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
                     tags=self.args.tags,
                     config=dict(self.args),
                 )
-        else:
-            # 非master进程只需要尝试加载checkpoint
-            self.checkpoint_reload()
-
         self.log_each = False
         # if self.args.model_name == "DeepSC":
         # self.model = torch.compile(self.model)
@@ -790,7 +802,7 @@ class Trainer:
                     for k in interval_mse:
                         accm_interval_mse[k].append(float(interval_mse[k]))
 
-                    is_accumulating = index % self.args.grad_acc != 0
+                    is_accumulating = (index + 1) % self.args.grad_acc != 0
                     if is_accumulating:
                         with self.fabric.no_backward_sync(
                             self.model, enabled=is_accumulating
@@ -912,6 +924,16 @@ class Trainer:
                     if index != 0 and index % self.args.valid_every == 0:
                         self.validate(epoch, index)
                         self.model.train()
+
+                    # MoE塌缩检测
+                    if (
+                        index != 0
+                        and hasattr(self.args, "log_moe_collapse_every")
+                        and index % self.args.log_moe_collapse_every == 0
+                        and self.is_master
+                    ):
+                        self.check_moe_collapse(epoch, index)
+
                     if index != 0 and index % self.args.save_ckpt_every == 0:
                         save_ckpt_fabric(
                             epoch,
@@ -1066,11 +1088,13 @@ class Trainer:
                     log_each=is_val and self.args.show_mse_loss_details,
                 )
             total_loss += mse_loss_weight * regression_loss
-        l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / (
-            y.shape[0] * y.shape[1] * y.shape[2]
-        )
-
-        total_loss += 0.1 * l0_loss
+        if y is not None:
+            l0_loss = (y[..., 0].abs().sum() + y[..., 2].abs().sum()) / (
+                y.shape[0] * y.shape[1] * y.shape[2]
+            )
+            total_loss += 0.1 * l0_loss
+        else:
+            l0_loss = torch.tensor(0.0)  # 保证是 Tensor
         return total_loss, ce_loss, regression_loss, l0_loss
 
     def get_top_bins_distribution_str(
@@ -1557,3 +1581,89 @@ class Trainer:
             self.regression_loss_fn = nn.MSELoss(reduction="none")
         elif self.args.enable_huber_loss:
             self.regression_loss_fn = nn.HuberLoss(reduction="none")
+
+    def check_moe_collapse(self, epoch, iteration):
+        """
+        检查MoE塌缩情况并记录到日志
+
+        Args:
+            epoch: 当前epoch
+            iteration: 当前iteration
+        """
+        try:
+            # 检查模型是否有MoE塌缩检测功能
+            if not hasattr(self.model, "check_moe_collapse"):
+                return
+
+            print(f"\n[Epoch {epoch}, Iter {iteration}] 检查MoE塌缩状态...")
+
+            # 获取塌缩检测结果
+            collapse_results = self.model.check_moe_collapse(threshold=0.8)
+
+            if not collapse_results:
+                print("未发现MoE层或MoE功能未启用")
+                return
+
+            # 统计塌缩情况
+            total_layers = len(collapse_results)
+            collapsed_layers = sum(
+                1 for result in collapse_results.values() if result["is_collapsed"]
+            )
+            healthy_layers = total_layers - collapsed_layers
+
+            # 记录到控制台
+            print(
+                f"MoE状态总结: 总层数={total_layers}, 塌缩层数={collapsed_layers}, 健康层数={healthy_layers}"
+            )
+
+            # 如果有塌缩，打印详细报告
+            if collapsed_layers > 0:
+                print("⚠️  检测到MoE塌缩！详细信息:")
+                for layer_name, result in collapse_results.items():
+                    if result["is_collapsed"]:
+                        print(
+                            f"  🚨 {layer_name}: 塌缩比例={result['collapse_ratio']:.4f}, 熵值={result['entropy']:.4f}"
+                        )
+
+                        # 找出使用最多的专家
+                        usage_ratios = result["expert_usage_ratio"]
+                        max_expert_idx = usage_ratios.index(max(usage_ratios))
+                        print(
+                            f"     最常用专家: Expert-{max_expert_idx} (使用率: {usage_ratios[max_expert_idx]:.4f})"
+                        )
+            else:
+                print("✅ 所有MoE层状态健康")
+
+            # 记录到wandb (如果启用)
+            if hasattr(self, "wandb_run") and self.wandb_run is not None:
+                wandb_logs = {
+                    "moe/total_layers": total_layers,
+                    "moe/collapsed_layers": collapsed_layers,
+                    "moe/healthy_layers": healthy_layers,
+                    "moe/collapse_ratio": (
+                        collapsed_layers / total_layers if total_layers > 0 else 0.0
+                    ),
+                }
+
+                # 记录每一层的详细信息
+                for layer_name, result in collapse_results.items():
+                    layer_key = layer_name.replace("/", "_").replace("-", "_")
+                    wandb_logs[f"moe_layers/{layer_key}/collapse_ratio"] = result[
+                        "collapse_ratio"
+                    ]
+                    wandb_logs[f"moe_layers/{layer_key}/entropy"] = result["entropy"]
+                    wandb_logs[f"moe_layers/{layer_key}/is_collapsed"] = int(
+                        result["is_collapsed"]
+                    )
+
+                import wandb
+
+                wandb.log(wandb_logs, step=self.iteration)
+
+            print(f"MoE塌缩检测完成 [Epoch {epoch}, Iter {iteration}]\n")
+
+        except Exception as e:
+            print(f"MoE塌缩检测出错: {e}")
+            import traceback
+
+            traceback.print_exc()

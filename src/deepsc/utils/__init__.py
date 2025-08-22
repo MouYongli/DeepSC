@@ -12,6 +12,7 @@ from .utils import (
     compute_bin_distribution,
     compute_classification_metrics,
     compute_M_from_y,
+    count_unique_cell_types,
     distributed_concat,
     get_reduced,
     get_reduced_with_fabric,

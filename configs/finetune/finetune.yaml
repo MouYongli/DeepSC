@@ -1,33 +1,29 @@
 defaults:
   - _self_
   - model: deepsc
-  - dataset: tripleca
 
 wandb_project: "DeepSC"
-tags: ["256hd", "big dataset", "mean ce", "adaptive mse and no adaptiv0 l0", "medium learning rate"]
-run_name: "mogaide scheduler, mean ce, adaptive mse, 5bin ,hd256, alpha0.3"
+tags: ["256hd"]
+run_name: "finetune_cell_type_annotation_256hd"
 
 #文件加载相关
 chunksize: 4
 shuffel_files_each_epoch: False
 
 # Loss weights
-enable_l0: True
-enable_mse: True
-enable_ce: True
+enable_l0: False
+enable_mse: False
+enable_ce: False
 ce_loss_weight: 1.0
 target_mse_loss_weight: 3.0
 #control the weight of mse loss
 adaptive_mse_weight: False
+cls_loss_type: "per_bin"
 
 # MoE Regressor settings
 use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简单回归器
 # True:  使用MoE回归器（3个专家网络：low/mid/high expert + gate网络）
 # False: 使用原来的简单回归器（单一sequential网络）
-use_M_matrix: False
-use_moe_ffn: True
-expert_parallelism: False
-use_compile: True
 
 # L0 loss warmup parameters
 l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
@@ -58,36 +54,39 @@ use_exp_regression_loss: False
 #Print details of mse loss in log
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
-
-data_path: "/home/angli/baseline/DeepSC/data/cellxgene/test_shuffeled_dataset"
+csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
+data_path: "/home/angli/subset_500_per_celltyp_log1pv2.h5ad"
+data_path_eval: "/home/angli/baseline/DeepSC/data/cta/cxg_finetune/mPancreas_test_adata.h5ad"
+var_name_in_h5ad: "feature_name"
+obs_celltype_col: "cell_type"
+cell_type_count: 0
+use_moe_ffn: True
 data_length: 5000
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
-num_device: 2
+num_device: 3
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 valid_every: 200
 model_name: "DeepSC_heart9_blood_others_blood"
 grad_acc: 20
 learning_rate: 3e-4
 epoch: 10
-batch_size: 8
+batch_size: 32
 num_bin: 5
 save_ckpt_every: 200
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
-log_moe_collapse_every: 500  # 每500次iteration检查一次MoE塌缩
 sequence_length: 1024
 plot_tsne_and_umap: False
 draw_continuous_pred_label_scatter: True
+
 # 新增warmup相关参数
 use_warmup: False
 warmup_ratio: 0.03
 use_warmup_with_decay: False
 use_scbert_scheduler: True
 use_mogaide_scheduler: False
-
-save_ckpt: True
 
 # 新增checkpoint相关参数
 resume_last_training: True
