@@ -27,50 +27,59 @@
 <!-- [![Twitter](https://img.shields.io/twitter/follow/YOUR_TWITTER_HANDLE?style=social)](https://twitter.com/YOUR_TWITTER_HANDLE) -->
 
 This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data" by DBIS and LfB RWTH Aachen University and RWTH Universty Hosptial Aachen
-([Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Stefan Decker)
+([Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Johannes Stegmaier, Stefan Decker)
 
 ## Overview
 
-**DeepSC** is an deep learning framework designed to enhance the analysis of single-cell RNA sequencing (scRNA-seq) data. ...
+**DeepSC** is deep foundation model designed for the analysis of single-cell RNA sequencing (scRNA-seq) data. The model is based on transformer architecture. In our models, we design two branches for inputs of gene and expression seperately. The gene branch is used to encode the gene information, and the expression branch is used to encode the expression information. To model the gene regulatory network and the sparse connectivity, we use Gumbel Softmax to generate the sparse connectivity matrix with three signals (depression, activation, and no change).
 
 ## Features
-- **Pre-trained Deep Learning Models**: Leverage transformer-based and variational autoencoder (VAE) models for enhanced cell-type classification.
-- **Zero-Shot & Few-Shot Learning**: Adapt to new datasets with minimal labeled data using transfer learning.
-- **Efficient Batch Effect Correction**: Automatically harmonize data from multiple sources while preserving biological variation.
-- **Interactive Visualization**: Generate intuitive UMAP/t-SNE plots with improved embedding quality.
-- **Seamless Integration**: Compatible with popular tools like transformers.
+- **Pipeline**: We develop a pipeline for scRNA-seq data analysis, including data preprocessing, model pre-training, and finetuning and inferencing for different downstream tasks.
+
+- **Pre-trained Deep Learning Models**: We develop a deep learning model based on transformer architecture and pretrain it on a large-scale scRNA-seq dataset with more than 30,000,000 cells and 34,683 genes.
+
+- **Downstream Tasks**: We develop a series of downstream tasks for scRNA-seq data analysis, including cell-type annotation, batch effect correction, gene regulatory network inference, perturbation analysis, and cell-cell communication inference.
 
 ## Installation
 
-#### Anaconda
+#### Conda
 1. create conda environment
 ```
 conda create --name deepsc python=3.10
 conda activate deepsc
 ```
 
-2. Install Jupyter lab and kernel
+2. Install dependencies
 ```
-conda install -c conda-forge jupyterlab
-conda install ipykernel
-```
-
-3. Install dependencies
-```
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 # torch==2.6.0+cu126, torchvision==0.21.0+cu126, torchaudio==2.6.0+cu126
-# pip install torch_geometric # torch-geometric==2.6.1
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 # torch==2.6.0+cu126, torchvision==0.21.0+cu126, torchaudio==2.6.0+cu126
+pip install torch_geometric # torch-geometric==2.6.1
 pip install -e .
 ```
-#### Docker
 
 ## Datasets
 
+In this project, we use the following datasets:
+- [Cellxgene Census](https://cellxgene.cziscience.com/datasets)
+- [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA)
+
 ### Download datasets
-1. [Cellxgene Census](https://cellxgene.cziscience.com/datasets)
-2. [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA)
-   * Configure the organs in [organ_list.txt](./data/download/3ac/organ_list.txt)
-   * Collect information of data and metadata
-3.
+To download the datasets, please refer to the [scripts/data/download](./scripts/data/download) directory.
+
+### Data Preprocessing
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 ## Configuration Management with Hydra
