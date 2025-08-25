@@ -77,7 +77,7 @@ save_ckpt_every: 200
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
-sequence_length: 1024
+sequence_length: 10000
 plot_tsne_and_umap: False
 draw_continuous_pred_label_scatter: True
 

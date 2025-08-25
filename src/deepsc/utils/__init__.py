@@ -8,6 +8,8 @@ from .utils import (
     FocalLoss,
     LDAMLoss,
     SequentialDistributedSampler,
+    build_gene_ids_for_dataset,
+    build_vocab_from_csv,
     check_grad_flow,
     compute_bin_distribution,
     compute_classification_metrics,

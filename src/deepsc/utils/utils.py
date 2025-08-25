@@ -1359,3 +1359,46 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
 
     unique_count = adata.obs[cell_type_col].nunique()
     return unique_count
+
+
+import pandas as pd
+
+
+def build_vocab_from_csv(csv_path, special_tokens=("<pad>", "<cls>", "<mlm>")):
+    df = pd.read_csv(csv_path)
+
+    # 必须有 feature_name 和 id 两列
+    assert {"feature_name", "id"}.issubset(
+        df.columns
+    ), "CSV 必须包含 feature_name 和 id 列"
+    df["feature_name"] = df["feature_name"].astype(str)
+    df["id"] = df["id"].astype(int)
+
+    # 基因名 -> 原始id
+    gene2id_raw = dict(zip(df["feature_name"], df["id"]))
+
+    # 特殊 token 预留
+    vocab2id = {}
+    vocab2id[special_tokens[0]] = 0  # <pad> 固定为 0
+    start_offset = 1  # 其它基因 id 全部 +1
+
+    # 加上基因
+    for g, i in gene2id_raw.items():
+        vocab2id[g] = i + start_offset
+
+    # 分配剩余的特殊 token
+    max_id = max(vocab2id.values())
+    for j, tok in enumerate(special_tokens[1:], start=1):  # <cls>, <eoc>
+        vocab2id[tok] = max_id + j
+
+    # 反向表
+    id2vocab = {i: g for g, i in vocab2id.items()}
+    return vocab2id, id2vocab, special_tokens[0], vocab2id[special_tokens[0]]
+
+
+def build_gene_ids_for_dataset(genes, vocab2id, pad_token="<pad>"):
+    pad_id = vocab2id[pad_token]
+    gene_ids = torch.tensor([vocab2id.get(g, pad_id) for g in genes], dtype=int)
+    n_hit = int((gene_ids != pad_id).sum())
+    print(f"[映射] 命中 {n_hit}/{len(genes)} 个基因，未命中的用 <pad>={pad_id}")
+    return gene_ids
