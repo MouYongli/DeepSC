@@ -70,55 +70,157 @@ class PerturbationPrediction:
                     batch_size = len(batch.y)
                     x: torch.Tensor = batch.x  # (batch_size * n_genes, 1)
                     ori_gene_values = x[:, 0].view(batch_size, self.num_genes)
-
-                    self.name2col = {g: i for i, g in enumerate(self.original_genes)}
-
-                    # 在 train 循环拿到 batch 后：
-                    batch_size = len(batch.y)
-                    pert_flags_full = torch.zeros(
-                        batch_size,
-                        self.num_genes,
-                        device=batch.x.device,
-                        dtype=torch.long,
-                    )
-
-                    for r, p in enumerate(batch.pert):
-                        # p 例如: "TP53+ctrl" 或 "EGFR+BRCA1"
-                        for g in p.split("+"):
-                            if g == "ctrl" or g == "" or g is None:
-                                continue
-                            col = self.name2col.get(g, -1)
-                            if col != -1:
-                                pert_flags_full[r, col] = 1
-
                     target_gene_values = batch.y
-                    expr_nonzero_any = (ori_gene_values != 0).any(dim=0)
-                    both_ok_cols_mask = expr_nonzero_any & self.valid_gene_mask  # (N,)
-                    input_gene_ids = torch.nonzero(both_ok_cols_mask, as_tuple=True)[
-                        0
-                    ]  # (L,)
-                    # Question: 此处随机抽取，但是整个batch都是一样的。不知道会不会有问题。我觉得只要把sequence length设大就不会有问题
-                    # TODO: 不能随机！因为会把pert给筛掉！！或者我们可以让perturb不能被筛选掉？？？？
-                    if input_gene_ids.numel() > self.args.sequence_length:
-                        perm = torch.randperm(
-                            input_gene_ids.numel(), device=input_gene_ids.device
-                        )
-                        input_gene_ids = input_gene_ids[
-                            perm[: self.args.sequence_length]
-                        ]  # (max_seq_len,)
+                    self.name2col = {g: i for i, g in enumerate(self.original_genes)}
+                    pad_token_id = self.vocab[self.pad_token]  # e.g. <pad> 的 token id
+                    device = batch.x.device
+                    B, N = batch_size, self.num_genes
 
-                    genes = self.gene_ids[input_gene_ids]
-                    # 按基因大小重拍
-                    sort_idx = torch.argsort(genes)
-                    input_values = ori_gene_values[:, input_gene_ids]  # (B, L)
-                    target_values = target_gene_values[:, input_gene_ids]
-                    # c重拍基因名
-                    genes = genes[sort_idx]
-                    genes = genes.repeat(batch_size, 1)
-                    input_values = input_values[:, sort_idx]
-                    target_values = target_values[:, sort_idx]
-                    pert_flags_full = pert_flags_full[:, input_gene_ids]
-                    pert_flags_full = pert_flags_full[:, sort_idx]
+                    # 确保 gene_ids 是 torch.long tensor
+                    if not isinstance(self.gene_ids, torch.Tensor):
+                        self.gene_ids = torch.as_tensor(
+                            self.gene_ids, dtype=torch.long, device=device
+                        )
+                    else:
+                        self.gene_ids = self.gene_ids.to(
+                            device=device, dtype=torch.long
+                        )
+
+                    # ------- 构造每个样本的 perturb 列 one-hot (全基因空间) -------
+                    name2col = getattr(self, "name2col", None)
+                    if name2col is None:
+                        self.name2col = {
+                            g: i for i, g in enumerate(self.original_genes)
+                        }
+                        name2col = self.name2col
+
+                    pert_flags_full = torch.zeros(B, N, device=device, dtype=torch.long)
+                    for r, p in enumerate(batch.pert):
+                        # 例如 "TP53+ctrl" 或 "EGFR+BRCA1"
+                        for g in p.split("+"):
+                            if g and g != "ctrl":
+                                j = name2col.get(g, -1)
+                                if j != -1:
+                                    pert_flags_full[r, j] = 1
+
+                    # ------- 逐细胞选列 + 采样 + 排序 -------
+                    sel_ids_list = []  # 每个细胞选到的 raw 列索引 (不等长)
+                    genes_tok_list = []  # 每个细胞对应的 vocab id 序列 (不等长)
+                    inp_vals_list = []  # 每个细胞的输入表达 (不等长)
+                    tgt_vals_list = []  # 每个细胞的目标表达 (不等长)
+                    pert_flags_list = []  # 每个细胞的 perturb 标记 (不等长)
+
+                    Lmax = 0
+                    for i in range(B):
+                        # 基于该细胞：非零表达 或 该细胞的扰动基因；同时要求 gene_ids!=0（在 vocab 中）
+                        expr_nz_i = (ori_gene_values[i] != 0) & (self.gene_ids != 0)
+                        pert_cols_i = pert_flags_full[i].bool() & (self.gene_ids != 0)
+                        sel_mask_i = expr_nz_i | pert_cols_i
+                        sel_idx_i = torch.nonzero(sel_mask_i, as_tuple=True)[0]  # (Li,)
+
+                        # 若为空，至少保底加入所有扰动基因列（可能仍为空），或者随机挑几个非 pad 的基因
+                        if sel_idx_i.numel() == 0:
+                            if pert_cols_i.any():
+                                sel_idx_i = torch.nonzero(pert_cols_i, as_tuple=True)[0]
+                            else:
+                                # 退路：在有效基因里随机挑最多 sequence_length 个
+                                valid_cols = torch.nonzero(
+                                    self.gene_ids != 0, as_tuple=True
+                                )[0]
+                                k = min(valid_cols.numel(), self.args.sequence_length)
+                                if k > 0:
+                                    perm = torch.randperm(
+                                        valid_cols.numel(), device=device
+                                    )[:k]
+                                    sel_idx_i = valid_cols[perm]
+
+                        # 限长：优先保留扰动基因，再随机补足
+                        Llim = self.args.sequence_length
+                        if sel_idx_i.numel() > Llim:
+                            # 先保留 perturb 列
+                            pert_sel = torch.nonzero(
+                                pert_cols_i[sel_idx_i], as_tuple=True
+                            )[0]
+                            non_pert_sel = torch.arange(
+                                sel_idx_i.numel(), device=device
+                            )
+                            non_pert_sel = non_pert_sel[
+                                ~torch.isin(non_pert_sel, pert_sel)
+                            ]
+                            keep = []
+                            if pert_sel.numel() > 0:
+                                # 如果扰动列多于限长，也只留前 Llim 个（或随机抽 Llim 个）
+                                if pert_sel.numel() >= Llim:
+                                    perm = torch.randperm(
+                                        pert_sel.numel(), device=device
+                                    )[:Llim]
+                                    keep = pert_sel[perm]
+                                else:
+                                    keep = pert_sel
+                                    need = Llim - pert_sel.numel()
+                                    if non_pert_sel.numel() > 0 and need > 0:
+                                        perm = torch.randperm(
+                                            non_pert_sel.numel(), device=device
+                                        )[:need]
+                                        keep = torch.cat(
+                                            [keep, non_pert_sel[perm]], dim=0
+                                        )
+                            else:
+                                perm = torch.randperm(sel_idx_i.numel(), device=device)[
+                                    :Llim
+                                ]
+                                keep = perm
+                            sel_idx_i = sel_idx_i[keep]
+
+                        # 按 vocab id 升序排序（稳定顺序）
+                        genes_i = self.gene_ids[sel_idx_i]  # (Li,)
+                        ord_i = torch.argsort(genes_i)
+                        sel_idx_i = sel_idx_i[ord_i]
+                        genes_i = genes_i[ord_i]
+
+                        # 收集不等长序列
+                        sel_ids_list.append(sel_idx_i)
+                        genes_tok_list.append(genes_i)
+                        inp_vals_list.append(ori_gene_values[i, sel_idx_i])
+                        tgt_vals_list.append(target_gene_values[i, sel_idx_i])
+                        pert_flags_list.append(pert_flags_full[i, sel_idx_i])
+
+                        Lmax = max(Lmax, sel_idx_i.numel())
+
+                    # ------- 把不等长序列 pad 成等长，并构造 padding mask -------
+                    def pad1d(x, L, pad_val):
+                        if x.numel() == L:
+                            return x
+                        out = x.new_full((L,), pad_val)
+                        out[: x.numel()] = x
+                        return out
+
+                    mapped_input_gene_ids = torch.stack(
+                        [pad1d(t, Lmax, pad_token_id) for t in genes_tok_list], dim=0
+                    )  # (B, Lmax)
+                    input_values = torch.stack(
+                        [pad1d(t, Lmax, 0.0) for t in inp_vals_list], dim=0
+                    ).to(
+                        dtype=ori_gene_values.dtype
+                    )  # (B, Lmax)
+                    target_values = torch.stack(
+                        [pad1d(t, Lmax, 0.0) for t in tgt_vals_list], dim=0
+                    ).to(
+                        dtype=target_gene_values.dtype
+                    )  # (B, Lmax)
+                    input_pert_flags = torch.stack(
+                        [pad1d(t, Lmax, 0) for t in pert_flags_list], dim=0
+                    ).to(
+                        dtype=torch.long
+                    )  # (B, Lmax)
+                    print(input_values.shape)
+                    print(target_values.shape)
+                    print(input_pert_flags.shape)
+                    print(mapped_input_gene_ids.shape)
+                    # padding mask: True 表示是 pad 位置需要 mask
+                    src_key_padding_mask = (
+                        mapped_input_gene_ids == pad_token_id
+                    )  # (B, Lmax)
 
                     # for i in range(batch_size):
                     #     print(batch.pert_idx[i])

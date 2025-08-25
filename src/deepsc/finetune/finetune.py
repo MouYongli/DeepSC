@@ -4,7 +4,7 @@ from lightning.fabric import Fabric
 from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
-from deepsc.models.deepsc_new.model import DeepSCClassifier
+from deepsc.models.generation_deepsc.model import DeepSCClassifier
 from deepsc.utils.utils import setup_logging
 from src.deepsc.finetune.perturbation_prediction import PerturbationPrediction
 from src.deepsc.utils import count_unique_cell_types
