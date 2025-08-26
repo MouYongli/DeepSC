@@ -2,6 +2,8 @@ import logging
 import os
 import os.path as osp
 import zipfile
+import tarfile
+import gzip
 
 import pandas as pd
 import requests
@@ -106,6 +108,17 @@ def is_valid_url(url):
     return True
 
 
+def extract_gzip_tar(file_path, extract_to):
+    """解压 gzip 压缩的 tar 文件"""
+    try:
+        with gzip.open(file_path, 'rb') as gz_file:
+            with tarfile.open(fileobj=gz_file, mode='r') as tar:
+                tar.extractall(path=extract_to)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def merge_logs(log_path, main_log_file):
     """合并子进程的日志到主日志文件"""
     with open(main_log_file, "a") as main_log:
@@ -120,38 +133,62 @@ def merge_logs(log_path, main_log_file):
 def extract_and_delete_zips(root_folder, csv_path):
     """
     遍历 root_folder 下的所有子文件夹，找到所有 .zip 文件并解压到以 .zip 文件名命名的文件夹中，之后删除 .zip 文件。
+    修正版本：正确处理被错误命名为 .zip 但实际上是 gzip 压缩 tar 文件的情况。
     失败的解压记录会存入 pandas DataFrame，并写入 csv_path (CSV) 文件中。
     """
-    logging.error("开始解压缩......")
+    logging.info("开始解压缩......")
     failed_extractions = []  # 存储失败的 .zip 文件信息
+    success_count = 0
+    failed_count = 0
 
     for folder_path, _, files in os.walk(root_folder):
         for file in files:
             if file.lower().endswith(".zip"):  # 仅处理 .zip 文件
-                zip_path = os.path.join(folder_path, file)
+                file_path = os.path.join(folder_path, file)
                 extract_folder = os.path.join(
                     folder_path, file[:-4]
                 )  # 创建去掉 .zip 后的文件夹
+
+                logging.info(f"处理文件: {file_path}")
 
                 try:
                     # 创建解压目标文件夹（如果不存在）
                     os.makedirs(extract_folder, exist_ok=True)
 
-                    # 解压 ZIP 文件
-                    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                        zip_ref.extractall(extract_folder)
-                    logging.info(f"解压成功: {zip_path} -> {extract_folder}")
+                    # 首先尝试作为 gzip tar 文件解压
+                    success, error = extract_gzip_tar(file_path, extract_folder)
+                    
+                    if success:
+                        logging.info(f"成功解压 gzip tar 文件: {file_path} -> {extract_folder}")
+                        # 删除原文件
+                        os.remove(file_path)
+                        logging.info(f"已删除原文件: {file_path}")
+                        success_count += 1
+                    else:
+                        # 如果 gzip tar 解压失败，尝试作为标准 ZIP 文件解压
+                        try:
+                            with zipfile.ZipFile(file_path, "r") as zip_ref:
+                                zip_ref.extractall(extract_folder)
+                            logging.info(f"成功解压 ZIP 文件: {file_path} -> {extract_folder}")
+                            
+                            # 删除 ZIP 文件
+                            os.remove(file_path)
+                            logging.info(f"已删除 ZIP 文件: {file_path}")
+                            success_count += 1
+                            
+                        except zipfile.BadZipFile as zip_error:
+                            error_message = f"gzip tar 解压失败: {error}; ZIP 解压失败: {str(zip_error)}"
+                            logging.error(f"解压失败: {file_path}, 错误: {error_message}")
+                            failed_extractions.append([folder_path, file, error_message])
+                            failed_count += 1
 
-                    # 删除 ZIP 文件
-                    os.remove(zip_path)
-                    logging.info(f"已删除 ZIP 文件: {zip_path}")
-
-                except zipfile.BadZipFile as e:
-                    error_message = str(e)
-                    logging.error(f"解压失败: {zip_path}, 错误: {error_message}")
-
-                    # 记录失败信息
+                except Exception as e:
+                    error_message = f"处理文件时出错: {str(e)}"
+                    logging.error(f"处理文件时出错: {file_path}, 错误: {error_message}")
                     failed_extractions.append([folder_path, file, error_message])
+                    failed_count += 1
+
+    logging.info(f"解压完成! 成功: {success_count}, 失败: {failed_count}")
 
     # 如果有解压失败的文件，存入 DataFrame 并写入 CSV
     if failed_extractions:

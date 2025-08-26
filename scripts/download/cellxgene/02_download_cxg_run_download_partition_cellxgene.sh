@@ -12,7 +12,7 @@ set +a
 
 # 激活 conda 环境
 source /home/rn260358/miniforge3/etc/profile.d/conda.sh
-conda activate scbertnew # 激活conda环境
+conda activate deepsc # 激活conda环境
 
 # 不要忘记设置query
 query_name=$(sed -n "${SLURM_ARRAY_TASK_ID}p" "$QUERY_PATH_CELLXGENE")
