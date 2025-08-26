@@ -1,9 +1,10 @@
 import csv
 import logging
+import os
 
+from deepsc.data.preprocessing.config import GENE_MAP_PATH, HGNC_DATABASE, SCRIPTS_ROOT
+from deepsc.data.preprocessing.get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 from deepsc.utils import setup_logging
-from .config import GENE_MAP_PATH, HGNC_DATABASE
-from .get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 
 
 def map_genes_to_hgnc(input_gene_file, hgnc_database_file, output_file):
@@ -138,8 +139,12 @@ def process_gene_names(
     ca3_input_path: str,
     hgnc_database_path: str,
 ):
-    cxg_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/cxg_matched_genes.csv"
-    ca3_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/3ca_matched_genes.csv"
+    cxg_mapped_output = os.path.join(
+        SCRIPTS_ROOT, "preprocessing", "cxg_matched_genes.csv"
+    )
+    ca3_mapped_output = os.path.join(
+        SCRIPTS_ROOT, "preprocessing", "3ca_matched_genes.csv"
+    )
     main_log_file = setup_logging("preprocessing", "./logs")
     map_genes_to_hgnc(cxg_input_path, hgnc_database_path, cxg_mapped_output)
     map_genes_to_hgnc(ca3_input_path, hgnc_database_path, ca3_mapped_output)
