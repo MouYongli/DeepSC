@@ -221,7 +221,29 @@ class PerturbationPrediction:
                     src_key_padding_mask = (
                         mapped_input_gene_ids == pad_token_id
                     )  # (B, Lmax)
-
+                    # ------- 按 collator 的分箱规则对 input_values 做离散化（5 bins） -------
+                    num_bins = 5
+                    discrete_input_bins = torch.zeros_like(
+                        input_values, dtype=torch.long
+                    )
+                    for i in range(B):
+                        row_vals = input_values[i]
+                        min_val = row_vals.min()
+                        max_val = row_vals.max()
+                        norm = (row_vals - min_val) / (max_val - min_val + 1e-8)
+                        bins = torch.floor(norm * (num_bins - 1)).long()
+                        bins = torch.clamp(bins, 0, num_bins - 1) + 1
+                        discrete_input_bins[i] = bins
+                    print(torch.unique(discrete_input_bins, return_counts=True))
+                    self.model.train()
+                    regression_output, y, gene_emb, expr_emb = self.model(
+                        gene_ids=mapped_input_gene_ids,
+                        expression_bin=discrete_input_bins,
+                        normalized_expr=input_values,
+                        input_pert_flags=input_pert_flags,
+                    )
+                    print(regression_output)
+                    print(regression_output.shape)
                     # for i in range(batch_size):
                     #     print(batch.pert_idx[i])
                     #     print(torch.unique(pert_flags_full[i], return_counts=True))

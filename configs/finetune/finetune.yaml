@@ -12,7 +12,7 @@ shuffel_files_each_epoch: False
 
 # Loss weights
 enable_l0: False
-enable_mse: False
+enable_mse: True
 enable_ce: False
 ce_loss_weight: 1.0
 target_mse_loss_weight: 3.0

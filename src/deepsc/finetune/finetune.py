@@ -4,7 +4,6 @@ from lightning.fabric import Fabric
 from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
-from deepsc.models.generation_deepsc.model import DeepSCClassifier
 from deepsc.utils.utils import setup_logging
 from src.deepsc.finetune.perturbation_prediction import PerturbationPrediction
 from src.deepsc.utils import count_unique_cell_types
@@ -36,13 +35,6 @@ def finetune(cfg: DictConfig):
     # model = select_model(cfg)
     # instantiate model
     model: nn.Module = hydra.utils.instantiate(cfg.model)
-    encoder = model.float()
-    model = DeepSCClassifier(
-        deepsc_encoder=encoder,
-        n_cls=cfg.cell_type_count,
-        num_layers_cls=3,
-        cell_emb_style="avg-pool",
-    )
     model = model.float()
     trainer = PerturbationPrediction(cfg, fabric=fabric, model=model)
     trainer.train()

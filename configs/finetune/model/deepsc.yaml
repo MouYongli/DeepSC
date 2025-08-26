@@ -1,4 +1,4 @@
-_target_: src.deepsc.models.deepsc_new.model.DeepSC
+_target_: src.deepsc.models.generation_deepsc.model.DeepSC
 embedding_dim: 256
 num_genes: 34683
 num_layers: 10
