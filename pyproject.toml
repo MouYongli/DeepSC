@@ -5,17 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "deepsc"
 version = "0.1.0"
-description = "Deep Foundation Models for Single Cell RNA Sequencing"
+description = "DeepSC: Deep Foundation Models for Single Cell RNA Sequencing"
 authors = [
     { name = "Mou YongLi", email = "mou@dbis.rwth-aachen.de" },
     { name = "Ang Li" },
     { name = "Er Jin" },
     { name = "Sikander Hayat" },
+    { name = "Johannes Stegmaier" },
     { name = "Stefan Decker" }
 ]
 license = { text = "MIT" }
 readme = "README.md"  # Optional
-requires-python = ">=3.7"  # Adjust as needed
+requires-python = ">=3.10"
 urls = { "Homepage" = "https://github.com/MouYongli/DeepSC" }
 classifiers = [
     "Development Status :: 1 - Alpha",
@@ -26,19 +27,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "numpy==2.2.3",
-    "pandas==2.2.3",
-    "pyarrow==19.0.1",
-    "dask==2025.2.0",
-    "matplotlib==3.10.0",
-    "hydra-core==1.3.2",
-    "cellxgene_census==1.17.0",
-    "wandb==0.21.1",
-    "bs4==0.0.2",
+    "cellxgene-census==1.17.0"
 ]
-
-[tool.setuptools]
-package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

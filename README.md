@@ -1,9 +1,8 @@
 # DeepSC: Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![CUDA](https://img.shields.io/badge/CUDA-12.4-green)](https://developer.nvidia.com/cuda-downloads)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.5.0-red)](https://pytorch.org/get-started/locally/)
+[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
+[![CUDA](https://img.shields.io/badge/CUDA-12.9-green)](https://developer.nvidia.com/cuda-downloads)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.8.0-red)](https://pytorch.org/get-started/locally/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [![Forks](https://img.shields.io/github/forks/MouYongli/DeepSC?style=social)](https://github.com/MouYongli/DeepSC/network/members)
@@ -15,6 +14,10 @@
 <!-- [![Build Status](https://img.shields.io/github/actions/workflow/status/MouYongli/DeepSC/ci.yml)](https://github.com/MouYongli/DeepSC/actions)
 [![Code Quality](https://img.shields.io/lgtm/grade/python/g/MouYongli/DeepSC.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/MouYongli/DeepSC/context:python) -->
 
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+<!-- 
 [![Docker](https://img.shields.io/badge/Docker-Supported-blue)](https://hub.docker.com/r/YOUR_DOCKER_IMAGE)
 [![Colab](https://img.shields.io/badge/Open%20in-Colab-yellow)](https://colab.research.google.com/github/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/blob/main/notebooks/demo.ipynb)
 [![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
@@ -23,10 +26,10 @@
 
 [![WeChat](https://img.shields.io/badge/WeChat-公众号名称-green)](https://your-wechat-link.com)
 [![Weibo](https://img.shields.io/badge/Weibo-关注-red)](https://weibo.com/YOUR_WEIBO_LINK)
-<!-- [![Discord](https://img.shields.io/discord/YOUR_DISCORD_SERVER_ID?label=Discord&logo=discord&color=5865F2)](https://discord.gg/YOUR_INVITE_LINK) -->
-<!-- [![Twitter](https://img.shields.io/twitter/follow/YOUR_TWITTER_HANDLE?style=social)](https://twitter.com/YOUR_TWITTER_HANDLE) -->
+[![Discord](https://img.shields.io/discord/YOUR_DISCORD_SERVER_ID?label=Discord&logo=discord&color=5865F2)](https://discord.gg/YOUR_INVITE_LINK)
+[![Twitter](https://img.shields.io/twitter/follow/YOUR_TWITTER_HANDLE?style=social)](https://twitter.com/YOUR_TWITTER_HANDLE) -->
 
-This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data" by DBIS and LfB RWTH Aachen University and RWTH Universty Hosptial Aachen
+This is official repo for "DeepSC: Deep Transcriptomic Foundation Models for Single-Cell RNA-Sequencing Data" by DBIS and LfB RWTH Aachen University and RWTH Universty Hosptial Aachen
 ([Yongli Mou*](mou@dbis.rwth-aachen.de), Ang Li, Er Jin, Sikander Hayat, Johannes Stegmaier, Stefan Decker)
 
 ## Overview
@@ -43,16 +46,21 @@ This is official repo for "Deep Transcriptomic Foundation Models for Single-Cell
 ## Installation
 
 #### Conda
-1. create conda environment
+1. Clone the repository
+```bash
+git clone https://github.com/MouYongli/DeepSC.git
+cd DeepSC
 ```
-conda create --name deepsc python=3.10
+
+2. Create conda environment
+```
+conda create --name deepsc python=3.12
 conda activate deepsc
 ```
 
 2. Install dependencies
 ```
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 # torch==2.6.0+cu126, torchvision==0.21.0+cu126, torchaudio==2.6.0+cu126
-pip install torch_geometric # torch-geometric==2.6.1
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu129 # torch==2.8.0+cu129, torchvision==0.23.0+cu129
 pip install -e .
 ```
 
@@ -63,7 +71,7 @@ In this project, we use the following datasets:
 - [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA)
 
 ### Download datasets
-To download the datasets, please refer to the [scripts/data/download](./scripts/data/download) directory.
+To download the datasets, please refer to the [scripts/data/download](./scripts/data/download) folder and follow the instructions in [README.md](./scripts/data/download/README.md).
 
 ### Data Preprocessing
 
