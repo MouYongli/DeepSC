@@ -70,7 +70,20 @@ In this project, we use the following datasets:
 - [Cellxgene Census](https://cellxgene.cziscience.com/datasets)
 - [weizmann 3CA](https://www.weizmann.ac.il/sites/3CA)
 
+The dataset used in this project is large, therefore, it is recommended to store the datasets in a location with sufficient disk space, and then create symbolic links under the project root `data/` directory pointing to each dataset.
+
+For example, if you have the datasets in `/path/to/your/dataset`, you can create symbolic links as follows:
+
+```bash
+mkdir /path/to/your/dataset
+mkdir /path/to/your/dataset/cellxgene
+mkdir /path/to/your/dataset/3ca
+ln -s /path/to/your/dataset/cellxgene data/cellxgene
+ln -s /path/to/your/dataset/3ca data/3ca
+```
+
 ### Download datasets
+
 To download the datasets, please refer to the [scripts/data/download](./scripts/data/download) folder and follow the instructions in [README.md](./scripts/data/download/README.md).
 
 ### Data Preprocessing

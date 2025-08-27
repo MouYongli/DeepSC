@@ -1,53 +1,8 @@
 import os
 from typing import List
-
-import cellxgene_census
-from data_config import VERSION
-
 import argparse
-
-parser = argparse.ArgumentParser(
-    description="Download a given partition cell of the query in h5ad"
-)
-
-parser.add_argument(
-    "--query-name",
-    type=str,
-    required=True,
-    help="query name to build the index",
-)
-
-parser.add_argument(
-    "--partition-idx",
-    type=int,
-    required=True,
-    help="partition index to download",
-)
-parser.add_argument(
-    "--output-dir",
-    type=str,
-    required=True,
-    help="Directory to store the output h4ad file",
-)
-
-parser.add_argument(
-    "--index-dir",
-    type=str,
-    required=True,
-    help="Directory to find the index file",
-)
-
-parser.add_argument(
-    "--max-partition-size",
-    type=int,
-    required=True,
-    help="The max partition size for each partition(chunk)",
-)
-
-
-args = parser.parse_args()
-
-# print(args)
+import cellxgene_census
+from deepsc.data.download.cellxgene.data_config import VERSION
 
 
 def define_partition(partition_idx, id_list, partition_size) -> List[str]:
@@ -103,6 +58,46 @@ def del_partition(partition_idx, query_name, output_dir, index_dir, partition_si
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Download a given partition cell of the query in h5ad"
+    )
+
+    parser.add_argument(
+        "--query-name",
+        type=str,
+        required=True,
+        help="query name to build the index",
+    )
+
+    parser.add_argument(
+        "--partition-idx",
+        type=int,
+        required=True,
+        help="partition index to download",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory to store the output h4ad file",
+    )
+
+    parser.add_argument(
+        "--index-dir",
+        type=str,
+        required=True,
+        help="Directory to find the index file",
+    )
+
+    parser.add_argument(
+        "--max-partition-size",
+        type=int,
+        required=True,
+        help="The max partition size for each partition(chunk)",
+    )
+
+
+    args = parser.parse_args()
 
     download_partition(
         partition_idx=args.partition_idx,
