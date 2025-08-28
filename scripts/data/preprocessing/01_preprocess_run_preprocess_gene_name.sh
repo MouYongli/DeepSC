@@ -1,3 +1,6 @@
 #!/bin/bash
+set -a
+source .env
+set +a
 
-python -m scripts.preprocessing.gene_name_normalization \
+python -m deepsc.data.preprocessing.gene_name_normalization \
