@@ -5,5 +5,5 @@ source .env
 set +a
 
 python -m deepsc.data.preprocessing.batch_normalize \
-  --input_dir /home/angli/baseline/DeepSC/data/3ca/merged_batch_data_csr \
-  --output_dir /home/angli/baseline/DeepSC/data/3ca/merged_batch_data_csr_1p_normalized \
+  --input_dir $MERGED_DATA_PATH_3CA \
+  --output_dir $DATASET_BEFORE_SHUFFEL/3ca \
