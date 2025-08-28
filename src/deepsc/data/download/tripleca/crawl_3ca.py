@@ -5,7 +5,7 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-from .config import BASE_URL, ORGAN_LIST
+from deepsc.data.download.tripleca.config import BASE_URL, ORGAN_LIST
 
 
 def data_crawl():

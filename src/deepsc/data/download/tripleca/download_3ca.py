@@ -15,33 +15,7 @@ import argparse
 import multiprocessing
 import time  # 用于延迟重试
 from deepsc.utils import setup_logging
-from .crawl_3ca import data_crawl
-
-
-def get_parse():
-    parser = argparse.ArgumentParser(
-        description="Download files using Dask with multiprocessing."
-    )
-    parser.add_argument(
-        "--output_path",
-        type=str,
-        required=True,
-        help="Path to the directory where files will be saved",
-    )
-    parser.add_argument(
-        "--log_path", type=str, required=True, help="Path to the log directory"
-    )
-    parser.add_argument(
-        "--num_files", type=int, default=3, help="Number of files to download"
-    )
-    parser.add_argument(
-        "--num_processes",
-        type=int,
-        default=min(4, os.cpu_count()),
-        help="Number of parallel processes",
-    )
-    return parser.parse_args()
-
+from deepsc.data.download.tripleca.crawl_3ca import data_crawl
 
 def download_file(url, folder_path, filename, log_path):
     """子进程下载文件，返回失败信息（如果失败）"""
@@ -251,9 +225,29 @@ def extract_and_delete_zips(root_folder, csv_path):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Download TripleCA (3CA) dataset using Dask with multiprocessing."
+    )
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        required=True,
+        help="Path to the directory where files will be saved",
+    )
+    parser.add_argument(
+        "--log_path", type=str, required=True, help="Path to the log directory"
+    )
+    parser.add_argument(
+        "--num_files", type=int, default=3, help="Number of files to download"
+    )
+    parser.add_argument(
+        "--num_processes",
+        type=int,
+        default=min(4, os.cpu_count()),
+        help="Number of parallel processes",
+    )
+    args = parser.parse_args()
     download_url_table = data_crawl()
-    print(download_url_table)
-    args = get_parse()
 
     main_log_file = setup_logging("download", args.log_path)
     failed_output_csv = osp.join(args.log_path, "failed_downloads.csv")

@@ -27,7 +27,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "cellxgene-census==1.17.0"
+    "cellxgene-census==1.17.0",
+    "dask==2025.7.0",
+    "bs4==0.0.2",
+    "wandb==0.21.1"
 ]
 
 [tool.setuptools.packages.find]
