@@ -13,16 +13,27 @@ from dask.diagnostics import ProgressBar
 
 import argparse
 import multiprocessing
-import time  # 用于延迟重试
-from deepsc.utils import setup_logging
+import time
 from deepsc.data.download.tripleca.crawl_3ca import data_crawl
+from deepsc.utils import setup_logging
+
 
 def download_file(url, folder_path, filename, log_path):
-    """子进程下载文件，返回失败信息（如果失败）"""
+    """Download a single file in a worker process.
+
+    Args:
+        url (str): File URL.
+        folder_path (str): Target folder to save the file.
+        filename (str): Output filename.
+        log_path (str): Directory where worker logs are stored.
+
+    Returns:
+        dict | None: Error info dict if failed; otherwise None.
+    """
     process_id = multiprocessing.current_process().pid
     process_log_file = osp.join(log_path, f"worker_{process_id}.log")
 
-    # 设置单独的日志文件
+    # Configure per-process log file
     logging.basicConfig(
         filename=process_log_file,
         level=logging.INFO,
@@ -30,72 +41,81 @@ def download_file(url, folder_path, filename, log_path):
         filemode="a",
     )
 
-    logging.info(f"进程 {process_id} 开始下载: {filename} -> {folder_path}")
+    logging.info(
+        "Process %s starts downloading: %s -> %s",
+        process_id,
+        filename,
+        folder_path,
+    )
 
-    # 检查 URL 是否有效
+    # Validate URL by HEAD request
     try:
         response = requests.head(url, timeout=5)
-        if response.status_code not in [200, 301, 302]:
+        if response.status_code not in (200, 301, 302):
             raise requests.RequestException(
                 f"Invalid status code: {response.status_code}"
             )
-    except requests.RequestException as e:
-        error_message = f"无效的 URL，跳过下载: {url}, 错误: {e}"
+    except requests.RequestException as exc:
+        error_message = f"Invalid URL, skipped: {url}, error: {exc}"
         logging.error(error_message)
         return {
             "url": url,
             "filename": filename,
             "folderpath": folder_path,
-            "error": str(e),
+            "error": str(exc),
         }
 
-    # 下载文件
+    # Download body
     try:
         response = requests.get(url, stream=True, timeout=10)
-        response.raise_for_status()  # 确保请求成功
+        response.raise_for_status()
         file_path = osp.join(folder_path, filename)
 
-        with open(file_path, "wb") as file:
+        with open(file_path, "wb") as fp:
             for chunk in response.iter_content(chunk_size=8192):
-                file.write(chunk)
+                fp.write(chunk)
 
-        logging.info(f"下载完成: {file_path}")
-        return None  # 成功下载，返回 None
-    except requests.exceptions.RequestException as e:
-        error_message = f"下载失败: {url}, 错误: {e}"
+        logging.info("Download finished: %s", file_path)
+        return None
+    except requests.exceptions.RequestException as exc:
+        error_message = f"Download failed: {url}, error: {exc}"
         logging.error(error_message)
         return {
             "url": url,
             "filename": filename,
             "folderpath": folder_path,
-            "error": str(e),
+            "error": str(exc),
         }
 
 
 def is_valid_url(url):
-    """检查 URL 是否有效"""
+    """Check whether a URL-like field is valid (non-empty string)."""
     if not isinstance(url, str) or pd.isna(url):
         return False
-
-    url = url.strip()
-    if url == "":
-        return False
-    return True
+    return url.strip() != ""
 
 
 def extract_gzip_tar(file_path, extract_to):
-    """解压 gzip 压缩的 tar 文件"""
+    """Extract a gzip-compressed tar archive.
+
+    Args:
+        file_path (str): Path to .tar.gz (or gzipped tar).
+        extract_to (str): Output directory.
+
+    Returns:
+        tuple[bool, str | None]: (success, error_message)
+    """
     try:
         with gzip.open(file_path, "rb") as gz_file:
             with tarfile.open(fileobj=gz_file, mode="r") as tar:
                 tar.extractall(path=extract_to)
         return True, None
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
 
 
 def merge_logs(log_path, main_log_file):
-    """合并子进程的日志到主日志文件"""
+    """Append worker logs into the main log file and remove worker logs."""
     with open(main_log_file, "a") as main_log:
         for log_filename in os.listdir(log_path):
             if log_filename.startswith("worker_") and log_filename.endswith(".log"):
@@ -106,111 +126,123 @@ def merge_logs(log_path, main_log_file):
 
 
 def detect_file_type(file_path):
-    """
-    使用file命令检测文件的实际格式
+    """Detect actual file type using `file` command.
+
+    Returns:
+        str: One of {"tar.gz", "zip", "tar", "unknown"}.
     """
     try:
         result = subprocess.run(
-            ["file", file_path], capture_output=True, text=True, check=True
+            ["file", file_path],
+            capture_output=True,
+            text=True,
+            check=True,
         )
         file_type = result.stdout.lower()
 
         if "gzip compressed" in file_type and "tar" in file_type:
             return "tar.gz"
-        elif "zip archive" in file_type:
+        if "zip archive" in file_type:
             return "zip"
-        elif "tar archive" in file_type:
+        if "tar archive" in file_type:
             return "tar"
-        else:
-            return "unknown"
+        return "unknown"
     except subprocess.CalledProcessError:
         return "unknown"
 
 
 def extract_file(file_path, extract_folder):
-    """
-    根据文件类型解压文件
+    """Extract an archive based on detected type.
+
+    Args:
+        file_path (str): Path to the archive (may be misnamed).
+        extract_folder (str): Output directory.
+
+    Returns:
+        tuple[bool, str]: (success, message)
     """
     file_type = detect_file_type(file_path)
 
     if file_type == "zip":
-        # 标准ZIP文件
         with zipfile.ZipFile(file_path, "r") as zip_ref:
             zip_ref.extractall(extract_folder)
-        return True, "使用zipfile解压ZIP文件"
+        return True, "Extracted ZIP using zipfile"
 
-    elif file_type == "tar.gz":
-        # gzip压缩的tar文件
+    if file_type == "tar.gz":
         with tarfile.open(file_path, "r:gz") as tar_ref:
             tar_ref.extractall(extract_folder)
-        return True, "使用tarfile解压gzip压缩的tar文件"
+        return True, "Extracted gzip-compressed tar using tarfile"
 
-    elif file_type == "tar":
-        # 标准tar文件
+    if file_type == "tar":
         with tarfile.open(file_path, "r") as tar_ref:
             tar_ref.extractall(extract_folder)
-        return True, "使用tarfile解压tar文件"
+        return True, "Extracted TAR using tarfile"
 
-    else:
-        return False, f"未知文件格式: {file_type}"
+    return False, f"Unknown file type: {file_type}"
 
 
 def extract_and_delete_zips(root_folder, csv_path):
+    """Extract all `.zip`-named files under `root_folder` and delete originals.
+
+    This function auto-detects actual file formats (even if misnamed as .zip),
+    extracts into a folder named after the file stem, and records failures
+    to a CSV.
+
+    Args:
+        root_folder (str): Root directory to scan recursively.
+        csv_path (str): Path to CSV file for failed extractions.
     """
-    遍历 root_folder 下的所有子文件夹，找到所有 .zip 文件并解压到以 .zip 文件名命名的文件夹中，之后删除 .zip 文件。
-    修正版本：能自动检测文件实际格式，正确处理被错误命名为 .zip 但实际上是其他压缩格式的文件。
-    失败的解压记录会存入 pandas DataFrame，并写入 csv_path (CSV) 文件中。
-    """
-    logging.info("开始解压缩......")
-    failed_extractions = []  # 存储失败的 .zip 文件信息
+    logging.info("Start extracting archives...")
+    failed_extractions = []
     success_count = 0
     failed_count = 0
 
     for folder_path, _, files in os.walk(root_folder):
         for file in files:
-            if file.lower().endswith(".zip"):  # 仅处理 .zip 文件
+            if file.lower().endswith(".zip"):
                 zip_path = os.path.join(folder_path, file)
-                extract_folder = os.path.join(
-                    folder_path, file[:-4]
-                )  # 创建去掉 .zip 后的文件夹
+                extract_folder = os.path.join(folder_path, file[:-4])
 
-                logging.info(f"处理文件: {zip_path}")
+                logging.info("Processing: %s", zip_path)
 
                 try:
-                    # 创建解压目标文件夹（如果不存在）
                     os.makedirs(extract_folder, exist_ok=True)
 
-                    # 自动检测文件格式并解压
                     success, message = extract_file(zip_path, extract_folder)
 
                     if success:
                         logging.info(
-                            f"解压成功: {zip_path} -> {extract_folder} ({message})"
+                            "Extracted: %s -> %s (%s)",
+                            zip_path,
+                            extract_folder,
+                            message,
                         )
-
-                        # 删除原文件
                         os.remove(zip_path)
-                        logging.info(f"已删除文件: {zip_path}")
+                        logging.info("Removed: %s", zip_path)
                         success_count += 1
                     else:
-                        logging.error(f"解压失败: {zip_path}, 错误: {message}")
+                        logging.error(
+                            "Extraction failed: %s, error: %s", zip_path, message
+                        )
                         failed_extractions.append([folder_path, file, message])
                         failed_count += 1
 
-                except Exception as e:
-                    error_message = str(e)
-                    logging.error(f"解压失败: {zip_path}, 错误: {error_message}")
-
-                    # 记录失败信息
+                except Exception as exc:  # noqa: BLE001
+                    error_message = str(exc)
+                    logging.error(
+                        "Extraction failed: %s, error: %s", zip_path, error_message
+                    )
                     failed_extractions.append([folder_path, file, error_message])
                     failed_count += 1
 
-    logging.info(f"解压完成! 成功: {success_count}, 失败: {failed_count}")
+    logging.info(
+        "Extraction finished. Success: %s, Failed: %s", success_count, failed_count
+    )
 
-    # 如果有解压失败的文件，存入 DataFrame 并写入 CSV
     if failed_extractions:
         df = pd.DataFrame(
-            failed_extractions, columns=["文件夹路径", "文件名", "错误信息"]
+            failed_extractions,
+            columns=["folder_path", "filename", "error_message"],
         )
         df.to_csv(
             csv_path,
@@ -219,95 +251,97 @@ def extract_and_delete_zips(root_folder, csv_path):
             encoding="utf-8-sig",
             header=not os.path.exists(csv_path),
         )
-        logging.info(f"失败的解压记录已保存至: {csv_path}")
+        logging.info("Failed extraction log saved to: %s", csv_path)
     else:
-        logging.info("全部文件解压成功")
+        logging.info("All archives extracted successfully.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Download TripleCA (3CA) dataset using Dask with multiprocessing."
+        description="Download TripleCA (3CA) dataset using Dask with multiprocessing.",
     )
     parser.add_argument(
         "--output_path",
         type=str,
         required=True,
-        help="Path to the directory where files will be saved",
+        help="Directory where files will be saved.",
     )
     parser.add_argument(
-        "--log_path", type=str, required=True, help="Path to the log directory"
+        "--log_path",
+        type=str,
+        required=True,
+        help="Directory for logs.",
     )
-    parser.add_argument(
-        "--num_files", type=int, default=3, help="Number of files to download"
-    )
+
     parser.add_argument(
         "--num_processes",
         type=int,
         default=min(4, os.cpu_count()),
-        help="Number of parallel processes",
+        help="Number of parallel processes.",
     )
     args = parser.parse_args()
-    download_url_table = data_crawl()
 
+    download_url_table = data_crawl()
     main_log_file = setup_logging("download", args.log_path)
     failed_output_csv = osp.join(args.log_path, "failed_downloads.csv")
 
-    logging.info("开始下载任务")
-
+    logging.info("Start download tasks.")
     os.makedirs(args.output_path, exist_ok=True)
 
-    retry_count = 0  # 记录重试次数
-    max_retries = 10  # 最大重试次数
+    retry_count = 0
+    max_retries = 10
 
     while retry_count < max_retries:
         tasks = []
-        failed_downloads = []  # 存储新的失败任务
 
+        # If previous failures exist, retry them first
         if osp.exists(failed_output_csv) and osp.getsize(failed_output_csv) > 0:
-            logging.info(f"第 {retry_count+1} 次尝试下载失败任务...")
-            df = pd.read_csv(failed_output_csv)  # 读取之前失败的任务
-            for _, row in df.iterrows():
+            logging.info("Retry #%d for previously failed tasks...", retry_count + 1)
+            df_failed = pd.read_csv(failed_output_csv)
+
+            for _, row in df_failed.iterrows():
                 url = row["url"]
                 filename = row["filename"]
                 folder_path = row["folderpath"]
                 os.makedirs(folder_path, exist_ok=True)
 
-                logging.info(f"正在将文件 {filename} 下载到路径 {folder_path}")
-
+                logging.info("Downloading %s to %s", filename, folder_path)
                 task = delayed(download_file)(url, folder_path, filename, args.log_path)
                 tasks.append(task)
-        # 读取原始csv文件
-        else:
-            logging.info("读取原始含下载链接的表格...")
-            df = download_url_table
-            logging.info(f"选择下载文件数目为 {args.num_files}")
-            for _, row in df.head(args.num_files).iterrows():
 
-                uuid = row["Study_uuid"]
+        # Otherwise, read from the original URL table
+        else:
+            logging.info("Reading the original URL table...")
+            df = download_url_table
+            logging.info("Downloading all files from the dataset...")
+
+            for _, row in df.iterrows():
+                uuid_val = row["Study_uuid"]
                 url_dataset = row["Data_link"]
                 url_metadata = row["Meta data_link"]
 
-                if pd.isna(uuid) or not isinstance(uuid, str):
-                    logging.error("数据集 UUID 为空，跳过该条记录")
+                if pd.isna(uuid_val) or not isinstance(uuid_val, str):
+                    logging.error("Dataset UUID is empty. Skipping this record.")
                     continue
 
-                if any(not is_valid_url(url) for url in [url_dataset, url_metadata]):
+                if any(not is_valid_url(u) for u in (url_dataset, url_metadata)):
                     logging.error(
-                        f"数据集 {uuid} 的下载链接无效: {url_dataset}, {url_metadata}，跳过该任务"
+                        "Invalid URLs for dataset %s: %s, %s. Skipping.",
+                        uuid_val,
+                        url_dataset,
+                        url_metadata,
                     )
                     continue
 
-                folder_path = os.path.join(args.output_path, uuid)
-
+                folder_path = os.path.join(args.output_path, uuid_val)
                 os.makedirs(folder_path, exist_ok=True)
 
-                for file_type, url in [
+                for file_type, url in (
                     ("data_set", url_dataset),
                     ("meta_data", url_metadata),
-                ]:
-                    filename = f"{file_type}_{uuid}.zip"
-                    logging.info(f"正在将文件 {filename} 下载到路径 {folder_path}")
-
+                ):
+                    filename = f"{file_type}_{uuid_val}.zip"
+                    logging.info("Downloading %s to %s", filename, folder_path)
                     task = delayed(download_file)(
                         url, folder_path, filename, args.log_path
                     )
@@ -315,29 +349,39 @@ if __name__ == "__main__":
 
         with ProgressBar():
             results = compute(
-                *tasks, scheduler="processes", num_workers=args.num_processes
+                *tasks,
+                scheduler="processes",
+                num_workers=args.num_processes,
             )
 
-        failed_downloads = [
-            res for res in results if res is not None
-        ]  # 过滤出失败的下载任务
+        failed_downloads = [res for res in results if res is not None]
+
         if failed_downloads:
             failed_df = pd.DataFrame(failed_downloads)
             failed_df.to_csv(failed_output_csv, index=False)
-            logging.info(f"仍有未成功下载的文件，失败任务已保存到: {failed_output_csv}")
-            retry_count += 1  # 增加重试次数
-            logging.info(f"等待 10 秒后重试 (重试次数: {retry_count}/{max_retries})...")
-            time.sleep(10)  # 让服务器缓冲一会再尝试
+            logging.info(
+                "Some files failed to download. Saved to: %s",
+                failed_output_csv,
+            )
+            retry_count += 1
+            logging.info(
+                "Sleeping 10 seconds before retry (%d/%d)...",
+                retry_count,
+                max_retries,
+            )
+            time.sleep(10)
         else:
-            logging.info("所有文件下载完成，没有失败任务")
+            logging.info("All files downloaded successfully. No failed tasks.")
             if osp.exists(failed_output_csv):
                 os.remove(failed_output_csv)
             break
+
     merge_logs(args.log_path, main_log_file)
 
     if retry_count >= max_retries:
         logging.error(
-            "达到最大重试次数，仍有文件下载失败，请手动检查 failed_downloads.csv"
+            "Reached maximum retries. Some files still failed. "
+            "Please check failed_downloads.csv manually."
         )
-
-    extract_and_delete_zips(args.output_path, "./extract_failed.csv")
+    failed_extract_csv = osp.join(args.output_path, "extract_failed.csv")
+    extract_and_delete_zips(args.output_path, failed_extract_csv)

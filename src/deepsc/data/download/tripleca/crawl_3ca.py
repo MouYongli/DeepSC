@@ -9,12 +9,12 @@ from deepsc.data.download.tripleca.config import BASE_URL, ORGAN_LIST
 
 
 def data_crawl():
-    all_dfs = []
-    organ_list = ORGAN_LIST
-    # 合并 base_url 和 organ_list 生成完整链接
-    organ_links = [osp.join(BASE_URL, organ) for organ in organ_list]
+    """Crawl organ study tables and return merged DataFrame."""
 
-    # 遍历每个链接并解析表格
+    all_dfs = []
+    organ_links = [osp.join(BASE_URL, organ) for organ in ORGAN_LIST]
+
+    # Iterate over each link and parse the table
     for link in organ_links:
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(link, headers=headers)
@@ -23,23 +23,23 @@ def data_crawl():
             soup = BeautifulSoup(response.text, "html.parser")
         else:
             print(f"Failed to fetch {link}")
-            continue  # 跳过错误的链接
+            continue  # Skip invalid links
 
         table = soup.find("table")
         if not table:
             print(f"No table found in {link}")
-            continue  # 跳过没有表格的页面
+            continue  # Skip pages without a table
 
         data = []
         headers = []
 
-        # 获取表头
+        # Extract table header
         header_row = table.find("tr")
         if header_row:
             headers = [th.text.strip() for th in header_row.find_all("th")]
 
-        # 遍历表格数据
-        for row in table.find_all("tr")[1:]:  # 跳过表头
+        # Iterate over table rows (skip header row)
+        for row in table.find_all("tr")[1:]:
             cols = row.find_all("td")
             row_data = []
             row_links = {}
@@ -48,64 +48,58 @@ def data_crawl():
                 text = col.text.strip()
                 link_tag = col.find("a", href=True)
 
-                # 如果该列有链接，则记录
+                # If column contains a link, record it
                 if link_tag:
                     link_href = link_tag["href"]
                     col_name = headers[idx] if headers else f"col_{idx}"
-                    row_links[f"{col_name}_link"] = link_href  # 记录超链接列
+                    row_links[f"{col_name}_link"] = link_href
 
                 row_data.append(text)
 
-            # 添加数据行
+            # Construct row dictionary
             row_dict = dict(zip(headers, row_data))
-            row_dict.update(row_links)  # 把超链接列添加进去
+            row_dict.update(row_links)
 
-            organ_name = link.replace(BASE_URL, "")
-            organ_name = organ_name.replace("-", " ")
+            organ_name = link.replace(BASE_URL, "").replace("-", " ")
             row_dict["Organ"] = organ_name
-            uuid_str = str(uuid.uuid4())
-            row_dict["Study_uuid"] = uuid_str
+            row_dict["Study_uuid"] = str(uuid.uuid4())
             data.append(row_dict)
 
-        # 转换为 DataFrame
         df = pd.DataFrame(data)
-
-        # 存储 df
         all_dfs.append(df)
 
-    # **合并所有表格**
-    merged_df = all_dfs[0]
-    if all_dfs:
-        merged_df = pd.concat(all_dfs, ignore_index=True)
-
-        desired_order = [
-            "Study_uuid",
-            "Organ",
-            "Title",
-            "Title_link",
-            "Data",
-            "Data_link",
-            "Meta data",
-            "Meta data_link",
-            "Cell types",
-            "Cell types_link",
-            "Summary",
-            "Summary_link",
-            "Disease",
-            "Technology",
-            "#samples",
-            "#cells",
-            "Meta programs",
-            "Meta programs_link",
-            "CNAs",
-            "CNAs_link",
-            "UMAP",
-            "UMAP_link",
-            "Cell cycle",
-            "Cell cycle_link",
-        ]
-        dfnew = merged_df[desired_order]
-        return dfnew
-    else:
-        return None
+    # Merge all dataframes
+    if not all_dfs:
         print("No valid tables found.")
+        return None
+
+    merged_df = pd.concat(all_dfs, ignore_index=True)
+
+    desired_order = [
+        "Study_uuid",
+        "Organ",
+        "Title",
+        "Title_link",
+        "Data",
+        "Data_link",
+        "Meta data",
+        "Meta data_link",
+        "Cell types",
+        "Cell types_link",
+        "Summary",
+        "Summary_link",
+        "Disease",
+        "Technology",
+        "#samples",
+        "#cells",
+        "Meta programs",
+        "Meta programs_link",
+        "CNAs",
+        "CNAs_link",
+        "UMAP",
+        "UMAP_link",
+        "Cell cycle",
+        "Cell cycle_link",
+    ]
+
+    return merged_df[desired_order]

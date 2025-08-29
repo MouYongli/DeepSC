@@ -10,16 +10,8 @@ from tqdm import tqdm
 import argparse
 from multiprocessing import Pool, cpu_count
 
-# GPU加速相关导入
-try:
-    import cupy as cp
-    from cupyx.scipy.sparse import csr_matrix as cupy_csr_matrix
-
-    GPU_AVAILABLE = True
-    print("GPU (CuPy) is available")
-except ImportError:
-    GPU_AVAILABLE = False
-    print("GPU (CuPy) is not available, using CPU")
+# 使用CPU进行数据处理
+GPU_AVAILABLE = False
 
 import os
 
@@ -84,11 +76,10 @@ def setup_logging(
     return log_file
 
 
-def process_h5ad_to_sparse_tensor_gpu(
+def process_h5ad_to_sparse_tensor(
     h5ad_path: str,
     output_path: str,
     gene_map_path: str,
-    use_gpu: bool = True,
     normalize: bool = True,
 ) -> dict:
     """
@@ -98,7 +89,6 @@ def process_h5ad_to_sparse_tensor_gpu(
         h5ad_path: h5ad文件路径
         output_path: 输出npz文件路径
         gene_map_path: 基因映射文件路径
-        use_gpu: 是否使用GPU加速
         normalize: 是否进行normalization
     """
     # 读取基因映射
@@ -141,7 +131,7 @@ def process_h5ad_to_sparse_tensor_gpu(
 
     if normalize:
         print("Performing normalization...")
-        X_final = normalize_tensor_gpu(X_final, use_gpu=use_gpu)
+        X_final = normalize_tensor(X_final)
 
     save_npz(output_path, X_final)
     print(f"Saved processed data to: {output_path}")
@@ -149,13 +139,12 @@ def process_h5ad_to_sparse_tensor_gpu(
     return {"status": "saved", "path": output_path, "shape": X_final.shape}
 
 
-def normalize_tensor_gpu(csr_matrix, use_gpu: bool = True, min_genes: int = 200):
+def normalize_tensor(csr_matrix, min_genes: int = 200):
     """
-    对稀疏矩阵进行normalization，可选择使用GPU加速
+    对稀疏矩阵进行normalization（CPU版本）
 
     Args:
         csr_matrix: 输入的CSR稀疏矩阵
-        use_gpu: 是否使用GPU加速
         min_genes: 每个细胞最少基因数量的阈值
     """
     # 过滤掉基因数量少于阈值的细胞
@@ -163,37 +152,11 @@ def normalize_tensor_gpu(csr_matrix, use_gpu: bool = True, min_genes: int = 200)
     csr_filtered = csr_matrix
     print(f"Valid cells after filtering: {valid_cells.sum()}")
 
-    if use_gpu and GPU_AVAILABLE:
-        print("Using GPU for normalization...")
-        try:
-            # 转换到GPU
-            gpu_matrix = cupy_csr_matrix(csr_filtered)
-
-            # 在GPU上进行log2(1+x)变换
-            gpu_matrix.data = cp.log2(1 + gpu_matrix.data)
-
-            # 转换回CPU
-            cpu_data = cp.asnumpy(gpu_matrix.data)
-            cpu_indices = cp.asnumpy(gpu_matrix.indices)
-            cpu_indptr = cp.asnumpy(gpu_matrix.indptr)
-
-            normalized_matrix = csr_matrix(
-                (cpu_data, cpu_indices, cpu_indptr), shape=gpu_matrix.shape
-            )
-
-            print("GPU normalization completed")
-            return normalized_matrix
-
-        except Exception as e:
-            print(f"GPU normalization failed: {e}, falling back to CPU")
-            use_gpu = False
-
-    if not use_gpu or not GPU_AVAILABLE:
-        print("Using CPU for normalization...")
-        # CPU normalization
-        csr_filtered.data = np.log2(1 + csr_filtered.data)
-        print("CPU normalization completed")
-        return csr_filtered
+    print("Using CPU for normalization...")
+    # CPU normalization
+    csr_filtered.data = np.log2(1 + csr_filtered.data)
+    print("CPU normalization completed")
+    return csr_filtered
 
 
 def find_all_h5ad_files(root_dir: str):
@@ -212,7 +175,6 @@ def process_one_file(
     h5ad_path: str,
     output_dir: str,
     gene_map_path: str,
-    use_gpu: bool = True,
     normalize: bool = True,
 ):
     """处理单个h5ad文件"""
@@ -225,8 +187,8 @@ def process_one_file(
     print(f"Processing {h5ad_path} to {output_path}")
 
     try:
-        res = process_h5ad_to_sparse_tensor_gpu(
-            h5ad_path, output_path, gene_map_path, use_gpu, normalize
+        res = process_h5ad_to_sparse_tensor(
+            h5ad_path, output_path, gene_map_path, normalize
         )
         logging.info(f"Successfully processed: {h5ad_path}, result: {res}")
         return f"Done: {h5ad_path} -> {res['shape']}"
@@ -240,7 +202,6 @@ def preprocess_cellxgene_folder(
     output_dir: str,
     gene_map_path: str,
     num_processes: int = None,
-    use_gpu: bool = True,
     normalize: bool = True,
 ):
     """批量处理文件夹中的所有h5ad文件"""
@@ -249,7 +210,7 @@ def preprocess_cellxgene_folder(
     logging.info("Start integrated preprocessing...")
 
     print(f"Processing {input_dir} to {output_dir}")
-    print(f"Using GPU: {use_gpu and GPU_AVAILABLE}")
+    print("Using CPU for processing")
     print(f"Normalize: {normalize}")
 
     h5ad_files = find_all_h5ad_files(input_dir)
@@ -267,7 +228,6 @@ def preprocess_cellxgene_folder(
             process_one_file,
             output_dir=output_dir,
             gene_map_path=gene_map_path,
-            use_gpu=use_gpu,
             normalize=normalize,
         )
         results = list(
@@ -310,11 +270,7 @@ def main():
         default=min(4, cpu_count()),
         help="Number of parallel processes to use (default: min(4, cpu cores)).",
     )
-    parser.add_argument(
-        "--use_gpu",
-        action="store_true",
-        help="Use GPU acceleration for processing (requires CuPy).",
-    )
+
     parser.add_argument(
         "--no_normalize",
         action="store_true",
@@ -329,17 +285,13 @@ def main():
 
     args = parser.parse_args()
 
-    # 检查GPU可用性
-    if args.use_gpu and not GPU_AVAILABLE:
-        print("Warning: GPU requested but CuPy not available, using CPU")
-        args.use_gpu = False
+    # 使用CPU处理
 
     preprocess_cellxgene_folder(
         input_dir=args.input_dir,
         output_dir=args.output_dir,
         gene_map_path=args.gene_map_path,
         num_processes=args.num_processes,
-        use_gpu=args.use_gpu,
         normalize=not args.no_normalize,
     )
 

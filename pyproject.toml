@@ -30,7 +30,15 @@ dependencies = [
     "cellxgene-census==1.17.0",
     "dask==2025.7.0",
     "bs4==0.0.2",
-    "wandb==0.21.1"
+    "wandb==0.21.1",
+    "pandas==2.3.2",
+    "scanpy==1.11.4",
+    "scipy==1.16.1",
+    "numpy==2.1.2",
+    "tqdm==4.67.1",
+    "requests==2.32.5",
+    "anndata==0.12.2",
+
 ]
 
 [tool.setuptools.packages.find]
