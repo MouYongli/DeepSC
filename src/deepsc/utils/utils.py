@@ -1402,3 +1402,73 @@ def build_gene_ids_for_dataset(genes, vocab2id, pad_token="<pad>"):
     n_hit = int((gene_ids != pad_id).sum())
     print(f"[映射] 命中 {n_hit}/{len(genes)} 个基因，未命中的用 <pad>={pad_id}")
     return gene_ids
+
+
+def extract_state_dict(maybe_state):
+    """
+    兼容多种保存方式：
+    - {"model": state_dict, ...}  ← 你现在的保存方式（Fabric）
+    - {"state_dict": state_dict, ...}  ← Lightning 常见
+    - 直接就是 state_dict
+    - 键带 "model." 前缀
+    """
+    if isinstance(maybe_state, dict):
+        if "model" in maybe_state and isinstance(maybe_state["model"], dict):
+            sd = maybe_state["model"]
+        elif "state_dict" in maybe_state and isinstance(
+            maybe_state["state_dict"], dict
+        ):
+            sd = maybe_state["state_dict"]
+        else:
+            # 可能就是 state_dict
+            sd = maybe_state
+    else:
+        raise ValueError("Checkpoint 内容不是字典，无法解析 state_dict")
+
+    # 去掉可能存在的前缀 "model." 或 "module."
+    need_strip_prefixes = ("model.", "module.")
+    if any(any(k.startswith(p) for p in need_strip_prefixes) for k in sd.keys()):
+        new_sd = {}
+        for k, v in sd.items():
+            for p in need_strip_prefixes:
+                if k.startswith(p):
+                    k = k[len(p) :]
+                    break
+            new_sd[k] = v
+        sd = new_sd
+    return sd
+
+
+def report_loading_result(load_info):
+    missing = list(load_info.missing_keys)
+    unexpected = list(load_info.unexpected_keys)
+    print(f"[LOAD] missing_keys: {len(missing)} | unexpected_keys: {len(unexpected)}")
+    if missing:
+        print("  - (前10条) missing:", missing[:10])
+    if unexpected:
+        print("  - (前10条) unexpected:", unexpected[:10])
+
+
+def sample_weight_norms(model, sd, k=5):
+    """
+    随机抽样 k 个双方都存在的参数，打印加载前后的范数变化。
+    范数有变化 => 基本可确认成功写入。
+    """
+    with torch.no_grad():
+        common_keys = [name for name, _ in model.named_parameters() if name in sd]
+        if not common_keys:
+            print("[LOAD] 没有找到与 checkpoint 对齐的公共参数名，无法做范数对比。")
+            return
+        sample = random.sample(common_keys, min(k, len(common_keys)))
+        print("[LOAD] 抽样参数范数对比（加载前 -> 加载后）：")
+        for name in sample:
+            p = dict(model.named_parameters())[name]
+            before = p.detach().float().norm().item()
+            # 暂存当前权重
+            old = p.detach().cpu().clone()
+            # 用 ckpt 覆盖一次
+            p.copy_(sd[name].to(p.device).to(p.dtype))
+            after = p.detach().float().norm().item()
+            print(f"  - {name}: {before:.6f} -> {after:.6f}")
+            # 还原（只用于对比；真正的加载在 load_state_dict 里会再做一次）
+            p.copy_(old.to(p.device).to(p.dtype))
