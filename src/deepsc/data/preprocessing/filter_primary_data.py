@@ -11,7 +11,16 @@ import argparse
 
 
 def to_bool_series(col: pd.Series) -> pd.Series:
-    """把 is_primary_data 列统一转换为严格的布尔 Series。缺失/未知视为 False。"""
+    """Convert is_primary_data column to a strict boolean Series.
+
+    Missing or unknown values are treated as False.
+
+    Args:
+        col: pandas Series containing is_primary_data values
+
+    Returns:
+        pd.Series: Boolean series with consistent True/False values
+    """
     if col.dtype == bool or pd.api.types.is_bool_dtype(col):
         return col.fillna(False).astype(bool)
     s = col.astype(str).str.strip().str.lower()
@@ -22,7 +31,16 @@ def to_bool_series(col: pd.Series) -> pd.Series:
 
 
 def make_output_path(src_path: Path, root_dir: Path, out_base: Path) -> Path:
-    """根据规则生成输出路径。"""
+    """Generate output path based on directory structure rules.
+
+    Args:
+        src_path: Source file path
+        root_dir: Root directory path
+        out_base: Output base directory path
+
+    Returns:
+        Path: Generated output file path
+    """
     rel = src_path.relative_to(root_dir)
     if len(rel.parts) > 1:
         # 有子目录：保持完整相对子路径
@@ -35,12 +53,20 @@ def make_output_path(src_path: Path, root_dir: Path, out_base: Path) -> Path:
 def process_one(
     h5ad_path_str: str, root_dir_str: str, out_base_str: str, overwrite: bool = True
 ) -> tuple[str, bool, str]:
-    """
-    处理单个文件：
-    - 读取 .h5ad
-    - 过滤 is_primary_data == True 的行（包括矩阵）
-    - 写出到目标路径
-    返回 (路径, 成功/失败, 信息)
+    """Process a single H5AD file by filtering primary data.
+
+    Reads the .h5ad file, filters rows where is_primary_data == True
+    (including the expression matrix), and saves to target path.
+    If no primary data is found, the file is skipped.
+
+    Args:
+        h5ad_path_str: Path to input H5AD file
+        root_dir_str: Root directory path for relative path calculation
+        out_base_str: Output base directory path
+        overwrite: Whether to overwrite existing files (default: True)
+
+    Returns:
+        tuple: (file_path, success_flag, message, cell_count)
     """
     h5ad_path = Path(h5ad_path_str)
     root_dir = Path(root_dir_str)
@@ -69,6 +95,15 @@ def process_one(
         keep_mask = col_bool
         keep_count = int(keep_mask.sum())
 
+        # 如果没有 primary data，跳过保存
+        if keep_count == 0:
+            return (
+                str(h5ad_path),
+                True,
+                "Skipped (no primary data)",
+                0,
+            )
+
         # 过滤（同步作用于 obs/X/raw 等）
         adata_f = adata[keep_mask].copy()
 
@@ -86,27 +121,32 @@ def process_one(
 
 
 def main():
+    """Main function to process H5AD files with multiprocessing.
+
+    Parses command line arguments and processes all H5AD files in the
+    specified directory using multiple worker processes.
+    """
     parser = argparse.ArgumentParser(description="Filter primary data from H5AD files")
     parser.add_argument(
-        "--NUM_WORKERS", type=int, default=32, help="Number of worker processes"
+        "--num_workers", type=int, default=32, help="Number of worker processes"
     )
     parser.add_argument(
-        "--CELLXGENE_DIR", required=True, help="Root directory containing H5AD files"
+        "--cellxgene_dir", required=True, help="Root directory containing H5AD files"
     )
-    parser.add_argument("--OUTPUT_BASE", required=True, help="Output base directory")
+    parser.add_argument("--output_base", required=True, help="Output base directory")
     args = parser.parse_args()
 
-    ROOT_DIR = Path(args.CELLXGENE_DIR)
-    OUTPUT_BASE = Path(args.OUTPUT_BASE)
-    NUM_WORKERS = max(args.NUM_WORKERS, 1)
+    root_dir = Path(args.cellxgene_dir)
+    output_base = Path(args.output_base)
+    num_workers = max(args.num_workers, 1)
     OVERWRITE = True  # 如目标文件已存在，是否覆盖
 
-    files = list(ROOT_DIR.rglob("*.h5ad"))
+    files = list(root_dir.rglob("*.h5ad"))
     if not files:
-        print(f"[Info] 在 {ROOT_DIR} 下未找到 .h5ad 文件")
+        print(f"[Info] 在 {root_dir} 下未找到 .h5ad 文件")
         return
 
-    print(f"[Info] Found {len(files)} .h5ad files. Using {NUM_WORKERS} processes.")
+    print(f"[Info] Found {len(files)} .h5ad files. Using {num_workers} processes.")
     success, fail = 0, 0
     total_rows = 0  # 新增总行数计数
     # 可降低子进程内部 BLAS 线程数，避免过度争用（可选）
@@ -116,13 +156,13 @@ def main():
     os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
     os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
-    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as ex:
+    with ProcessPoolExecutor(max_workers=num_workers) as ex:
         futs = [
             ex.submit(
                 process_one,
                 str(p),
-                str(ROOT_DIR),
-                str(OUTPUT_BASE),
+                str(root_dir),
+                str(output_base),
                 OVERWRITE,
             )
             for p in files
@@ -139,7 +179,7 @@ def main():
 
     print(f"\n[Done] OK: {success}, FAIL: {fail}, Total: {len(files)}")
     print(f"[Total saved rows] {total_rows}")
-    print(f"[Output Base] {OUTPUT_BASE}")
+    print(f"[Output Base] {output_base}")
 
 
 if __name__ == "__main__":

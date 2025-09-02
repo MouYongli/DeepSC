@@ -9,23 +9,8 @@ from tqdm import tqdm
 import argparse
 import sys
 
+# handle big csv file
 csv.field_size_limit(sys.maxsize)
-
-
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("--csv-file", type=str, required=True)
-    p.add_argument("--output-dir", type=str, required=True)
-    p.add_argument(
-        "--num-workers",
-        type=int,
-        default=1,
-        help="内存合并建议=1，避免大矩阵跨进程序列化",
-    )
-    p.add_argument(
-        "--in-memory", action="store_true", help="启用纯内存合并（不写临时文件）"
-    )
-    return p.parse_args()
 
 
 def load_plan(csv_file):
@@ -53,7 +38,19 @@ def ensure_dir(p):
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--csv-file", type=str, required=True)
+    parser.add_argument("--output-dir", type=str, required=True)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="内存合并建议=1，避免大矩阵跨进程序列化",
+    )
+    parser.add_argument(
+        "--in-memory", action="store_true", help="启用纯内存合并（不写临时文件）"
+    )
+    args = parser.parse_args()
     ensure_dir(args.output_dir)
 
     file_to_chunks, chunk_ids = load_plan(args.csv_file)

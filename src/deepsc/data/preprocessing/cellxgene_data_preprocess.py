@@ -1,4 +1,12 @@
+"""CellxGene data preprocessing module.
+
+This module provides functionality to preprocess h5ad files from CellxGene,
+converting them to sparse tensors with optional normalization for downstream
+analysis in the DeepSC framework.
+"""
+
 import logging
+import os
 from functools import partial
 
 import anndata as ad
@@ -8,72 +16,11 @@ from scipy.sparse import csr_matrix, issparse, save_npz
 from tqdm import tqdm
 
 import argparse
+from deepsc.utils.utils import setup_logging
 from multiprocessing import Pool, cpu_count
 
-# 使用CPU进行数据处理
+# CPU-only processing configuration
 GPU_AVAILABLE = False
-
-import os
-
-import sys
-
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-import os.path as osp
-
-from datetime import datetime
-
-
-def setup_logging(
-    log_path: str = "./logs",
-    log_name: str = "deepsc",
-    rank: int = -1,
-    add_timestamp: bool = True,
-    log_level: str = "INFO",
-) -> str:
-    """
-    Setup unified logging configuration.
-
-    Args:
-        log_path: Directory to store log files
-        log_name: Base name for the log file
-        rank: Process rank for distributed training (-1 for single process)
-        add_timestamp: Whether to add timestamp to log filename
-        log_level: Logging level
-
-    Returns:
-        str: Path to the created log file
-    """
-    os.makedirs(log_path, exist_ok=True)
-
-    # Build log filename
-    if add_timestamp:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_filename = f"{log_name}_{timestamp}.log"
-    else:
-        time_now = datetime.now()
-        log_filename = f"{log_name}_{time_now.month}_{time_now.day}_{time_now.hour}_{time_now.minute}.log"
-
-    log_file = osp.join(log_path, log_filename)
-
-    # Set logging level based on rank
-    if rank in [-1, 0]:
-        level = getattr(logging, log_level.upper())
-    else:
-        level = logging.WARN
-
-    # Configure logging
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
-        datefmt="[%X]",
-        handlers=[logging.FileHandler(log_file, mode="w"), logging.StreamHandler()],
-        force=True,  # Reset any existing logging configuration
-    )
-
-    logger = logging.getLogger()
-    logger.info(f"Log file initialized: {log_file}")
-
-    return log_file
 
 
 def process_h5ad_to_sparse_tensor(
@@ -82,29 +29,35 @@ def process_h5ad_to_sparse_tensor(
     gene_map_path: str,
     normalize: bool = True,
 ) -> dict:
-    """
-    集成的处理函数：读取h5ad文件，转换为稀疏矩阵，并可选择性地进行normalization
+    """Process h5ad file to sparse tensor with optional normalization.
+
+    Reads an h5ad file, converts it to a sparse matrix format, maps genes
+    according to the provided gene mapping, and optionally applies normalization.
+    The resulting sparse matrix is saved as an npz file.
 
     Args:
-        h5ad_path: h5ad文件路径
-        output_path: 输出npz文件路径
-        gene_map_path: 基因映射文件路径
-        normalize: 是否进行normalization
+        h5ad_path: Path to the input h5ad file.
+        output_path: Path where the processed npz file will be saved.
+        gene_map_path: Path to the CSV file containing gene mapping information.
+        normalize: Whether to apply normalization to the data.
+
+    Returns:
+        dict: Processing status information including save path and matrix shape.
     """
-    # 读取基因映射
+    # Load gene mapping from CSV file
     gene_map_df = pd.read_csv(gene_map_path)
     gene_map_df["id"] = gene_map_df["id"].astype(int)
     gene_map = dict(zip(gene_map_df["feature_name"], gene_map_df["id"]))
     max_gene_id = gene_map_df["id"].max()
 
-    # 读取h5ad文件
+    # Load h5ad file and extract gene expression matrix
     adata = ad.read_h5ad(h5ad_path)
     feature_names = adata.var["feature_name"].values
     X = adata.X.tocsr() if issparse(adata.X) else csr_matrix(adata.X)
 
     print(f"Original matrix shape: {X.shape}")
 
-    # 只保留有映射的基因列
+    # Filter to keep only genes that have valid mappings
     valid_mask = np.array([f in gene_map for f in feature_names])
     valid_feature_names = feature_names[valid_mask]
     valid_gene_ids = np.array([gene_map[f] for f in valid_feature_names])
@@ -112,7 +65,7 @@ def process_h5ad_to_sparse_tensor(
     X_valid = X[:, valid_mask]
     print(f"Valid genes matrix shape: {X_valid.shape}")
 
-    # 按 gene_id 排序
+    # Sort genes by gene_id for consistent indexing
     sort_idx = np.argsort(valid_gene_ids)
     X_valid_sorted = X_valid[:, sort_idx]
     valid_gene_ids_sorted = valid_gene_ids[sort_idx]
@@ -120,7 +73,7 @@ def process_h5ad_to_sparse_tensor(
     n_cells = X.shape[0]
     n_genes = max_gene_id + 1
 
-    # 用三元组(row, col, data)构造目标稀疏矩阵
+    # Construct target sparse matrix using triplet format (row, col, data)
     X_valid_sorted = X_valid_sorted.tocoo()
     rows = X_valid_sorted.row
     cols = valid_gene_ids_sorted[X_valid_sorted.col]
@@ -140,27 +93,39 @@ def process_h5ad_to_sparse_tensor(
 
 
 def normalize_tensor(csr_matrix, min_genes: int = 200):
-    """
-    对稀疏矩阵进行normalization（CPU版本）
+    """Apply normalization to sparse matrix using CPU processing.
+
+    Performs log2(1 + x) normalization on the sparse matrix data after filtering
+    cells based on minimum gene count threshold.
 
     Args:
-        csr_matrix: 输入的CSR稀疏矩阵
-        min_genes: 每个细胞最少基因数量的阈值
+        csr_matrix: Input CSR sparse matrix containing gene expression data.
+        min_genes: Minimum number of genes per cell threshold for filtering.
+
+    Returns:
+        csr_matrix: Normalized sparse matrix.
     """
-    # 过滤掉基因数量少于阈值的细胞
+    # Filter out cells with gene count below threshold
     valid_cells = np.diff(csr_matrix.indptr) >= min_genes
     csr_filtered = csr_matrix
     print(f"Valid cells after filtering: {valid_cells.sum()}")
 
     print("Using CPU for normalization...")
-    # CPU normalization
+    # Apply log2(1 + x) normalization to expression values
     csr_filtered.data = np.log2(1 + csr_filtered.data)
     print("CPU normalization completed")
     return csr_filtered
 
 
 def find_all_h5ad_files(root_dir: str):
-    """递归查找所有h5ad文件"""
+    """Recursively find all h5ad files in the given directory.
+
+    Args:
+        root_dir: Root directory to search for h5ad files.
+
+    Returns:
+        list: List of full paths to all found h5ad files.
+    """
     h5ad_files = []
     for dirpath, _, filenames in os.walk(root_dir):
         for filename in filenames:
@@ -177,7 +142,17 @@ def process_one_file(
     gene_map_path: str,
     normalize: bool = True,
 ):
-    """处理单个h5ad文件"""
+    """Process a single h5ad file to sparse tensor format.
+
+    Args:
+        h5ad_path: Path to the h5ad file to process.
+        output_dir: Directory where the processed file will be saved.
+        gene_map_path: Path to the gene mapping CSV file.
+        normalize: Whether to apply normalization.
+
+    Returns:
+        str: Processing status message.
+    """
     if not os.path.isfile(h5ad_path):
         logging.warning(f"File not found: {h5ad_path}")
         return f"Warning: File not found {h5ad_path}"
@@ -204,7 +179,15 @@ def preprocess_cellxgene_folder(
     num_processes: int = None,
     normalize: bool = True,
 ):
-    """批量处理文件夹中的所有h5ad文件"""
+    """Batch process all h5ad files in a folder using multiprocessing.
+
+    Args:
+        input_dir: Input directory containing h5ad files.
+        output_dir: Output directory for processed npz files.
+        gene_map_path: Path to the gene mapping CSV file.
+        num_processes: Number of parallel processes (defaults to min(4, cpu_count)).
+        normalize: Whether to apply normalization to the data.
+    """
     os.makedirs(output_dir, exist_ok=True)
     logfile = setup_logging("integrated_preprocessing", "./logs")
     logging.info("Start integrated preprocessing...")
@@ -285,7 +268,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 使用CPU处理
+    # Configure for CPU-only processing
 
     preprocess_cellxgene_folder(
         input_dir=args.input_dir,
