@@ -17,7 +17,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-<!-- 
+<!--
 [![Docker](https://img.shields.io/badge/Docker-Supported-blue)](https://hub.docker.com/r/YOUR_DOCKER_IMAGE)
 [![Colab](https://img.shields.io/badge/Open%20in-Colab-yellow)](https://colab.research.google.com/github/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME/blob/main/notebooks/demo.ipynb)
 [![arXiv](https://img.shields.io/badge/arXiv-XXXX.XXXXX-b31b1b.svg)](https://arxiv.org/abs/XXXX.XXXXX)
@@ -89,13 +89,10 @@ To download the datasets, please refer to the [scripts/data/download](./scripts/
 ### Data Preprocessing
 
 After downloading the datasets, the data are stored in the `data/cellxgene/raw` and `data/3ca/raw` folders. Then we need to preprocess the data:
-- Get the common genes between the datasets.
-- Filter the datasets to only include the common genes.
-- Merge the datasets into a single dataset.
-- Save the merged dataset to the `data/cellxgene/merged` and `data/3ca/merged` folders.
-
-TODO:
-- [ ] 添加对Preprocess脚本的描述，修改上述的描述。
+- Normalize and standardize gene names using the HGNC database to generate a gene mapping file.
+- Map raw gene names in the dataset to standardized symbols based on the mapping file.
+- Normalize gene expression values with log1p transformation.
+- Shuffle the dataset at the sample level for unbiased training.
 
 To preprocess the data, please refer to the [scripts/data/preprocessing](./scripts/data/preprocessing) folder and follow the instructions in [README.md](./scripts/data/preprocessing/README.md).
 
