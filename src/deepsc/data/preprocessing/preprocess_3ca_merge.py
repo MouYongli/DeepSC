@@ -136,4 +136,4 @@ if __name__ == "__main__":
     INPUT_DIR = args.input_dir
     OUTPUT_DIR = args.output_dir
     MAX_ROWS_PER_BATCH = args.max_rows_per_batch
-    merge_batches(INPUT_DIR, OUTPUT_DIR, MAX_ROWS_PER_BATCH)
+    merge_batches(args.input_dir, args.output_dir, MAX_ROWS_PER_BATCH)

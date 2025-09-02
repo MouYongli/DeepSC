@@ -88,6 +88,18 @@ To download the datasets, please refer to the [scripts/data/download](./scripts/
 
 ### Data Preprocessing
 
+After downloading the datasets, the data are stored in the `data/cellxgene/raw` and `data/3ca/raw` folders. Then we need to preprocess the data:
+- Get the common genes between the datasets.
+- Filter the datasets to only include the common genes.
+- Merge the datasets into a single dataset.
+- Save the merged dataset to the `data/cellxgene/merged` and `data/3ca/merged` folders.
+
+TODO:
+- [ ] 添加对Preprocess脚本的描述，修改上述的描述。
+
+To preprocess the data, please refer to the [scripts/data/preprocessing](./scripts/data/preprocessing) folder and follow the instructions in [README.md](./scripts/data/preprocessing/README.md).
+
+
 
 
 

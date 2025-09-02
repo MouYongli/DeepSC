@@ -12,7 +12,6 @@ import argparse
 import re
 from deepsc.utils import path_of_file, setup_logging
 
-
 def get_target_datasets(root_folder):
     """Find candidate datasets and filter invalid ones.
 
@@ -94,12 +93,11 @@ def get_target_datasets(root_folder):
                     [target_dataset_files_df, target_dataset],
                     ignore_index=True,
                 )
-    script_root = os.getenv("DEEPSC_SCRIPTS_ROOT")
     excluded_file = os.path.join(
-        script_root, "data/download/tripleca/excluded_files.csv"
+        args.dataset_root_path, "excluded_files.csv"
     )
     target_file = os.path.join(
-        script_root, "data/download/tripleca/target_dataset_files.csv"
+        args.dataset_root_path, "target_dataset_files.csv"
     )
     if not excluded_files_df.empty:
         excluded_files_df.to_csv(excluded_file, index=False)
@@ -199,9 +197,8 @@ def anndata_generate(target_datasets):
         target_datasets["dataset_id"].isin(valid_dataset_ids)
     ]
 
-    script_root = os.getenv("DEEPSC_SCRIPTS_ROOT")
     output_file = os.path.join(
-        script_root, "data/download/tripleca/updated_target_dataset_with_datasetid.csv"
+        args.dataset_root_path, "updated_target_dataset_with_datasetid.csv"
     )
     target_datasets.to_csv(
         output_file,

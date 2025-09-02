@@ -31,9 +31,9 @@ for i in $(seq 0 $TOTAL_PARTITION)
 do
     echo "Downloading ${QUERY_NAME} 的 partition ${i}/${TOTAL_PARTITION}"
     python -m deepsc.data.download.cellxgene.download_partition \
-        --query-name "${QUERY_NAME}" \
-        --index-dir "${INDEX_DIR}" \
-        --output-dir "${OUTPUT_DIR}" \
-        --partition-idx "${i}" \
-        --max-partition-size "${MAX_PARTITION_SIZE}"
+        --query-name ${QUERY_NAME} \
+        --index-dir ${INDEX_DIR} \
+        --output-dir ${OUTPUT_DIR} \
+        --partition-idx ${i} \
+        --max-partition-size ${MAX_PARTITION_SIZE}
 done
