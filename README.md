@@ -89,7 +89,7 @@ To download the datasets, please refer to the [scripts/data/download](./scripts/
 ### Data Preprocessing
 
 After downloading the datasets, the data are stored in the `data/cellxgene/raw` and `data/3ca/raw` folders. Then we need to preprocess the data:
-- Normalize and standardize gene names using the HGNC database to generate a gene mapping file.
+- Using the HGNC database to generate a gene mapping file, which can be used to normalize and standardize gene names.
 - Map raw gene names in the dataset to standardized symbols based on the mapping file.
 - Normalize gene expression values with log1p transformation.
 - Shuffle the dataset at the sample level for unbiased training.

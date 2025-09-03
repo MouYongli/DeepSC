@@ -15,7 +15,7 @@ csv.field_size_limit(sys.maxsize)
 
 def load_plan(csv_file):
     """
-    返回：
+    Returns:
       file_to_chunks = {file_path: {chunk_id: [row_indices,...]}}
       chunk_ids      = sorted(set of all chunk_id)
     """
@@ -45,10 +45,12 @@ def main():
         "--num-workers",
         type=int,
         default=1,
-        help="内存合并建议=1，避免大矩阵跨进程序列化",
+        help="Memory merge recommends =1, avoid large matrix cross-process serialization",
     )
     parser.add_argument(
-        "--in-memory", action="store_true", help="启用纯内存合并（不写临时文件）"
+        "--in-memory",
+        action="store_true",
+        help="Enable pure in-memory merge (no temporary files)",
     )
     args = parser.parse_args()
     ensure_dir(args.output_dir)
@@ -56,12 +58,12 @@ def main():
     file_to_chunks, chunk_ids = load_plan(args.csv_file)
 
     if not args.in_memory:
-        raise SystemExit("请加 --in-memory 以启用纯内存合并（本版本仅实现内存合并）。")
+        raise SystemExit("Add in-memory to enable pure in-memory merge.")
 
-    # ===== 纯内存合并：chunk_id -> [csr_part, csr_part, ...]
+    # ===== Pure in-memory merge: chunk_id -> [csr_part, csr_part, ...]
     chunk_parts = {cid: [] for cid in chunk_ids}
 
-    # 按文件依次处理（避免巨大 IPC/拷贝）
+    # Process files sequentially (avoid huge IPC/copying)
     for fp in tqdm(
         list(file_to_chunks.keys()), desc="[Stage] load & slice (in-memory)"
     ):
@@ -83,10 +85,10 @@ def main():
             sub = sub.tocsr()  # 显式确保 CSR
             chunk_parts[cid].append(sub)
 
-        # 释放当前文件矩阵
+        # Release current file matrix
         del csr
 
-    # 合并并落盘
+    # Merge and save to disk
     for cid in tqdm(chunk_ids, desc="[Stage] merge & save"):
         parts = chunk_parts[cid]
         if not parts:
@@ -95,7 +97,7 @@ def main():
         merged = sp.vstack(parts, format="csr")
         out_path = os.path.join(args.output_dir, f"shuffled_{cid:03d}.npz")
         sp.save_npz(out_path, merged)
-        # 释放内存
+        # Release memory
         chunk_parts[cid].clear()
         del merged
 
