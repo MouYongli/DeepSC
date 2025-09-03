@@ -59,8 +59,6 @@ Set the environment variables for the TripleCA dataset.
 
 ```bash
 export DATA_PATH_3CA=$DEEPSC_DATA_ROOT/3ca/raw
-export MAPPED_DATA_PATH_3CA=$DEEPSC_DATA_ROOT/3ca/mapped_batch_data
-export MERGED_DATA_PATH_3CA=$DEEPSC_DATA_ROOT/3ca/merged_batch_data
 ```
 ### 2.2 Crawl and download data from 3CA website
 
