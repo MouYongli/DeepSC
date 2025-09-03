@@ -46,6 +46,7 @@ def finetune(cfg: DictConfig):
     model = model.float()
     trainer = CellTypeAnnotation(cfg, fabric=fabric, model=model)
     trainer.train()
+    # test_ckpt = TestCkpt(cfg, fabric=fabric, model=model)
 
 
 if __name__ == "__main__":

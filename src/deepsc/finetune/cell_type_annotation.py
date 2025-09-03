@@ -1,10 +1,10 @@
 import math
+import os
 
 import numpy as np
 import scanpy as sc
 import torch
 import torch.nn as nn
-from sklearn.model_selection import train_test_split
 from torch.optim import Adam
 from torch.optim.lr_scheduler import (
     LinearLR,
@@ -18,6 +18,9 @@ from deepsc.data.dataset import GeneExpressionDatasetMapped
 from src.deepsc.data import DataCollator
 from src.deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
+    extract_state_dict_with_encoder_prefix,
+    report_loading_result,
+    sample_weight_norms,
     seed_all,
 )
 
@@ -30,6 +33,8 @@ class CellTypeAnnotation:
         self.world_size = self.fabric.world_size
         seed_all(args.seed + self.fabric.global_rank)
         self.is_master = self.fabric.global_rank == 0
+        if self.args.pretrained_model_path and self.args.load_pretrained_model:
+            self.load_pretrained_model()
         self.optimizer = Adam(self.model.parameters(), lr=self.args.learning_rate)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.init_loss_fn()
@@ -103,18 +108,20 @@ class CellTypeAnnotation:
 
     def build_dataset_sampler_from_h5ad(self):
         print("Building dataset sampler from h5ad file...")
-        adata = sc.read_h5ad(self.args.data_path)
+        # adata = sc.read_h5ad(self.args.data_path)
 
-        # 根据样本索引划分
-        train_idx, test_idx = train_test_split(
-            range(adata.n_obs),
-            test_size=0.1,  # 20% 测试集
-            random_state=42,  # 固定随机种子
-        )
+        # # 根据样本索引划分
+        # train_idx, test_idx = train_test_split(
+        #     range(adata.n_obs),
+        #     test_size=0.1,  # 20% 测试集
+        #     random_state=42,  # 固定随机种子
+        # )
 
-        # 划分数据集
-        adata_train = adata[train_idx].copy()
-        adata_test = adata[test_idx].copy()
+        # # 划分数据集
+        # adata_train = adata[train_idx].copy()
+        # adata_test = adata[test_idx].copy()
+        adata_train = sc.read_h5ad(self.args.data_path)
+        adata_test = sc.read_h5ad(self.args.data_path_eval)
 
         self.train_dataset = GeneExpressionDatasetMapped(
             h5ad=adata_train,
@@ -325,3 +332,25 @@ class CellTypeAnnotation:
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
             self.evaluate(self.model, self.eval_loader)
+
+    def load_pretrained_model(self):
+        ckpt_path = self.args.pretrained_model_path
+        assert os.path.exists(ckpt_path), f"找不到 ckpt: {ckpt_path}"
+
+        # 2) 只在 rank0 读取到 CPU，减少压力；再广播（可选）
+        if self.fabric.global_rank == 0:
+            print(f"[LOAD] 读取 checkpoint: {ckpt_path}")
+            raw = torch.load(ckpt_path, map_location="cpu")
+            state_dict = extract_state_dict_with_encoder_prefix(raw)
+        else:
+            raw = None
+            state_dict = None
+
+        # 3) 广播到所有进程
+        state_dict = self.fabric.broadcast(state_dict, src=0)
+        # 4) 打印抽样对比（可选，但很直观）
+        sample_weight_norms(self.model, state_dict, k=5)
+
+        # 5) 真正加载（strict=False：允许你新增的 embedding 层留空）
+        load_info = self.model.load_state_dict(state_dict, strict=False)
+        report_loading_result(load_info)

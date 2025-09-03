@@ -10,6 +10,8 @@ run_name: "finetune_cell_type_annotation_256hd"
 chunksize: 4
 shuffel_files_each_epoch: False
 
+pretrained_model_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint.ckpt"
+load_pretrained_model: True
 # Loss weights
 enable_l0: False
 enable_mse: False
@@ -55,11 +57,11 @@ use_exp_regression_loss: False
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
-data_path: "/home/angli/subset_500_per_celltyp_log1pv2.h5ad"
-data_path_eval: "/home/angli/baseline/DeepSC/data/cta/cxg_finetune/mPancreas_test_adata.h5ad"
-var_name_in_h5ad: "feature_name"
-obs_celltype_col: "cell_type"
-cell_type_count: 0
+data_path: "/home/angli/baseline/DeepSC/data/cell_type_annotation/test_provided_by_scgpt/filtered_ms_adata.h5ad"
+data_path_eval: "/home/angli/baseline/DeepSC/data/cell_type_annotation/test_provided_by_scgpt/c_data.h5ad"
+var_name_in_h5ad: "gene_name"
+obs_celltype_col: "celltype"
+cell_type_count: 18
 use_moe_ffn: True
 data_length: 5000
 seed: 42
