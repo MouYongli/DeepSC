@@ -78,8 +78,10 @@ For example, if you have the datasets in `/path/to/your/dataset`, you can create
 mkdir /path/to/your/dataset
 mkdir /path/to/your/dataset/cellxgene
 mkdir /path/to/your/dataset/3ca
+mkdir /path/to/your/dataset/processed
 ln -s /path/to/your/dataset/cellxgene data/cellxgene
 ln -s /path/to/your/dataset/3ca data/3ca
+ln -s /path/to/your/dataset/processed data/processed
 ```
 
 ### Download datasets
@@ -88,11 +90,11 @@ To download the datasets, please refer to the [scripts/data/download](./scripts/
 
 ### Data Preprocessing
 
-After downloading the datasets, the data are stored in the `data/cellxgene/raw` and `data/3ca/raw` folders. Then we need to preprocess the data:
+After the datasets are downloaded, the data is stored in the `data/cellxgene/raw` and `data/3ca/raw` folders. Then we need to preprocess the data:
 - Using the HGNC database to generate a gene mapping file, which can be used to normalize and standardize gene names.
 - Map raw gene names in the dataset to standardized symbols based on the mapping file.
-- Normalize gene expression values with log1p transformation.
-- Shuffle the dataset at the sample level for unbiased training.
+- Normalize gene expression values with `log1p` transformation.
+- Shuffle the dataset at the sample level for unbiased training and store the data in `COO` format (20,000 per partition).
 
 To preprocess the data, please refer to the [scripts/data/preprocessing](./scripts/data/preprocessing) folder and follow the instructions in [README.md](./scripts/data/preprocessing/README.md).
 
