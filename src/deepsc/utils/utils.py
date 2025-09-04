@@ -1363,7 +1363,7 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
 
 def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
     """
-    统计多个h5ad文件中所有unique的cell_type数量
+    统计多个h5ad文件中所有unique的cell_type数量（并集）
 
     Args:
         *h5ad_paths: 多个h5ad文件路径
@@ -1395,6 +1395,49 @@ def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell
         print(f"  {i}: {celltype}")
 
     return len(sorted_celltypes), sorted_celltypes
+
+
+def count_common_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
+    """
+    统计多个h5ad文件中共同的cell_type数量（交集）
+
+    Args:
+        *h5ad_paths: 多个h5ad文件路径
+        cell_type_col (str): obs中细胞类型列名
+
+    Returns:
+        int: 所有文件共同的cell_type数量
+        list: 共同的cell_type名称列表（按字母顺序排序）
+    """
+    if not h5ad_paths:
+        return 0, []
+
+    # 读取第一个文件的细胞类型作为初始集合
+    first_adata = sc.read_h5ad(h5ad_paths[0])
+    if cell_type_col not in first_adata.obs.columns:
+        raise ValueError(f"文件 {h5ad_paths[0]} 的obs中不存在列: {cell_type_col}")
+
+    common_celltypes = set(first_adata.obs[cell_type_col].astype(str).unique())
+
+    # 与其他文件的细胞类型求交集
+    for h5ad_path in h5ad_paths[1:]:
+        adata = sc.read_h5ad(h5ad_path)
+        if cell_type_col not in adata.obs.columns:
+            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+
+        file_celltypes = set(adata.obs[cell_type_col].astype(str).unique())
+        common_celltypes &= file_celltypes  # 求交集
+
+    # 按字母顺序排序以确保稳定的映射
+    sorted_common_celltypes = sorted(common_celltypes)
+
+    print(
+        f"Found {len(sorted_common_celltypes)} common cell types across {len(h5ad_paths)} files:"
+    )
+    for i, celltype in enumerate(sorted_common_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(sorted_common_celltypes), sorted_common_celltypes
 
 
 def extract_state_dict(maybe_state):

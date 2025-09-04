@@ -19,9 +19,8 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,
+from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
     GeneExpressionDatasetMappedWithGlobalCelltype,
-    create_global_celltype_mapping,
 )
 from src.deepsc.data import DataCollator
 from src.deepsc.utils import (
@@ -136,49 +135,55 @@ class CellTypeAnnotation:
         adata_train = sc.read_h5ad(self.args.data_path)
         adata_test = sc.read_h5ad(self.args.data_path_eval)
 
-        # 保存仅训练集的细胞类型信息（用于公平评估）
-        print("Collecting training cell types...")
+        # 获取训练集和测试集的细胞类型交集（只训练和评估共同拥有的类型）
         train_celltypes = set(
             adata_train.obs[self.args.obs_celltype_col].astype(str).unique()
         )
-        print(f"训练集细胞类型: {sorted(train_celltypes)}")
-
-        # 创建统一的celltype映射表
-        print("Creating global celltype mapping...")
-        self.type2id, self.id2type = create_global_celltype_mapping(
-            adata_train, adata_test, obs_celltype_col=self.args.obs_celltype_col
-        )
-
-        # 保存仅训练集的类型ID集合，用于评估时的公平性检查
-        self.train_only_label_ids = set()
-        for celltype_name in train_celltypes:
-            if celltype_name in self.type2id:
-                self.train_only_label_ids.add(self.type2id[celltype_name])
-        print(f"训练集类型对应的ID: {sorted(self.train_only_label_ids)}")
-        print(f"训练集类型ID数量: {len(self.train_only_label_ids)}")
-
-        # 同时保存测试集类型ID，用于调试
         test_celltypes = set(
             adata_test.obs[self.args.obs_celltype_col].astype(str).unique()
         )
-        self.test_only_label_ids = set()
-        for celltype_name in test_celltypes:
-            if celltype_name in self.type2id:
-                self.test_only_label_ids.add(self.type2id[celltype_name])
-        print(f"测试集类型对应的ID: {sorted(self.test_only_label_ids)}")
-        print(f"测试集类型ID数量: {len(self.test_only_label_ids)}")
 
-        # 计算共同类型ID
-        common_type_ids = self.train_only_label_ids & self.test_only_label_ids
-        print(f"理论上的共同类型ID: {sorted(common_type_ids)}")
-        print(f"理论上的共同类型ID数量: {len(common_type_ids)}")
+        # 计算交集 - 这是我们真正关心的细胞类型
+        common_celltypes = train_celltypes & test_celltypes
+        print(f"训练集细胞类型数量: {len(train_celltypes)}")
+        print(f"测试集细胞类型数量: {len(test_celltypes)}")
+        print(f"共同细胞类型数量: {len(common_celltypes)}")
+        print(f"共同细胞类型: {sorted(common_celltypes)}")
 
-        # 保存celltype数量信息
-        self.cell_type_count = len(self.type2id)
-        print(f"Confirmed cell_type_count: {self.cell_type_count}")
+        # 基于交集创建映射表（只包含交集中的类型）
+        self.common_celltypes = sorted(common_celltypes)
+        self.type2id = {
+            celltype: idx for idx, celltype in enumerate(self.common_celltypes)
+        }
+        self.id2type = {
+            idx: celltype for idx, celltype in enumerate(self.common_celltypes)
+        }
+
+        # 细胞类型数量就是交集大小
+        self.cell_type_count = len(common_celltypes)
+        print(f"使用细胞类型数量（交集）: {self.cell_type_count}")
+
+        # 过滤训练和测试数据，只保留交集中的细胞类型
+        print("Filtering datasets to keep only common cell types...")
+        train_mask = (
+            adata_train.obs[self.args.obs_celltype_col]
+            .astype(str)
+            .isin(common_celltypes)
+        )
+        test_mask = (
+            adata_test.obs[self.args.obs_celltype_col]
+            .astype(str)
+            .isin(common_celltypes)
+        )
+
+        adata_train_filtered = adata_train[train_mask].copy()
+        adata_test_filtered = adata_test[test_mask].copy()
+
+        print(f"训练数据：{adata_train.n_obs} -> {adata_train_filtered.n_obs} 个细胞")
+        print(f"测试数据：{adata_test.n_obs} -> {adata_test_filtered.n_obs} 个细胞")
 
         self.train_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
-            h5ad=adata_train,
+            h5ad=adata_train_filtered,
             csv_path=self.args.csv_path,
             var_name_col=self.args.var_name_in_h5ad,
             obs_celltype_col=self.args.obs_celltype_col,
@@ -186,7 +191,7 @@ class CellTypeAnnotation:
             global_id2type=self.id2type,
         )
         self.eval_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
-            h5ad=adata_test,
+            h5ad=adata_test_filtered,
             csv_path=self.args.csv_path,
             var_name_col=self.args.var_name_in_h5ad,
             obs_celltype_col=self.args.obs_celltype_col,
@@ -393,25 +398,9 @@ class CellTypeAnnotation:
         """
         from sklearn.metrics import classification_report
 
-        # 确定要评估的类别：训练集和测试集都有的类型
-        if hasattr(self, "train_only_label_ids") and hasattr(
-            self, "test_only_label_ids"
-        ):
-            # 使用训练集和测试集的交集
-            eval_labels = sorted(self.train_only_label_ids & self.test_only_label_ids)
-        else:
-            # 后备方案：使用测试集中出现的所有类别
-            eval_labels = sorted(np.unique(y_true))
-
-        if not eval_labels:
-            print("Warning: No valid evaluation labels found")
-            return None
-
-        eval_labels = np.array(eval_labels)
-
-        # 获取类别名称映射
-        id2type = getattr(self, "id2type", {i: f"Type_{i}" for i in eval_labels})
-        target_names = [id2type.get(i, f"Type_{i}") for i in eval_labels]
+        # 现在所有类型都是交集，直接使用即可
+        eval_labels = np.arange(self.cell_type_count)  # 0 到 cell_type_count-1
+        target_names = [self.id2type[i] for i in eval_labels]
 
         # 计算分类指标
         report = classification_report(
@@ -425,23 +414,12 @@ class CellTypeAnnotation:
 
         # 提取指标数据
         metrics_data = {
-            "categories": [],
-            "recalls": [],
-            "precisions": [],
-            "f1_scores": [],
-            "supports": [],
+            "categories": target_names,
+            "recalls": [report[name]["recall"] for name in target_names],
+            "precisions": [report[name]["precision"] for name in target_names],
+            "f1_scores": [report[name]["f1-score"] for name in target_names],
+            "supports": [report[name]["support"] for name in target_names],
         }
-
-        for label in target_names:
-            if label in report and isinstance(report[label], dict):
-                metrics_data["categories"].append(label)
-                metrics_data["recalls"].append(report[label]["recall"])
-                metrics_data["precisions"].append(report[label]["precision"])
-                metrics_data["f1_scores"].append(report[label]["f1-score"])
-                metrics_data["supports"].append(report[label]["support"])
-
-        if not metrics_data["categories"]:
-            return None
 
         # 计算类别占比
         total_samples = sum(metrics_data["supports"])
@@ -452,7 +430,6 @@ class CellTypeAnnotation:
         metrics_data["y_true"] = y_true
         metrics_data["y_pred"] = y_pred
 
-        print(f"📊 评估了 {len(metrics_data['categories'])} 个细胞类型")
         return metrics_data
 
     def plot_evaluation_charts(self, y_true, y_pred):

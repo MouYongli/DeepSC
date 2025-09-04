@@ -12,6 +12,7 @@ from .utils import (
     compute_bin_distribution,
     compute_classification_metrics,
     compute_M_from_y,
+    count_common_cell_types_from_multiple_files,
     count_unique_cell_types,
     count_unique_cell_types_from_multiple_files,
     distributed_concat,
