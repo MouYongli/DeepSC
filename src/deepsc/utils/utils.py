@@ -1350,15 +1350,20 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
         cell_type_col (str): obs 中细胞类型列名（默认 "cell_type"）
 
     Returns:
-        int: 唯一 cell_type 的数量
+        tuple: (count, names) - 唯一 cell_type 的数量和名称列表
     """
     adata = sc.read_h5ad(h5ad_path)
 
     if cell_type_col not in adata.obs.columns:
         raise ValueError(f"obs 中不存在列: {cell_type_col}")
 
-    unique_count = adata.obs[cell_type_col].nunique()
-    return unique_count
+    unique_celltypes = sorted(adata.obs[cell_type_col].astype(str).unique())
+
+    print(f"Found {len(unique_celltypes)} unique cell types in {h5ad_path}:")
+    for i, celltype in enumerate(unique_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(unique_celltypes), unique_celltypes
 
 
 def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):

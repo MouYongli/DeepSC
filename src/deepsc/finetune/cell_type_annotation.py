@@ -8,8 +8,7 @@ import scanpy as sc
 import seaborn as sns
 import torch
 import torch.nn as nn
-
-# from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split
 from torch.optim import Adam
 from torch.optim.lr_scheduler import (
     LinearLR,
@@ -120,20 +119,56 @@ class CellTypeAnnotation:
 
     def build_dataset_sampler_from_h5ad(self):
         print("Building dataset sampler from h5ad file...")
-        # adata = sc.read_h5ad(self.args.data_path)
 
-        # # 根据样本索引划分
-        # train_idx, test_idx = train_test_split(
-        #     range(adata.n_obs),
-        #     test_size=0.1,  # 20% 测试集
-        #     random_state=42,  # 固定随机种子
-        # )
+        # 检查是否使用分开的数据集
+        use_separated_datasets = getattr(
+            self.args, "seperated_train_eval_dataset", True
+        )
 
-        # # 划分数据集
-        # adata_train = adata[train_idx].copy()
-        # adata_test = adata[test_idx].copy()
-        adata_train = sc.read_h5ad(self.args.data_path)
-        adata_test = sc.read_h5ad(self.args.data_path_eval)
+        if use_separated_datasets:
+            # 使用两个分开的数据集
+            print("Using separated train/eval datasets...")
+            adata_train = sc.read_h5ad(self.args.data_path)
+            adata_test = sc.read_h5ad(self.args.data_path_eval)
+        else:
+            # 使用单个数据集进行分层采样分割
+            print("Using single dataset with stratified split...")
+            adata = sc.read_h5ad(self.args.data_path)
+
+            # 获取细胞类型标签
+            cell_types = adata.obs[self.args.obs_celltype_col].astype(str)
+
+            # 进行分层采样，确保每个细胞类型在训练集和测试集中的比例相同
+            test_size = getattr(self.args, "test_size", 0.2)  # 默认20%测试集
+            train_idx, test_idx = train_test_split(
+                range(adata.n_obs),
+                test_size=test_size,
+                random_state=42,
+                stratify=cell_types,  # 按细胞类型分层采样
+            )
+
+            # 分割数据集
+            adata_train = adata[train_idx].copy()
+            adata_test = adata[test_idx].copy()
+
+            print(
+                f"分层采样结果：训练集 {len(train_idx)} 个细胞，测试集 {len(test_idx)} 个细胞"
+            )
+
+            # 验证分层采样效果
+            train_type_counts = adata_train.obs[
+                self.args.obs_celltype_col
+            ].value_counts()
+            test_type_counts = adata_test.obs[self.args.obs_celltype_col].value_counts()
+            print("分层采样验证（训练集 vs 测试集比例）:")
+            for celltype in train_type_counts.index:
+                if celltype in test_type_counts.index:
+                    train_ratio = train_type_counts[celltype] / len(train_idx)
+                    test_ratio = test_type_counts[celltype] / len(test_idx)
+                    print(f"  {celltype}: {train_ratio:.3f} vs {test_ratio:.3f}")
+
+        print(f"训练数据集大小: {adata_train.n_obs}")
+        print(f"测试数据集大小: {adata_test.n_obs}")
 
         # 获取训练集和测试集的细胞类型交集（只训练和评估共同拥有的类型）
         train_celltypes = set(
@@ -345,22 +380,8 @@ class CellTypeAnnotation:
             y_true = torch.cat(cell_type_ids, dim=0).numpy()
             y_pred = torch.cat(predictions, dim=0).numpy()
 
-            # 使用训练集类型与测试真实标签的交集，确保公平评估
-            unique_true_early = np.unique(y_true)
-
-            # 获取仅训练集的细胞类型
-            if hasattr(self, "train_only_label_ids"):
-                train_label_ids_early = self.train_only_label_ids
-            else:
-                # 备选方案：假设所有类型都在训练集中（向后兼容）
-                train_label_ids_early = set(range(self.cell_type_count))
-
-            # 只评估训练时见过且测试中存在的类别
-            meaningful_labels_early = sorted(
-                train_label_ids_early & set(unique_true_early)
-            )
-            eval_labels = np.array(meaningful_labels_early)
-
+            # 现在所有类型都是交集，直接计算即可
+            eval_labels = np.arange(self.cell_type_count)
             accuracy = accuracy_score(y_true, y_pred)
             precision = precision_score(
                 y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
@@ -371,8 +392,6 @@ class CellTypeAnnotation:
             macro_f1 = f1_score(
                 y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
             )
-            print("唯一的真实 cell_type_ids:", np.unique(y_true))
-            print("唯一的预测 predictions:", np.unique(y_pred))
 
         if self.is_master:
             print(

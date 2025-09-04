@@ -57,6 +57,7 @@ use_exp_regression_loss: False
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
+seperated_train_eval_dataset: False
 data_path: "/home/angli/baseline/DeepSC/data/cell_type_annotation/human_pancreas/hPancreas_train_adata.h5ad"
 data_path_eval: "/home/angli/baseline/DeepSC/data/cell_type_annotation/human_pancreas/hPancreas_test_adata.h5ad"
 var_name_in_h5ad: "gene_name"
