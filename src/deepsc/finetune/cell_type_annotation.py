@@ -384,19 +384,14 @@ class CellTypeAnnotation:
 
         return total_loss / total_num, total_error / total_num
 
-    def plot_evaluation_charts(self, y_true, y_pred):
+    def process_evaluation_data(self, y_true, y_pred):
         """
-        绘制评估图表：分类指标详情和混淆矩阵
-        """
-        from sklearn.metrics import classification_report, confusion_matrix
+        处理评估数据，计算指标并准备绘图所需的数据
 
-        # 创建保存图表的目录
-        save_dir = (
-            self.args.save_dir
-            if hasattr(self.args, "save_dir") and self.args.save_dir
-            else "./evaluation_plots"
-        )
-        os.makedirs(save_dir, exist_ok=True)
+        Returns:
+            dict: 包含处理后的数据和指标
+        """
+        from sklearn.metrics import classification_report
 
         # 获取类别标签映射
         # 使用训练集类型与测试batch真实标签的交集，只评估模型训练过且测试中存在的类别
@@ -464,9 +459,11 @@ class CellTypeAnnotation:
             id2type = {i: f"Type_{i}" for i in unique_labels}
             print("Warning: Using default type names (Type_0, Type_1, etc.)")
         print(f"unique_labels: {unique_labels}")
+
         # 获取类别名称
         target_names = [id2type[i] for i in unique_labels if i in id2type]
         print(f"target_names: {target_names}")
+
         # 获取详细分类报告，明确指定只计算真实标签中存在的类别
         report = classification_report(
             y_true,
@@ -492,13 +489,55 @@ class CellTypeAnnotation:
                 f1_scores.append(report[label]["f1-score"])
                 supports.append(report[label]["support"])
 
-        if not categories:  # 如果没有有效的类别，直接返回
-            print("Warning: No valid categories found for plotting")
-            return
+        if not categories:  # 如果没有有效的类别，返回空数据
+            return None
 
         # 计算每个类别的占比
         total_samples = sum(supports)
         proportions = [s / total_samples for s in supports]
+
+        return {
+            "categories": categories,
+            "recalls": recalls,
+            "precisions": precisions,
+            "f1_scores": f1_scores,
+            "supports": supports,
+            "proportions": proportions,
+            "unique_labels": unique_labels,
+            "y_true": y_true,
+            "y_pred": y_pred,
+        }
+
+    def plot_evaluation_charts(self, y_true, y_pred):
+        """
+        绘制评估图表：分类指标详情和混淆矩阵
+        """
+        from sklearn.metrics import confusion_matrix
+
+        # 处理评估数据
+        processed_data = self.process_evaluation_data(y_true, y_pred)
+        if processed_data is None:
+            print("Warning: No valid categories found for plotting")
+            return
+
+        # 解包处理后的数据
+        categories = processed_data["categories"]
+        recalls = processed_data["recalls"]
+        precisions = processed_data["precisions"]
+        f1_scores = processed_data["f1_scores"]
+        supports = processed_data["supports"]
+        proportions = processed_data["proportions"]
+        unique_labels = processed_data["unique_labels"]
+        y_true = processed_data["y_true"]
+        y_pred = processed_data["y_pred"]
+
+        # 创建保存图表的目录
+        save_dir = (
+            self.args.save_dir
+            if hasattr(self.args, "save_dir") and self.args.save_dir
+            else "./evaluation_plots"
+        )
+        os.makedirs(save_dir, exist_ok=True)
 
         # 绘制图1：分类指标详情（4个子图）
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
