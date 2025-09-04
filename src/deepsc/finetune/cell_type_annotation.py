@@ -389,124 +389,71 @@ class CellTypeAnnotation:
         处理评估数据，计算指标并准备绘图所需的数据
 
         Returns:
-            dict: 包含处理后的数据和指标
+            dict: 包含处理后的数据和指标，如果没有有效类别则返回None
         """
         from sklearn.metrics import classification_report
 
-        # 获取类别标签映射
-        # 使用训练集类型与测试batch真实标签的交集，只评估模型训练过且测试中存在的类别
-        unique_true = np.unique(y_true)
-        unique_pred = np.unique(y_pred)
-
-        # 获取仅训练集的细胞类型（避免使用train+test的并集）
-        if hasattr(self, "train_only_label_ids"):
-            train_label_ids = self.train_only_label_ids
+        # 确定要评估的类别：训练集和测试集都有的类型
+        if hasattr(self, "train_only_label_ids") and hasattr(
+            self, "test_only_label_ids"
+        ):
+            # 使用训练集和测试集的交集
+            eval_labels = sorted(self.train_only_label_ids & self.test_only_label_ids)
         else:
-            # 备选方案：假设所有类型都在训练集中（向后兼容）
-            train_label_ids = set(range(self.cell_type_count))
+            # 后备方案：使用测试集中出现的所有类别
+            eval_labels = sorted(np.unique(y_true))
 
-        # 使用所有理论上的共同类型进行评估（训练集和测试集都有的类型）
-        theoretical_common_ids = self.train_only_label_ids & self.test_only_label_ids
-        unique_labels = np.array(sorted(theoretical_common_ids))
+        if not eval_labels:
+            print("Warning: No valid evaluation labels found")
+            return None
 
-        print(f"📊 使用全部共同类型进行评估: {len(unique_labels)} 个")
-        print(f"    共同类型ID: {sorted(unique_labels)}")
+        eval_labels = np.array(eval_labels)
 
-        # 统计当前测试集中各类型的实际样本情况
-        current_test_ids = set(unique_true)
-        missing_in_test = set(unique_labels) - current_test_ids
-        if missing_in_test:
-            print(
-                f"    注意：以下共同类型在当前测试集中无样本: {sorted(missing_in_test)}"
-            )
-            for missing_id in missing_in_test:
-                if hasattr(self, "id2type") and missing_id in self.id2type:
-                    print(f"      ID {missing_id}: {self.id2type[missing_id]}")
+        # 获取类别名称映射
+        id2type = getattr(self, "id2type", {i: f"Type_{i}" for i in eval_labels})
+        target_names = [id2type.get(i, f"Type_{i}") for i in eval_labels]
 
-        # 统计被忽略的类别
-        test_only = set(unique_true) - train_label_ids  # 测试集特有，模型没见过
-        train_missing = train_label_ids - set(unique_true)  # 训练时见过但测试中不存在
-        invalid_pred = (
-            set(unique_pred) - train_label_ids
-        )  # 模型预测了训练时没见过的类型
-
-        if test_only:
-            test_only_count = np.sum(
-                [np.sum(y_true == label_id) for label_id in test_only]
-            )
-            print(f"📊 测试集特有类型(忽略): {test_only} ({test_only_count} 个样本)")
-            print("   模型训练时未见过，无法公平评估")
-
-        if invalid_pred:
-            invalid_count = np.sum(
-                [np.sum(y_pred == label_id) for label_id in invalid_pred]
-            )
-            print(f"📊 模型无效预测(忽略): {invalid_pred} ({invalid_count} 个预测)")
-            print("   超出训练类型范围的错误预测")
-
-        print(f"📊 评估类别: {len(unique_labels)} 个 (仅训练集见过且测试中存在)")
-        print(
-            f"    仅训练集类型总数: {len(train_label_ids)}, 测试真实类型总数: {len(unique_true)}"
-        )
-
-        # 尝试从多个来源获取类别映射
-        id2type = None
-        if hasattr(self, "id2type"):
-            id2type = self.id2type
-        print(f"id2type: {id2type}")
-        # 如果没有找到映射，创建默认映射
-        if id2type is None:
-            id2type = {i: f"Type_{i}" for i in unique_labels}
-            print("Warning: Using default type names (Type_0, Type_1, etc.)")
-        print(f"unique_labels: {unique_labels}")
-
-        # 获取类别名称
-        target_names = [id2type[i] for i in unique_labels if i in id2type]
-        print(f"target_names: {target_names}")
-
-        # 获取详细分类报告，明确指定只计算真实标签中存在的类别
+        # 计算分类指标
         report = classification_report(
             y_true,
             y_pred,
-            labels=unique_labels,  # 明确指定要计算的类别
+            labels=eval_labels,
             target_names=target_names,
             output_dict=True,
-            zero_division=0,  # 避免除零警告
+            zero_division=0,
         )
 
-        # 提取每个类别的指标
-        categories = []
-        recalls = []
-        precisions = []
-        f1_scores = []
-        supports = []
+        # 提取指标数据
+        metrics_data = {
+            "categories": [],
+            "recalls": [],
+            "precisions": [],
+            "f1_scores": [],
+            "supports": [],
+        }
 
         for label in target_names:
             if label in report and isinstance(report[label], dict):
-                categories.append(label)
-                recalls.append(report[label]["recall"])
-                precisions.append(report[label]["precision"])
-                f1_scores.append(report[label]["f1-score"])
-                supports.append(report[label]["support"])
+                metrics_data["categories"].append(label)
+                metrics_data["recalls"].append(report[label]["recall"])
+                metrics_data["precisions"].append(report[label]["precision"])
+                metrics_data["f1_scores"].append(report[label]["f1-score"])
+                metrics_data["supports"].append(report[label]["support"])
 
-        if not categories:  # 如果没有有效的类别，返回空数据
+        if not metrics_data["categories"]:
             return None
 
-        # 计算每个类别的占比
-        total_samples = sum(supports)
-        proportions = [s / total_samples for s in supports]
+        # 计算类别占比
+        total_samples = sum(metrics_data["supports"])
+        metrics_data["proportions"] = [
+            s / total_samples for s in metrics_data["supports"]
+        ]
+        metrics_data["unique_labels"] = eval_labels
+        metrics_data["y_true"] = y_true
+        metrics_data["y_pred"] = y_pred
 
-        return {
-            "categories": categories,
-            "recalls": recalls,
-            "precisions": precisions,
-            "f1_scores": f1_scores,
-            "supports": supports,
-            "proportions": proportions,
-            "unique_labels": unique_labels,
-            "y_true": y_true,
-            "y_pred": y_pred,
-        }
+        print(f"📊 评估了 {len(metrics_data['categories'])} 个细胞类型")
+        return metrics_data
 
     def plot_evaluation_charts(self, y_true, y_pred):
         """
