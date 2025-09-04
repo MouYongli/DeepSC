@@ -1350,12 +1350,230 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
         cell_type_col (str): obs 中细胞类型列名（默认 "cell_type"）
 
     Returns:
-        int: 唯一 cell_type 的数量
+        tuple: (count, names) - 唯一 cell_type 的数量和名称列表
     """
     adata = sc.read_h5ad(h5ad_path)
 
     if cell_type_col not in adata.obs.columns:
         raise ValueError(f"obs 中不存在列: {cell_type_col}")
 
-    unique_count = adata.obs[cell_type_col].nunique()
-    return unique_count
+    unique_celltypes = sorted(adata.obs[cell_type_col].astype(str).unique())
+
+    print(f"Found {len(unique_celltypes)} unique cell types in {h5ad_path}:")
+    for i, celltype in enumerate(unique_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(unique_celltypes), unique_celltypes
+
+
+def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
+    """
+    统计多个h5ad文件中所有unique的cell_type数量（并集）
+
+    Args:
+        *h5ad_paths: 多个h5ad文件路径
+        cell_type_col (str): obs中细胞类型列名
+
+    Returns:
+        int: 所有文件中唯一cell_type的总数量
+        list: 所有unique的cell_type名称列表（按字母顺序排序）
+    """
+    all_celltypes = set()
+
+    # 从所有h5ad文件中收集celltype
+    for h5ad_path in h5ad_paths:
+        adata = sc.read_h5ad(h5ad_path)
+
+        if cell_type_col not in adata.obs.columns:
+            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+
+        celltypes = adata.obs[cell_type_col].astype(str).unique()
+        all_celltypes.update(celltypes)
+
+    # 按字母顺序排序以确保稳定的映射
+    sorted_celltypes = sorted(all_celltypes)
+
+    print(
+        f"Found {len(sorted_celltypes)} unique cell types across {len(h5ad_paths)} files:"
+    )
+    for i, celltype in enumerate(sorted_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(sorted_celltypes), sorted_celltypes
+
+
+def count_common_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
+    """
+    统计多个h5ad文件中共同的cell_type数量（交集）
+
+    Args:
+        *h5ad_paths: 多个h5ad文件路径
+        cell_type_col (str): obs中细胞类型列名
+
+    Returns:
+        int: 所有文件共同的cell_type数量
+        list: 共同的cell_type名称列表（按字母顺序排序）
+    """
+    if not h5ad_paths:
+        return 0, []
+
+    # 读取第一个文件的细胞类型作为初始集合
+    first_adata = sc.read_h5ad(h5ad_paths[0])
+    if cell_type_col not in first_adata.obs.columns:
+        raise ValueError(f"文件 {h5ad_paths[0]} 的obs中不存在列: {cell_type_col}")
+
+    common_celltypes = set(first_adata.obs[cell_type_col].astype(str).unique())
+
+    # 与其他文件的细胞类型求交集
+    for h5ad_path in h5ad_paths[1:]:
+        adata = sc.read_h5ad(h5ad_path)
+        if cell_type_col not in adata.obs.columns:
+            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+
+        file_celltypes = set(adata.obs[cell_type_col].astype(str).unique())
+        common_celltypes &= file_celltypes  # 求交集
+
+    # 按字母顺序排序以确保稳定的映射
+    sorted_common_celltypes = sorted(common_celltypes)
+
+    print(
+        f"Found {len(sorted_common_celltypes)} common cell types across {len(h5ad_paths)} files:"
+    )
+    for i, celltype in enumerate(sorted_common_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(sorted_common_celltypes), sorted_common_celltypes
+
+
+def extract_state_dict(maybe_state):
+    """
+    兼容多种保存方式：
+    - {"model": state_dict, ...}  ← 你现在的保存方式（Fabric）
+    - {"state_dict": state_dict, ...}  ← Lightning 常见
+    - 直接就是 state_dict
+    - 键带 "model." 前缀
+    """
+    if isinstance(maybe_state, dict):
+        if "model" in maybe_state and isinstance(maybe_state["model"], dict):
+            sd = maybe_state["model"]
+        elif "state_dict" in maybe_state and isinstance(
+            maybe_state["state_dict"], dict
+        ):
+            sd = maybe_state["state_dict"]
+        else:
+            # 可能就是 state_dict
+            sd = maybe_state
+    else:
+        raise ValueError("Checkpoint 内容不是字典，无法解析 state_dict")
+
+    # 去掉可能存在的前缀 "model." 或 "module."
+    need_strip_prefixes = ("model.", "module.")
+    if any(any(k.startswith(p) for p in need_strip_prefixes) for k in sd.keys()):
+        new_sd = {}
+        for k, v in sd.items():
+            for p in need_strip_prefixes:
+                if k.startswith(p):
+                    k = k[len(p) :]
+                    break
+            new_sd[k] = v
+        sd = new_sd
+    return sd
+
+
+def extract_state_dict_with_encoder_prefix(maybe_state):
+    """
+    专门处理模型结构中有 encoder. 前缀，但预训练权重没有此前缀的情况。
+
+    Args:
+        maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
+
+    Returns:
+        dict: 处理过前缀的state_dict，匹配当前模型结构
+    """
+    # 先用原有函数提取基本的state_dict
+    sd = extract_state_dict(maybe_state)
+
+    # 检查是否需要添加encoder前缀
+    # 如果state_dict中的键没有encoder前缀，但我们需要encoder前缀
+    has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
+
+    if not has_encoder_prefix:
+        # 需要为所有键添加encoder.前缀
+        new_sd = {}
+        for k, v in sd.items():
+            new_key = f"encoder.{k}"
+            new_sd[new_key] = v
+        print(f"[LOAD] 为 {len(sd)} 个参数添加了 'encoder.' 前缀")
+        return new_sd
+    else:
+        print("[LOAD] 检测到权重已有 'encoder.' 前缀，直接返回")
+        return sd
+
+
+def extract_state_dict_remove_encoder_prefix(maybe_state):
+    """
+    专门处理模型结构中没有 encoder. 前缀，但权重有此前缀的情况。
+
+    Args:
+        maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
+
+    Returns:
+        dict: 处理过前缀的state_dict，匹配当前模型结构
+    """
+    # 先用原有函数提取基本的state_dict
+    sd = extract_state_dict(maybe_state)
+
+    # 检查是否需要移除encoder前缀
+    has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
+
+    if has_encoder_prefix:
+        # 需要移除encoder.前缀
+        new_sd = {}
+        for k, v in sd.items():
+            if k.startswith("encoder."):
+                new_key = k[len("encoder.") :]  # 移除"encoder."前缀
+                new_sd[new_key] = v
+            else:
+                new_sd[k] = v
+        print(
+            f"[LOAD] 为 {len([k for k in sd.keys() if k.startswith('encoder.')])} 个参数移除了 'encoder.' 前缀"
+        )
+        return new_sd
+    else:
+        print("[LOAD] 检测到权重没有 'encoder.' 前缀，直接返回")
+        return sd
+
+
+def report_loading_result(load_info):
+    missing = list(load_info.missing_keys)
+    unexpected = list(load_info.unexpected_keys)
+    print(f"[LOAD] missing_keys: {len(missing)} | unexpected_keys: {len(unexpected)}")
+    if missing:
+        print("  ´ missing:", missing)
+    if unexpected:
+        print("   unexpected:", unexpected)
+
+
+def sample_weight_norms(model, sd, k=5):
+    """
+    随机抽样 k 个双方都存在的参数，打印加载前后的范数变化。
+    范数有变化 => 基本可确认成功写入。
+    """
+    with torch.no_grad():
+        common_keys = [name for name, _ in model.named_parameters() if name in sd]
+        if not common_keys:
+            print("[LOAD] 没有找到与 checkpoint 对齐的公共参数名，无法做范数对比。")
+            return
+        sample = random.sample(common_keys, min(k, len(common_keys)))
+        print("[LOAD] 抽样参数范数对比（加载前 -> 加载后）：")
+        for name in sample:
+            p = dict(model.named_parameters())[name]
+            before = p.detach().float().norm().item()
+            # 暂存当前权重
+            old = p.detach().cpu().clone()
+            # 用 ckpt 覆盖一次
+            p.copy_(sd[name].to(p.device).to(p.dtype))
+            after = p.detach().float().norm().item()
+            print(f"  - {name}: {before:.6f} -> {after:.6f}")
+            # 还原（只用于对比；真正的加载在 load_state_dict 里会再做一次）
+            p.copy_(old.to(p.device).to(p.dtype))
