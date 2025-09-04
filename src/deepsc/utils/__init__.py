@@ -13,6 +13,7 @@ from .utils import (
     compute_classification_metrics,
     compute_M_from_y,
     count_unique_cell_types,
+    count_unique_cell_types_from_multiple_files,
     distributed_concat,
     extract_state_dict,
     extract_state_dict_with_encoder_prefix,

@@ -1,10 +1,15 @@
 import math
 import os
 
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import scanpy as sc
+import seaborn as sns
 import torch
 import torch.nn as nn
+
+# from sklearn.model_selection import train_test_split
 from torch.optim import Adam
 from torch.optim.lr_scheduler import (
     LinearLR,
@@ -14,7 +19,10 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from deepsc.data.dataset import GeneExpressionDatasetMapped
+from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,
+    GeneExpressionDatasetMappedWithGlobalCelltype,
+    create_global_celltype_mapping,
+)
 from src.deepsc.data import DataCollator
 from src.deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
@@ -33,6 +41,11 @@ class CellTypeAnnotation:
         self.world_size = self.fabric.world_size
         seed_all(args.seed + self.fabric.global_rank)
         self.is_master = self.fabric.global_rank == 0
+        self.epoch = 0  # 初始化epoch变量用于绘图
+
+        # 首先构建数据集以确定正确的celltype数量
+        self.build_dataset_sampler_from_h5ad()
+
         if self.args.pretrained_model_path and self.args.load_pretrained_model:
             self.load_pretrained_model()
         self.optimizer = Adam(self.model.parameters(), lr=self.args.learning_rate)
@@ -53,7 +66,7 @@ class CellTypeAnnotation:
         返回: (num_bins,) 每个bin的平均交叉熵损失
         计算平均时不包括bin0
         """
-        num_bins = self.args.cell_type_count
+        num_bins = self.cell_type_count
         ce_losses = []
         logits_flat = logits.reshape(-1, num_bins)
         labels_flat = discrete_expr_label.reshape(-1)
@@ -123,17 +136,62 @@ class CellTypeAnnotation:
         adata_train = sc.read_h5ad(self.args.data_path)
         adata_test = sc.read_h5ad(self.args.data_path_eval)
 
-        self.train_dataset = GeneExpressionDatasetMapped(
+        # 保存仅训练集的细胞类型信息（用于公平评估）
+        print("Collecting training cell types...")
+        train_celltypes = set(
+            adata_train.obs[self.args.obs_celltype_col].astype(str).unique()
+        )
+        print(f"训练集细胞类型: {sorted(train_celltypes)}")
+
+        # 创建统一的celltype映射表
+        print("Creating global celltype mapping...")
+        self.type2id, self.id2type = create_global_celltype_mapping(
+            adata_train, adata_test, obs_celltype_col=self.args.obs_celltype_col
+        )
+
+        # 保存仅训练集的类型ID集合，用于评估时的公平性检查
+        self.train_only_label_ids = set()
+        for celltype_name in train_celltypes:
+            if celltype_name in self.type2id:
+                self.train_only_label_ids.add(self.type2id[celltype_name])
+        print(f"训练集类型对应的ID: {sorted(self.train_only_label_ids)}")
+        print(f"训练集类型ID数量: {len(self.train_only_label_ids)}")
+
+        # 同时保存测试集类型ID，用于调试
+        test_celltypes = set(
+            adata_test.obs[self.args.obs_celltype_col].astype(str).unique()
+        )
+        self.test_only_label_ids = set()
+        for celltype_name in test_celltypes:
+            if celltype_name in self.type2id:
+                self.test_only_label_ids.add(self.type2id[celltype_name])
+        print(f"测试集类型对应的ID: {sorted(self.test_only_label_ids)}")
+        print(f"测试集类型ID数量: {len(self.test_only_label_ids)}")
+
+        # 计算共同类型ID
+        common_type_ids = self.train_only_label_ids & self.test_only_label_ids
+        print(f"理论上的共同类型ID: {sorted(common_type_ids)}")
+        print(f"理论上的共同类型ID数量: {len(common_type_ids)}")
+
+        # 保存celltype数量信息
+        self.cell_type_count = len(self.type2id)
+        print(f"Confirmed cell_type_count: {self.cell_type_count}")
+
+        self.train_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
             h5ad=adata_train,
             csv_path=self.args.csv_path,
             var_name_col=self.args.var_name_in_h5ad,
             obs_celltype_col=self.args.obs_celltype_col,
+            global_type2id=self.type2id,
+            global_id2type=self.id2type,
         )
-        self.eval_dataset = GeneExpressionDatasetMapped(
+        self.eval_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
             h5ad=adata_test,
             csv_path=self.args.csv_path,
             var_name_col=self.args.var_name_in_h5ad,
             obs_celltype_col=self.args.obs_celltype_col,
+            global_type2id=self.type2id,
+            global_id2type=self.id2type,
         )
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
         self.eval_sampler = DistributedSampler(self.eval_dataset, shuffle=True)
@@ -281,10 +339,33 @@ class CellTypeAnnotation:
 
             y_true = torch.cat(cell_type_ids, dim=0).numpy()
             y_pred = torch.cat(predictions, dim=0).numpy()
+
+            # 使用训练集类型与测试真实标签的交集，确保公平评估
+            unique_true_early = np.unique(y_true)
+
+            # 获取仅训练集的细胞类型
+            if hasattr(self, "train_only_label_ids"):
+                train_label_ids_early = self.train_only_label_ids
+            else:
+                # 备选方案：假设所有类型都在训练集中（向后兼容）
+                train_label_ids_early = set(range(self.cell_type_count))
+
+            # 只评估训练时见过且测试中存在的类别
+            meaningful_labels_early = sorted(
+                train_label_ids_early & set(unique_true_early)
+            )
+            eval_labels = np.array(meaningful_labels_early)
+
             accuracy = accuracy_score(y_true, y_pred)
-            precision = precision_score(y_true, y_pred, average="macro")
-            recall = recall_score(y_true, y_pred, average="macro")
-            macro_f1 = f1_score(y_true, y_pred, average="macro")
+            precision = precision_score(
+                y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+            )
+            recall = recall_score(
+                y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+            )
+            macro_f1 = f1_score(
+                y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+            )
             print("唯一的真实 cell_type_ids:", np.unique(y_true))
             print("唯一的预测 predictions:", np.unique(y_pred))
 
@@ -298,12 +379,280 @@ class CellTypeAnnotation:
                 f"Macro F1: {macro_f1:.4f}"
             )
 
+            # 绘制评估图表
+            self.plot_evaluation_charts(y_true, y_pred)
+
         return total_loss / total_num, total_error / total_num
 
+    def plot_evaluation_charts(self, y_true, y_pred):
+        """
+        绘制评估图表：分类指标详情和混淆矩阵
+        """
+        from sklearn.metrics import classification_report, confusion_matrix
+
+        # 创建保存图表的目录
+        save_dir = (
+            self.args.save_dir
+            if hasattr(self.args, "save_dir") and self.args.save_dir
+            else "./evaluation_plots"
+        )
+        os.makedirs(save_dir, exist_ok=True)
+
+        # 获取类别标签映射
+        # 使用训练集类型与测试batch真实标签的交集，只评估模型训练过且测试中存在的类别
+        unique_true = np.unique(y_true)
+        unique_pred = np.unique(y_pred)
+
+        # 获取仅训练集的细胞类型（避免使用train+test的并集）
+        if hasattr(self, "train_only_label_ids"):
+            train_label_ids = self.train_only_label_ids
+        else:
+            # 备选方案：假设所有类型都在训练集中（向后兼容）
+            train_label_ids = set(range(self.cell_type_count))
+
+        # 使用所有理论上的共同类型进行评估（训练集和测试集都有的类型）
+        theoretical_common_ids = self.train_only_label_ids & self.test_only_label_ids
+        unique_labels = np.array(sorted(theoretical_common_ids))
+
+        print(f"📊 使用全部共同类型进行评估: {len(unique_labels)} 个")
+        print(f"    共同类型ID: {sorted(unique_labels)}")
+
+        # 统计当前测试集中各类型的实际样本情况
+        current_test_ids = set(unique_true)
+        missing_in_test = set(unique_labels) - current_test_ids
+        if missing_in_test:
+            print(
+                f"    注意：以下共同类型在当前测试集中无样本: {sorted(missing_in_test)}"
+            )
+            for missing_id in missing_in_test:
+                if hasattr(self, "id2type") and missing_id in self.id2type:
+                    print(f"      ID {missing_id}: {self.id2type[missing_id]}")
+
+        # 统计被忽略的类别
+        test_only = set(unique_true) - train_label_ids  # 测试集特有，模型没见过
+        train_missing = train_label_ids - set(unique_true)  # 训练时见过但测试中不存在
+        invalid_pred = (
+            set(unique_pred) - train_label_ids
+        )  # 模型预测了训练时没见过的类型
+
+        if test_only:
+            test_only_count = np.sum(
+                [np.sum(y_true == label_id) for label_id in test_only]
+            )
+            print(f"📊 测试集特有类型(忽略): {test_only} ({test_only_count} 个样本)")
+            print("   模型训练时未见过，无法公平评估")
+
+        if invalid_pred:
+            invalid_count = np.sum(
+                [np.sum(y_pred == label_id) for label_id in invalid_pred]
+            )
+            print(f"📊 模型无效预测(忽略): {invalid_pred} ({invalid_count} 个预测)")
+            print("   超出训练类型范围的错误预测")
+
+        print(f"📊 评估类别: {len(unique_labels)} 个 (仅训练集见过且测试中存在)")
+        print(
+            f"    仅训练集类型总数: {len(train_label_ids)}, 测试真实类型总数: {len(unique_true)}"
+        )
+
+        # 尝试从多个来源获取类别映射
+        id2type = None
+        if hasattr(self, "id2type"):
+            id2type = self.id2type
+        print(f"id2type: {id2type}")
+        # 如果没有找到映射，创建默认映射
+        if id2type is None:
+            id2type = {i: f"Type_{i}" for i in unique_labels}
+            print("Warning: Using default type names (Type_0, Type_1, etc.)")
+        print(f"unique_labels: {unique_labels}")
+        # 获取类别名称
+        target_names = [id2type[i] for i in unique_labels if i in id2type]
+        print(f"target_names: {target_names}")
+        # 获取详细分类报告，明确指定只计算真实标签中存在的类别
+        report = classification_report(
+            y_true,
+            y_pred,
+            labels=unique_labels,  # 明确指定要计算的类别
+            target_names=target_names,
+            output_dict=True,
+            zero_division=0,  # 避免除零警告
+        )
+
+        # 提取每个类别的指标
+        categories = []
+        recalls = []
+        precisions = []
+        f1_scores = []
+        supports = []
+
+        for label in target_names:
+            if label in report and isinstance(report[label], dict):
+                categories.append(label)
+                recalls.append(report[label]["recall"])
+                precisions.append(report[label]["precision"])
+                f1_scores.append(report[label]["f1-score"])
+                supports.append(report[label]["support"])
+
+        if not categories:  # 如果没有有效的类别，直接返回
+            print("Warning: No valid categories found for plotting")
+            return
+
+        # 计算每个类别的占比
+        total_samples = sum(supports)
+        proportions = [s / total_samples for s in supports]
+
+        # 绘制图1：分类指标详情（4个子图）
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(
+            f"Classification Metrics by Cell Type - Epoch {self.epoch}",
+            fontsize=16,
+            fontweight="bold",
+        )
+
+        # 子图1: Recall
+        bars1 = ax1.bar(range(len(categories)), recalls, color="skyblue", alpha=0.8)
+        ax1.set_title("Recall by Cell Type")
+        ax1.set_ylabel("Recall")
+        ax1.set_xticks(range(len(categories)))
+        ax1.set_xticklabels(categories, rotation=45, ha="right")
+        ax1.set_ylim(0, 1)
+        ax1.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars1):
+            height = bar.get_height()
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        # 子图2: Precision
+        bars2 = ax2.bar(
+            range(len(categories)), precisions, color="lightcoral", alpha=0.8
+        )
+        ax2.set_title("Precision by Cell Type")
+        ax2.set_ylabel("Precision")
+        ax2.set_xticks(range(len(categories)))
+        ax2.set_xticklabels(categories, rotation=45, ha="right")
+        ax2.set_ylim(0, 1)
+        ax2.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars2):
+            height = bar.get_height()
+            ax2.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        # 子图3: F1 Score
+        bars3 = ax3.bar(
+            range(len(categories)), f1_scores, color="lightgreen", alpha=0.8
+        )
+        ax3.set_title("F1 Score by Cell Type")
+        ax3.set_ylabel("F1 Score")
+        ax3.set_xticks(range(len(categories)))
+        ax3.set_xticklabels(categories, rotation=45, ha="right")
+        ax3.set_ylim(0, 1)
+        ax3.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars3):
+            height = bar.get_height()
+            ax3.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        # 子图4: 类别占比
+        bars4 = ax4.bar(range(len(categories)), proportions, color="gold", alpha=0.8)
+        ax4.set_title("Class Proportion")
+        ax4.set_ylabel("Proportion")
+        ax4.set_xticks(range(len(categories)))
+        ax4.set_xticklabels(categories, rotation=45, ha="right")
+        ax4.set_ylim(0, max(proportions) * 1.1 if proportions else 1)
+        ax4.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars4):
+            height = bar.get_height()
+            ax4.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + height * 0.05,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        plt.tight_layout()
+        metrics_file = os.path.join(
+            save_dir, f"classification_metrics_epoch_{self.epoch}.png"
+        )
+        plt.savefig(metrics_file, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 绘制图2：混淆矩阵（只包含真实标签中的类别）
+        cm = confusion_matrix(y_true, y_pred, labels=unique_labels)
+        cm_normalized = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
+        cm_df = pd.DataFrame(
+            cm_normalized,
+            index=categories[: cm.shape[0]],
+            columns=categories[: cm.shape[1]],
+        )
+
+        plt.figure(figsize=(10, 10))
+        sns.heatmap(
+            cm_df, annot=True, fmt=".2f", cmap="Blues", cbar_kws={"shrink": 0.8}
+        )
+        plt.title(
+            f"Confusion Matrix (Normalized) - Epoch {self.epoch}",
+            fontsize=14,
+            fontweight="bold",
+        )
+        plt.ylabel("True Label", fontsize=12)
+        plt.xlabel("Predicted Label", fontsize=12)
+
+        confusion_file = os.path.join(
+            save_dir, f"confusion_matrix_epoch_{self.epoch}.png"
+        )
+        plt.savefig(confusion_file, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 创建并保存指标表格
+        metrics_df = pd.DataFrame(
+            {
+                "Cell Type": categories,
+                "Recall": recalls,
+                "Precision": precisions,
+                "F1 Score": f1_scores,
+                "Support": supports,
+                "Proportion": proportions,
+            }
+        )
+        csv_file = os.path.join(
+            save_dir, f"classification_metrics_epoch_{self.epoch}.csv"
+        )
+        # 将数值列格式化为保留2位小数
+        metrics_df["Recall"] = metrics_df["Recall"].round(2)
+        metrics_df["Precision"] = metrics_df["Precision"].round(2)
+        metrics_df["F1 Score"] = metrics_df["F1 Score"].round(2)
+        metrics_df["Proportion"] = metrics_df["Proportion"].round(2)
+        metrics_df.to_csv(csv_file, index=False)
+
+        print("Evaluation plots saved to:")
+        print(f"  - Metrics: {metrics_file}")
+        print(f"  - Confusion Matrix: {confusion_file}")
+        print(f"  - CSV Report: {csv_file}")
+
     def train(self):
-        # 首先构建dataloader（如果还没有构建）
-        if not hasattr(self, "train_loader"):
-            self.build_dataset_sampler_from_h5ad()
         print("train_loader: ", len(self.train_loader.dataset))
         print("eval_loader: ", len(self.eval_loader.dataset))
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1

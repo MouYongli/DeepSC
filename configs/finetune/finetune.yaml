@@ -20,7 +20,7 @@ ce_loss_weight: 1.0
 target_mse_loss_weight: 3.0
 #control the weight of mse loss
 adaptive_mse_weight: False
-cls_loss_type: "per_bin"
+cls_loss_type: "standard"
 
 # MoE Regressor settings
 use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简单回归器
@@ -57,11 +57,10 @@ use_exp_regression_loss: False
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
 csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
-data_path: "/home/angli/baseline/DeepSC/data/cell_type_annotation/test_provided_by_scgpt/filtered_ms_adata.h5ad"
-data_path_eval: "/home/angli/baseline/DeepSC/data/cell_type_annotation/test_provided_by_scgpt/c_data.h5ad"
+data_path: "/home/angli/baseline/DeepSC/data/cell_type_annotation/human_pancreas/hPancreas_train_adata.h5ad"
+data_path_eval: "/home/angli/baseline/DeepSC/data/cell_type_annotation/human_pancreas/hPancreas_test_adata.h5ad"
 var_name_in_h5ad: "gene_name"
-obs_celltype_col: "celltype"
-cell_type_count: 18
+obs_celltype_col: "Celltype2"
 use_moe_ffn: True
 data_length: 5000
 seed: 42
@@ -92,6 +91,9 @@ use_mogaide_scheduler: False
 
 # 新增checkpoint相关参数
 resume_last_training: True
+
+# 评估策略
+eval_use_all_common_types: true  # true: 显示所有共同类型(即使当前batch中为0), false: 只显示当前batch存在的类型
 
 # 梯度检查相关参数
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用

@@ -1361,6 +1361,42 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
     return unique_count
 
 
+def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
+    """
+    统计多个h5ad文件中所有unique的cell_type数量
+
+    Args:
+        *h5ad_paths: 多个h5ad文件路径
+        cell_type_col (str): obs中细胞类型列名
+
+    Returns:
+        int: 所有文件中唯一cell_type的总数量
+        list: 所有unique的cell_type名称列表（按字母顺序排序）
+    """
+    all_celltypes = set()
+
+    # 从所有h5ad文件中收集celltype
+    for h5ad_path in h5ad_paths:
+        adata = sc.read_h5ad(h5ad_path)
+
+        if cell_type_col not in adata.obs.columns:
+            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+
+        celltypes = adata.obs[cell_type_col].astype(str).unique()
+        all_celltypes.update(celltypes)
+
+    # 按字母顺序排序以确保稳定的映射
+    sorted_celltypes = sorted(all_celltypes)
+
+    print(
+        f"Found {len(sorted_celltypes)} unique cell types across {len(h5ad_paths)} files:"
+    )
+    for i, celltype in enumerate(sorted_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(sorted_celltypes), sorted_celltypes
+
+
 def extract_state_dict(maybe_state):
     """
     兼容多种保存方式：
