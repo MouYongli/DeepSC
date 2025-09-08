@@ -10,8 +10,11 @@ run_name: "finetune_cell_type_annotation_256hd"
 chunksize: 4
 shuffel_files_each_epoch: False
 pretrained_model: True
-pretrained_model_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint_epoch3.ckpt"
+pretrained_model_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint.ckpt"
+include_zero_gene: "all" #all or batch-wise
 
+use_scgpt_loss: True
+use_scgpt_selection: False
 # Loss weights
 enable_l0: False
 enable_mse: True
@@ -63,10 +66,10 @@ var_name_in_h5ad: "feature_name"
 obs_celltype_col: "cell_type"
 cell_type_count: 0
 use_moe_ffn: True
-data_length: 5000
+data_length: 1500
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
-num_device: 1
+num_device: 3
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 valid_every: 200
 model_name: "DeepSC_heart9_blood_others_blood"

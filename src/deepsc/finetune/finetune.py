@@ -5,16 +5,13 @@ from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
 from deepsc.utils.utils import setup_logging
-from src.deepsc.finetune.perturbation_prediction import PerturbationPrediction
-from src.deepsc.utils import count_unique_cell_types
+from src.deepsc.finetune.pp_new import PPNEW
 
 
 @hydra.main(
     version_base=None, config_path="../../../configs/finetune", config_name="finetune"
 )
 def finetune(cfg: DictConfig):
-    cfg.cell_type_count = count_unique_cell_types(cfg.data_path, cfg.obs_celltype_col)
-    # initialize fabric
     fabric = Fabric(
         accelerator="cuda",
         devices=cfg.num_device,
@@ -36,7 +33,7 @@ def finetune(cfg: DictConfig):
     # instantiate model
     model: nn.Module = hydra.utils.instantiate(cfg.model)
     model = model.float()
-    trainer = PerturbationPrediction(cfg, fabric=fabric, model=model)
+    trainer = PPNEW(cfg, fabric=fabric, model=model)
     trainer.train()
 
 

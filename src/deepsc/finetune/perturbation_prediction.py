@@ -21,6 +21,7 @@ from deepsc.utils import (
 )
 from src.deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
+    compute_perturbation_metrics,
     seed_all,
 )
 
@@ -93,6 +94,7 @@ class PerturbationPrediction:
         data_name = "adamson"
         split = "simulation"
         pert_data = PertData("./data")  # TODO: change to the data path
+        self.pert_data = pert_data
         pert_data.load(data_name=data_name)
         pert_data.prepare_split(split=split, seed=1)
         pert_data.get_dataloader(
@@ -202,6 +204,41 @@ class PerturbationPrediction:
 
         return sel_idx_i[keep]
 
+    def _select_genes_scgpt_style(self, ori_gene_values, pert_flags_full, device):
+        """采用scGPT式的基因选择策略：所有基因或随机采样"""
+        batch_size = ori_gene_values.shape[0]
+
+        # 选择所有有效基因（在vocab中的基因）
+        valid_gene_mask = self.gene_ids != 0
+        all_valid_gene_ids = torch.nonzero(valid_gene_mask, as_tuple=True)[0]
+
+        # 如果基因数量超过序列长度限制，随机采样
+        max_seq_len = getattr(self.args, "sequence_length", 1500)
+        if len(all_valid_gene_ids) > max_seq_len:
+            # 随机采样到max_seq_len
+            perm = torch.randperm(len(all_valid_gene_ids), device=device)[:max_seq_len]
+            selected_gene_ids = all_valid_gene_ids[perm]
+        else:
+            selected_gene_ids = all_valid_gene_ids
+
+        # 按vocab id排序（保持一致性）
+        genes_vocab_ids = self.gene_ids[selected_gene_ids]
+        sort_idx = torch.argsort(genes_vocab_ids)
+        selected_gene_ids = selected_gene_ids[sort_idx]
+        genes_vocab_ids = genes_vocab_ids[sort_idx]
+
+        # 所有样本使用相同的基因集合
+        sel_ids_list = [selected_gene_ids for _ in range(batch_size)]
+        genes_tok_list = [genes_vocab_ids for _ in range(batch_size)]
+        inp_vals_list = [
+            ori_gene_values[i, selected_gene_ids] for i in range(batch_size)
+        ]
+        pert_flags_list = [
+            pert_flags_full[i, selected_gene_ids] for i in range(batch_size)
+        ]
+
+        return sel_ids_list, genes_tok_list, inp_vals_list, pert_flags_list
+
     def _pad_sequences(
         self,
         genes_tok_list,
@@ -217,11 +254,17 @@ class PerturbationPrediction:
         def pad1d(x, L, pad_val):
             if x.numel() == L:
                 return x
-            out = x.new_full((L,), pad_val)
-            out[: x.numel()] = x
-            return out
+            elif x.numel() > L:
+                # 如果序列太长，截断到目标长度
+                return x[:L]
+            else:
+                # 如果序列太短，进行padding
+                out = x.new_full((L,), pad_val)
+                out[: x.numel()] = x
+                return out
 
-        Lmax = max(seq.numel() for seq in genes_tok_list) if genes_tok_list else 1
+        # 固定序列长度为1500，确保所有批次长度一致
+        Lmax = 1500
 
         mapped_input_gene_ids = torch.stack(
             [pad1d(t, Lmax, pad_token_id) for t in genes_tok_list], dim=0
@@ -296,10 +339,17 @@ class PerturbationPrediction:
         # 步骤1: 构造扰动标记
         pert_flags_full = self._construct_pert_flags(data, batch_size, device)
 
-        # 步骤2: 逐细胞选择基因
-        sel_ids_list, genes_tok_list, inp_vals_list, pert_flags_list = (
-            self._select_genes_per_cell(ori_gene_values, pert_flags_full, device)
-        )
+        # 步骤2: 采用scGPT式的基因选择策略
+        if hasattr(self.args, "use_scgpt_selection") and self.args.use_scgpt_selection:
+            # scGPT式：所有基因或随机采样
+            sel_ids_list, genes_tok_list, inp_vals_list, pert_flags_list = (
+                self._select_genes_scgpt_style(ori_gene_values, pert_flags_full, device)
+            )
+        else:
+            # 原始方式：逐细胞选择基因
+            sel_ids_list, genes_tok_list, inp_vals_list, pert_flags_list = (
+                self._select_genes_per_cell(ori_gene_values, pert_flags_full, device)
+            )
         # 在这之后还有可能出现基因表达值为0的基因，这不是padding，这是基因本身表达值为0
         # all_vals = torch.cat(inp_vals_list, dim=0)  # 将所有细胞的值合并
         # zero_count = (all_vals == 0).sum().item()
@@ -332,6 +382,7 @@ class PerturbationPrediction:
             "target_values": target_values,
             "input_pert_flags": input_pert_flags,
             "src_key_padding_mask": src_key_padding_mask,
+            "sel_ids_list": sel_ids_list,  # 添加选择的基因索引信息
         }
 
     def each_training_iteration(self, data, is_accumulating):
@@ -366,41 +417,65 @@ class PerturbationPrediction:
             input_pert_flags=input_pert_flags,
         )
 
-        # 计算加权损失：对受扰动影响较大的基因(pert_flags=2)给予两倍权重
-        # input_pert_flags的值：0=pad, 1=原始扰动基因, 2=受影响基因(DE), 3=受影响基因+1
-        highly_affected_mask = (
-            input_pert_flags == 3
-        )  # pert_flags_full=2的基因加1后变成3
-        other_mask = (input_pert_flags != 0) & (
-            ~highly_affected_mask
-        )  # 非pad且非高影响的基因
-        valid_mask = (input_values != -1.0) & (target_values != -1.0)
-        highly_affected_mask = highly_affected_mask & valid_mask
-        other_mask = other_mask & valid_mask
-        # 计算受扰动影响较大基因的MSE
-        if highly_affected_mask.any():
-            highly_affected_loss = self.criterion_mse(
-                regression_output[highly_affected_mask],
-                target_values[highly_affected_mask],
-            )
+        # 采用scGPT式损失计算：对所有非padding位置统一计算损失
+        if hasattr(self.args, "use_scgpt_loss") and self.args.use_scgpt_loss:
+            # scGPT式：所有有效位置都参与损失计算（不区分基因类型）
+            valid_mask = (input_values != -1.0) & (target_values != -1.0)
+            if valid_mask.any():
+                # 统一MSE损失：所有基因一视同仁
+                unified_loss = self.criterion_mse(
+                    regression_output[valid_mask], target_values[valid_mask]
+                )
+                # 为了兼容原始接口，返回相同的损失值
+                loss = unified_loss
+                highly_affected_loss = unified_loss  # 实际上没有单独的"高影响"损失
+                other_loss = unified_loss  # 实际上没有单独的"其他"损失
+            else:
+                # 没有有效数据的边界情况
+                zero_loss = torch.tensor(0.0, device=regression_output.device)
+                loss = zero_loss
+                highly_affected_loss = zero_loss
+                other_loss = zero_loss
         else:
-            highly_affected_loss = torch.tensor(0.0, device=regression_output.device)
+            # 原始方式：加权损失计算
+            # input_pert_flags的值：0=pad, 1=原始扰动基因, 2=受影响基因(DE), 3=受影响基因+1
+            highly_affected_mask = (
+                input_pert_flags == 3
+            )  # pert_flags_full=2的基因加1后变成3
+            other_mask = (input_pert_flags != 0) & (
+                ~highly_affected_mask
+            )  # 非pad且非高影响的基因
+            valid_mask = (input_values != -1.0) & (target_values != -1.0)
+            highly_affected_mask = highly_affected_mask & valid_mask
+            other_mask = other_mask & valid_mask
 
-        # 计算其他基因的MSE
-        if other_mask.any():
-            other_loss = self.criterion_mse(
-                regression_output[other_mask], target_values[other_mask]
-            )
-        else:
-            other_loss = torch.tensor(0.0, device=regression_output.device)
-        if valid_mask.any():
-            valid_loss = self.criterion_mse(
-                regression_output[valid_mask], target_values[valid_mask]
-            )
-        else:
-            valid_loss = torch.tensor(0.0, device=regression_output.device)
+            # 计算受扰动影响较大基因的MSE
+            if highly_affected_mask.any():
+                highly_affected_loss = self.criterion_mse(
+                    regression_output[highly_affected_mask],
+                    target_values[highly_affected_mask],
+                )
+            else:
+                highly_affected_loss = torch.tensor(
+                    0.0, device=regression_output.device
+                )
 
-        loss = valid_loss
+            # 计算其他基因的MSE
+            if other_mask.any():
+                other_loss = self.criterion_mse(
+                    regression_output[other_mask], target_values[other_mask]
+                )
+            else:
+                other_loss = torch.tensor(0.0, device=regression_output.device)
+
+            if valid_mask.any():
+                valid_loss = self.criterion_mse(
+                    regression_output[valid_mask], target_values[valid_mask]
+                )
+            else:
+                valid_loss = torch.tensor(0.0, device=regression_output.device)
+
+            loss = valid_loss
 
         if is_accumulating:
             with self.fabric.no_backward_sync(self.model, enabled=is_accumulating):
@@ -414,7 +489,6 @@ class PerturbationPrediction:
         return loss, other_loss, highly_affected_loss
 
     def train(self):
-        pass
         for epoch in range(self.args.epoch):
             self.model.train()
             data_iter = self.train_loader
@@ -435,30 +509,23 @@ class PerturbationPrediction:
                         other_loss=other_loss.item(),
                         highly_affected_loss=highly_affected_loss.item(),
                     )
-            self.eval(epoch)
+            self.res = self.eval(epoch)
+            val_metrics = compute_perturbation_metrics(
+                self.res,
+                self.pert_data.adata[self.pert_data.adata.obs["condition"] == "ctrl"],
+            )
+            print(f"val_metrics at epoch {epoch}: ")
+            print(val_metrics)
 
     def eval(self, epoch):
         self.model.eval()
-
-        # 初始化数据收集列表
         pert_cat = []
-        highly_affected_predictions = []
-        highly_affected_targets = []
-        highly_affected_inputs = []
-        others_predictions = []
-        others_targets = []
-        others_inputs = []
         pred = []
         truth = []
-        overall_inputs = []
-
-        # 收集控制组数据用于计算pearson_delta
-        control_expressions = {}  # 基因名 -> 控制组表达值列表
-        all_predictions = {}  # 基因名 -> 预测值列表 (对应target)
-        all_targets = {}  # 基因名 -> 真实值列表
-        gene_masks = {}  # 基因名 -> mask类型列表 (highly_affected 或 others)
-
-        data_iter = self.valid_loader  # 修复：使用valid_loader而不是eval_loader
+        pred_de = []
+        truth_de = []
+        results = {}
+        data_iter = self.valid_loader
         if self.is_master:
             data_iter = tqdm(
                 self.valid_loader,
@@ -466,18 +533,18 @@ class PerturbationPrediction:
                 ncols=150,
                 position=1,
             )
-
-        with torch.no_grad():  # 添加no_grad上下文管理器
+        with torch.no_grad():
             for index, batch in enumerate(data_iter):
                 pert_cat.extend(batch.pert)
                 t = batch.y
-
                 preprocessed_data = self._preprocess_batch(batch)
                 mapped_input_gene_ids = preprocessed_data["mapped_input_gene_ids"]
                 discrete_input_bins = preprocessed_data["discrete_input_bins"]
                 input_values = preprocessed_data["input_values"]
                 target_values = preprocessed_data["target_values"]
                 input_pert_flags = preprocessed_data["input_pert_flags"]
+                sel_ids_list = preprocessed_data["sel_ids_list"]
+
                 regression_output, y, gene_emb, expr_emb = self.model(
                     gene_ids=mapped_input_gene_ids,
                     expression_bin=discrete_input_bins,
@@ -485,72 +552,176 @@ class PerturbationPrediction:
                     input_pert_flags=input_pert_flags,
                 )
 
+                # 改进版：将部分预测结果映射回完整基因空间
+                batch_size = regression_output.size(0)
+                device = regression_output.device
+
+                # 不再使用零矩阵，而是用输入表达值作为基础（未扰动基因保持原值）
+                # 之前是全是0为初始化
+                # full_pred_gene_values = torch.zeros(batch_size,
+                # self.num_genes, device=device, dtype=regression_output.dtype)
+                ori_gene_values = (
+                    batch.x[:, 0].view(batch_size, self.num_genes).to(device)
+                )
+                full_pred_gene_values = ori_gene_values.clone().to(
+                    dtype=regression_output.dtype
+                )
+
+                # 将每个样本的预测值映射到对应的基因位置
+                for i in range(batch_size):
+                    if len(sel_ids_list) > i and sel_ids_list[i].numel() > 0:
+                        # 获取当前样本选择的基因索引
+                        selected_gene_indices = sel_ids_list[i]
+                        # 确保不超过预测结果的长度
+                        valid_len = min(
+                            len(selected_gene_indices), regression_output.size(1)
+                        )
+                        if valid_len > 0:
+                            full_pred_gene_values[
+                                i, selected_gene_indices[:valid_len]
+                            ] = regression_output[i, :valid_len]
+
+                pred.extend(full_pred_gene_values.cpu())
+                truth.extend(t.cpu())  # t已经是完整基因维度
+
+                # 处理DE基因（从完整空间中提取）
                 highly_affected_mask = (
                     input_pert_flags == 3
                 )  # pert_flags_full=2的基因加1后变成3
-                other_mask = (input_pert_flags != 0) & (
-                    ~highly_affected_mask
-                )  # 非pad且非高影响的基因
                 valid_mask = (input_values != -1.0) & (target_values != -1.0)
                 highly_affected_mask = highly_affected_mask & valid_mask
-                other_mask = other_mask & valid_mask
 
-                # 收集数据用于散点图
-                if highly_affected_mask.any():
-                    highly_affected_predictions.append(
-                        regression_output[highly_affected_mask].cpu()
-                    )
-                    highly_affected_targets.append(
-                        target_values[highly_affected_mask].cpu()
-                    )
-                    highly_affected_inputs.append(
-                        input_values[highly_affected_mask].cpu()
-                    )
-                if other_mask.any():
-                    others_predictions.append(regression_output[other_mask].cpu())
-                    others_targets.append(target_values[other_mask].cpu())
-                    others_inputs.append(input_values[other_mask].cpu())
-                if valid_mask.any():
-                    pred.append(regression_output[valid_mask].cpu())
-                    truth.append(target_values[valid_mask].cpu())
-                    overall_inputs.append(input_values[valid_mask].cpu())
+                # 从压缩空间中提取DE基因的预测值
+                pred_de.extend(regression_output[highly_affected_mask].cpu())
+                truth_de.extend(target_values[highly_affected_mask].cpu())
+        # 在循环结束后处理结果
+        results["pert_cat"] = np.array(pert_cat)
+        pred = torch.stack(pred)
+        truth = torch.stack(truth)
+        results["pred"] = pred.detach().cpu().numpy().astype(np.float64)
+        results["truth"] = truth.detach().cpu().numpy().astype(np.float64)
+        results["pred_de"] = (
+            torch.stack(pred_de).detach().cpu().numpy().astype(np.float64)
+        )
+        results["truth_de"] = (
+            torch.stack(truth_de).detach().cpu().numpy().astype(np.float64)
+        )
+        return results
 
-            pred_delta_ha, true_delta_ha = self.calc_deltas(
-                highly_affected_predictions,
-                highly_affected_targets,
-                highly_affected_inputs,
-            )
-            pred_delta_others, true_delta_others = self.calc_deltas(
-                others_predictions, others_targets, others_inputs
-            )
-            pred_delta_all, true_delta_all = self.calc_deltas(
-                pred, truth, overall_inputs
-            )
-            print("=== Pearson Delta Results ===")
-            if pred_delta_ha is not None:
-                corr_ha, p_ha = pearsonr(pred_delta_ha, true_delta_ha)
-                print(f"Highly Affected Delta: {corr_ha:.4f} (p={p_ha:.4e})")
+    # def eval(self, epoch):
+    #     self.model.eval()
 
-            if pred_delta_others is not None:
-                corr_others, p_others = pearsonr(pred_delta_others, true_delta_others)
-                print(f"Others Delta: {corr_others:.4f} (p={p_others:.4e})")
+    #     # 初始化数据收集列表
+    #     pert_cat = []
+    #     highly_affected_predictions = []
+    #     highly_affected_targets = []
+    #     highly_affected_inputs = []
+    #     others_predictions = []
+    #     others_targets = []
+    #     others_inputs = []
+    #     pred = []
+    #     truth = []
+    #     overall_inputs = []
 
-            if pred_delta_all is not None:
-                corr_all, p_all = pearsonr(pred_delta_all, true_delta_all)
-                print(f"Overall Delta: {corr_all:.4f} (p={p_all:.4e})")
+    #     # 收集控制组数据用于计算pearson_delta
+    #     control_expressions = {}  # 基因名 -> 控制组表达值列表
+    #     all_predictions = {}  # 基因名 -> 预测值列表 (对应target)
+    #     all_targets = {}  # 基因名 -> 真实值列表
+    #     gene_masks = {}  # 基因名 -> mask类型列表 (highly_affected 或 others)
 
-            self.plot_scatter_plots(
-                highly_affected_predictions,
-                highly_affected_targets,
-                highly_affected_inputs,
-                others_predictions,
-                others_targets,
-                others_inputs,
-                pred,
-                truth,
-                overall_inputs,
-                epoch,
-            )
+    #     data_iter = self.valid_loader  # 修复：使用valid_loader而不是eval_loader
+    #     if self.is_master:
+    #         data_iter = tqdm(
+    #             self.valid_loader,
+    #             desc="EVAL ",
+    #             ncols=150,
+    #             position=1,
+    #         )
+
+    #     with torch.no_grad():  # 添加no_grad上下文管理器
+    #         for index, batch in enumerate(data_iter):
+    #             pert_cat.extend(batch.pert)
+    #             t = batch.y
+
+    #             preprocessed_data = self._preprocess_batch(batch)
+    #             mapped_input_gene_ids = preprocessed_data["mapped_input_gene_ids"]
+    #             discrete_input_bins = preprocessed_data["discrete_input_bins"]
+    #             input_values = preprocessed_data["input_values"]
+    #             target_values = preprocessed_data["target_values"]
+    #             input_pert_flags = preprocessed_data["input_pert_flags"]
+    #             regression_output, y, gene_emb, expr_emb = self.model(
+    #                 gene_ids=mapped_input_gene_ids,
+    #                 expression_bin=discrete_input_bins,
+    #                 normalized_expr=input_values,
+    #                 input_pert_flags=input_pert_flags,
+    #             )
+
+    #             highly_affected_mask = (
+    #                 input_pert_flags == 3
+    #             )  # pert_flags_full=2的基因加1后变成3
+    #             other_mask = (input_pert_flags != 0) & (
+    #                 ~highly_affected_mask
+    #             )  # 非pad且非高影响的基因
+    #             valid_mask = (input_values != -1.0) & (target_values != -1.0)
+    #             highly_affected_mask = highly_affected_mask & valid_mask
+    #             other_mask = other_mask & valid_mask
+
+    #             # 收集数据用于散点图
+    #             if highly_affected_mask.any():
+    #                 highly_affected_predictions.append(
+    #                     regression_output[highly_affected_mask].cpu()
+    #                 )
+    #                 highly_affected_targets.append(
+    #                     target_values[highly_affected_mask].cpu()
+    #                 )
+    #                 highly_affected_inputs.append(
+    #                     input_values[highly_affected_mask].cpu()
+    #                 )
+    #             if other_mask.any():
+    #                 others_predictions.append(regression_output[other_mask].cpu())
+    #                 others_targets.append(target_values[other_mask].cpu())
+    #                 others_inputs.append(input_values[other_mask].cpu())
+    #             if valid_mask.any():
+    #                 pred.append(regression_output[valid_mask].cpu())
+    #                 truth.append(target_values[valid_mask].cpu())
+    #                 overall_inputs.append(input_values[valid_mask].cpu())
+
+    #         pred_delta_ha, true_delta_ha = self.calc_deltas(
+    #             highly_affected_predictions,
+    #             highly_affected_targets,
+    #             highly_affected_inputs,
+    #         )
+    #         pred_delta_others, true_delta_others = self.calc_deltas(
+    #             others_predictions, others_targets, others_inputs
+    #         )
+    #         pred_delta_all, true_delta_all = self.calc_deltas(
+    #             pred, truth, overall_inputs
+    #         )
+    #         print("=== Pearson Delta Results ===")
+    #         if pred_delta_ha is not None:
+    #             corr_ha, p_ha = pearsonr(pred_delta_ha, true_delta_ha)
+    #             print(f"Highly Affected Delta: {corr_ha:.4f} (p={p_ha:.4e})")
+
+    #         if pred_delta_others is not None:
+    #             corr_others, p_others = pearsonr(pred_delta_others, true_delta_others)
+    #             print(f"Others Delta: {corr_others:.4f} (p={p_others:.4e})")
+
+    #         if pred_delta_all is not None:
+    #             corr_all, p_all = pearsonr(pred_delta_all, true_delta_all)
+    #             print(f"Overall Delta: {corr_all:.4f} (p={p_all:.4e})")
+
+    #         self.plot_scatter_plots(
+    #             highly_affected_predictions,
+    #             highly_affected_targets,
+    #             highly_affected_inputs,
+    #             others_predictions,
+    #             others_targets,
+    #             others_inputs,
+    #             pred,
+    #             truth,
+    #             overall_inputs,
+    #             epoch,
+    #         )
 
     def calc_deltas(self, preds_list, targets_list, inputs_list):
         all_preds = torch.cat(preds_list, dim=0) if preds_list else torch.tensor([])

@@ -14,6 +14,7 @@ from .utils import (
     compute_bin_distribution,
     compute_classification_metrics,
     compute_M_from_y,
+    compute_perturbation_metrics,
     count_unique_cell_types,
     distributed_concat,
     extract_state_dict,
