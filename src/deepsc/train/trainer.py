@@ -48,7 +48,7 @@ def timeit(func):
         start_time = time.time()
         result = func(*args, **kwargs)
         end_time = time.time()
-        print(f"Time taken: {end_time - start_time} seconds")
+        logging.info(f"Time taken: {end_time - start_time} seconds")
         return result
 
     return wrapper
@@ -67,19 +67,21 @@ class Trainer:
         self.args = args
         self.fabric = fabric
         self.model = model
-        self.epoch = 1  # 添加epoch类变量
+        self.epoch = 1  # Add epoch class variable
         self.epoch_length = 0
         self.iteration = 0
         self.last_iteration = 0
-        self.last_chunk_idx = 0  # 用于记录上次处理的chunk索引
+        self.last_chunk_idx = 0  # Used to record last processed chunk index
         seed_all(args.seed + self.fabric.global_rank)
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
         self.data_is_directory = os.path.isdir(self.args.data_path)
-        self.all_files = None  # 目录下的全部 .npz 文件清单
-        self.file_chunks = None  # 按 chunk_size 切分后的文件子集列表
-        self.chunk_size = getattr(self.args, "chunk_size", 4)  # 每次训练处理的文件数
+        self.all_files = None  # List of all .npz files in directory
+        self.file_chunks = None  # List of file subsets split by chunk_size
+        self.chunk_size = getattr(
+            self.args, "chunk_size", 4
+        )  # Number of files processed per training iteration
         self.shuffle_files_each_epoch = getattr(
             self.args, "shuffle_files_each_epoch", True
         )
@@ -113,7 +115,7 @@ class Trainer:
         matrices = []
         for file in files:
             m = scipy.sparse.load_npz(file)
-            print(f"Loaded {file} with shape {m.shape}")
+            logging.info(f"Loaded {file} with shape {m.shape}")
             matrices.append(m)
         if not matrices:
             raise ValueError(f"No .npz files found in {files}")
@@ -134,7 +136,7 @@ class Trainer:
         else:
             csr_matrix = self._load_all_csr_from_files(files_subset)
         row_indices = np.arange(csr_matrix.shape[0])
-        print(
+        logging.info(
             f"Loaded CSR matrix with shape {csr_matrix.shape} from {len(files_subset)} files."
         )
         train_idx, val_idx = train_test_split(
@@ -149,14 +151,15 @@ class Trainer:
         # 计算动态掩码概率（使用已缓存的class_counts）
 
     def _prepare_file_plan(self):
-        """当 data_path 是目录时，准备全量文件清单并按 chunk 顺序切分（不打乱，便于从checkpoint恢复）。"""
+        """When data_path is a directory, prepare the full file list and split by chunk order
+        (no shuffling, convenient for checkpoint recovery)."""
         if not self.data_is_directory:
-            # 单文件：一个 chunk
+            # Single file: one chunk
             self.all_files = [self.args.data_path]
             self.file_chunks = [self.all_files]
             return
 
-        # 收集全部 .npz
+        # Collect all .npz files
         all_files = []
         for fn in os.listdir(self.args.data_path):
             if fn.endswith(".npz"):
@@ -164,8 +167,9 @@ class Trainer:
         if not all_files:
             raise ValueError(f"No .npz files found in directory: {self.args.data_path}")
 
-        # —— 关键：稳定的确定性顺序 —— #
-        # 为避免不同平台/文件系统返回顺序差异，这里做“自然排序”，保证 file_2 在 file_10 之前
+        # -- Key: stable deterministic order -- #
+        # To avoid order differences between different platforms/file systems,
+        # use 'natural sorting' here to ensure file_2 comes before file_10
         import re
 
         def _nat_key(s: str):
@@ -173,7 +177,7 @@ class Trainer:
 
         all_files = sorted(all_files, key=_nat_key)
 
-        # 顺序切分为连续 chunk
+        # Split sequentially into consecutive chunks
         chunks = []
         for i in range(0, len(all_files), self.chunk_size):
             chunks.append(all_files[i : i + self.chunk_size])
@@ -182,7 +186,7 @@ class Trainer:
         self.file_chunks = chunks
 
     def init_dataset_and_sampler(self):
-        # 支持单个.npz文件或目录
+        # Support single .npz file or directory
         import scipy.sparse
 
         from deepsc.data.dataset import GeneExpressionDatasetNew
@@ -192,7 +196,7 @@ class Trainer:
         else:
             assert self.args.data_path.endswith(
                 ".npz"
-            ), "data_path必须为.npz文件或包含.npz文件的目录"
+            ), "data_path must be a .npz file or directory containing .npz files"
             csr_matrix = scipy.sparse.load_npz(self.args.data_path)
         row_indices = np.arange(csr_matrix.shape[0])
         train_idx, val_idx = train_test_split(
@@ -209,8 +213,8 @@ class Trainer:
     @timeit
     def load_data(self):
         dynamic_mask_probabilities = self.dynamic_mask_probabilities
-        print("Dynamic mask probabilities in train:")
-        print(dynamic_mask_probabilities)
+        logging.info("Dynamic mask probabilities in train:")
+        logging.info(dynamic_mask_probabilities)
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
@@ -257,21 +261,21 @@ class Trainer:
         for p in seq:
             seq_len = p.size(1)
             if seq_len < max_len:
-                # 在第1维末尾填充 (padding_value 可自定义)
+                # Pad at the end of dimension 1 (padding_value can be customized)
                 pad_amount = max_len - seq_len
-                # F.pad 参数：(左边填充, 右边填充)，这里对 dim=1 右侧填充 pad_amount
+                # F.pad parameters: (left padding, right padding), here pad pad_amount to the right of dim=1
                 p = F.pad(p, (0, pad_amount), value=-100)
             else:
-                # 如果超过 max_len，就截断（truncate）
+                # If exceeds max_len, truncate
                 p = p[:, :max_len]
             padded_preds.append(p)
         return padded_preds
 
     def pad_for_emb(self, embs):
         """
-        对expr_emb list做padding，使得所有tensor在dim=1的长度一致。
-        embs: List[Tensor], 每个shape为(batch, g, d)
-        返回：List[Tensor]，每个shape为(batch, max_g, d)
+        Apply padding to expr_emb list to make all tensors have consistent length in dim=1.
+        embs: List[Tensor], each shape is (batch, g, d)
+        Returns: List[Tensor], each shape is (batch, max_g, d)
         """
         max_len = max(e.shape[1] for e in embs)
         padded_embs = []
@@ -279,7 +283,7 @@ class Trainer:
             seq_len = e.shape[1]
             if seq_len < max_len:
                 pad_amount = max_len - seq_len
-                # pad: (batch, g, d) → pad g 维右侧
+                # pad: (batch, g, d) → pad right side of g dimension
                 e = torch.nn.functional.pad(e, (0, 0, 0, pad_amount), value=0)
             else:
                 e = e[:, :max_len, :]
@@ -291,7 +295,7 @@ class Trainer:
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
         self.softmax = nn.Softmax(dim=-1)
         if self.args.use_compile:
-            self.model = torch.compile(self.model)  # 在 setup 之前
+            self.model = torch.compile(self.model)  # Before setup
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
     def create_scheduler(self, optimizer, args):
@@ -406,21 +410,23 @@ class Trainer:
         )
         if logits is not None:
             probs = self.softmax(logits)  # (B, T, C)
-            final = probs.argmax(dim=-1)  # 分类预测结果
+            final = probs.argmax(dim=-1)  # Classification prediction result
             if is_val:
-                # 累加当前 batch 的 softmax 概率和 token 数
+                # Accumulate current batch's softmax probabilities and token count
                 self.softmax_prob_sum += probs.sum(dim=(0, 1))  # (num_bins+1,)
                 self.softmax_total_count += probs.shape[0] * probs.shape[1]
 
         else:
             final = None
-        # 新增：区间 MSE 统计
+        # New: interval MSE statistics
         interval_mse = None
         if self.args.enable_mse and regression_output is not None:
             interval_mse = interval_masked_mse_loss(
                 regression_output, continuous_expr_label, mask
             )
-        masked_preds = torch.tensor([])  # 可加 device 和 dtype 以确保兼容性
+        masked_preds = torch.tensor(
+            []
+        )  # Can add device and dtype to ensure compatibility
         masked_labels = torch.tensor([])
         if is_val:
             if self.args.enable_mse:
@@ -449,8 +455,8 @@ class Trainer:
         self.model.eval()
         predictions, truths = [], []
         all_expr_embs = []
-        all_masked_preds = []  # 新增：收集所有masked预测
-        all_masked_labels = []  # 新增：收集所有masked标签
+        all_masked_preds = []  # New: collect all masked predictions
+        all_masked_labels = []  # New: collect all masked labels
         with torch.no_grad():
             data_iter = self.val_loader
             if self.is_master:
@@ -467,7 +473,7 @@ class Trainer:
             accm_total_acc = []
             accm_interval_mse = {k: [] for k in {"lt3", "3to5", "5to7", "ge7"}}
             for index, data in enumerate(data_iter):
-                # --------- 原有loss/acc计算 ---------
+                # --------- Original loss/acc calculation ---------
                 (
                     loss,
                     final,
@@ -492,7 +498,7 @@ class Trainer:
                     per_bin_accuracy = self._calculate_per_bin_accuracy(
                         final, discrete_expr_label, self.args.model.num_bins
                     )
-                    # 计算总体accuracy
+                    # Calculate overall accuracy
                     total_acc = self._calculate_accuracy(final, discrete_expr_label)
                     accm_per_bin_acc.append(per_bin_accuracy)
                     accm_total_acc.append(total_acc)
@@ -536,7 +542,7 @@ class Trainer:
                 if self.args.enable_mse and mse_loss is not None:
                     all_masked_preds.append(masked_preds)
                     all_masked_labels.append(masked_labels)
-            # 只在有分类任务时做pad和评估
+            # Only perform pad and evaluation when there are classification tasks
             if len(predictions) > 0:
                 predictions = self.pad_for_val(predictions)
                 truths = self.pad_for_val(truths)
@@ -562,15 +568,15 @@ class Trainer:
             all_expr_embs = self.pad_for_emb(all_expr_embs)
             all_expr_embs = torch.cat(all_expr_embs, dim=0)  # (total_batch, g, d)
             E = all_expr_embs.reshape(-1, all_expr_embs.shape[-1])  # (N, d)
-            # 采样最多10000个
+            # Sample at most 10000
             max_samples = 10000
             if E.shape[0] > max_samples:
                 idx = torch.randperm(E.shape[0])[:max_samples]
                 E = E[idx]
             rank = torch.linalg.matrix_rank(E)
-            print(f"[Embedding Analysis] expr_emb rank: {rank.item()}")
+            logging.info(f"[Embedding Analysis] expr_emb rank: {rank.item()}")
             U, S, Vh = torch.linalg.svd(E)
-            print(
+            logging.info(
                 f"[Embedding Analysis] Top 10 singular values: {S[:10].cpu().numpy()}"
             )
             if self.args.plot_tsne_and_umap:
@@ -642,13 +648,13 @@ class Trainer:
                     }
                 )
         avg_probs = self.softmax_prob_sum / self.softmax_total_count
-        print("\n[VAL] 平均 Softmax 概率 per bin:")
+        logging.info("\n[VAL] Average Softmax probabilities per bin:")
         for i, p in enumerate(avg_probs):
-            print(f"  Bin {i}: {p.item():.4f}")
+            logging.info(f"  Bin {i}: {p.item():.4f}")
         del self.softmax_prob_sum
         del self.softmax_total_count
 
-        # 清理内存
+        # Clear memory
         if all_expr_embs is not None:
             del all_expr_embs
         if all_masked_preds is not None and len(all_masked_preds) > 0:
@@ -658,13 +664,13 @@ class Trainer:
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
     def train(self):
-        # 先处理wandb初始化 - 基于checkpoint情况决定是恢复还是新建
+        # Handle wandb initialization first - decide whether to restore or create new based on checkpoint situation
         if self.args.resume_last_training:
             if self.is_master:
                 checkpoint_loaded = self.checkpoint_reload()
                 if not checkpoint_loaded:
-                    # 没有checkpoint或加载失败，创建新的wandb run
-                    print("No checkpoint found, initializing new wandb run...")
+                    # No checkpoint or loading failed, create new wandb run
+                    logging.info("No checkpoint found, initializing new wandb run...")
                     wandb.init(
                         # entity=self.args.get("wandb_team", "rwth_lfb"),
                         project=self.args.get("wandb_project", "DeepSCNewProj"),
@@ -678,7 +684,9 @@ class Trainer:
         else:
             # resume_last_training = False，直接新建wandb run
             if self.is_master:
-                print("resume_last_training=False, initializing new wandb run...")
+                logging.info(
+                    "resume_last_training=False, initializing new wandb run..."
+                )
                 wandb.init(
                     entity=self.args.get("wandb_team", "rwth_lfb"),
                     project=self.args.get("wandb_project", "DeepSCNewProj"),
@@ -692,33 +700,34 @@ class Trainer:
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         self.epoch_length = 0
         for epoch in range(start_epoch, self.args.epoch + 1):
-            self.epoch = epoch  # 更新类变量epoch
+            self.epoch = epoch  # Update class variable epoch
             self._prepare_file_plan()
             # 确定本epoch从哪个chunk开始（仅当从checkpoint恢复且仍在同一epoch时跳过已完成的chunk）
             start_chunk_idx = (
                 self.last_chunk_idx if epoch == getattr(self, "last_epoch", 1) else 0
             )
-            # 标记：scheduler 是否已创建；class_count 是否已计算
+            # Mark: whether scheduler has been created; whether class_count has been calculated
             did_compute_class_counts = self.class_counts is not None
             chunk_total = len(self.file_chunks)
             chunk_bar = tqdm(
                 total=chunk_total,
-                initial=start_chunk_idx,  # 立刻显示，并把进度拨到恢复点
+                initial=start_chunk_idx,  # Display immediately and set progress to recovery point
                 desc="Chunks",
                 position=0,
                 leave=True,
                 dynamic_ncols=True,
-                disable=not self.is_master,  # 只在master上画
+                disable=not self.is_master,  # Only display on master
             )
             if start_chunk_idx > 0:
                 chunk_bar.update(start_chunk_idx)
             for chunk_idx, files_subset in enumerate(self.file_chunks):
                 if chunk_idx < start_chunk_idx:
-                    # 跳过已完成的 chunk
-                    print(f"Skipping chunk {chunk_idx} (already processed)")
+                    # Skip completed chunks
                     logging.info("Skipping chunk %d (already processed)", chunk_idx)
                     continue
-                self.current_chunk_idx = chunk_idx  # 更新当前处理的chunk索引
+                self.current_chunk_idx = (
+                    chunk_idx  # Update current processing chunk index
+                )
                 self._build_datasets_from_files(files_subset)
                 if not did_compute_class_counts and (
                     self.args.enable_data_augmentation
@@ -740,7 +749,7 @@ class Trainer:
                 self.load_data()
                 self.epoch_length = len(
                     self.train_loader
-                )  # epoch的长度，我不确定这样对不对。。。
+                )  # Length of epoch, I'm not sure if this is correct...
                 self.train_loader.sampler.set_epoch(epoch)
                 self.model.train()
                 data_iter = self.train_loader
@@ -766,7 +775,7 @@ class Trainer:
                         self._process_batch(data)
                     )
 
-                    # 每10个iteration打印M矩阵
+                    # Print M matrix every 10 iterations
                     if (
                         self.is_master
                         and index % self.args.log_m_matrix_every == 0
@@ -809,11 +818,11 @@ class Trainer:
                         ):
                             self.fabric.backward(loss / self.args.grad_acc)
                     else:
-                        # 梯度检查（可选，通过配置控制）
+                        # Gradient check (optional, controlled by configuration)
                         if self.args.adaptive_mse_weight:
                             self.calculate_adaptive_mse_weight()
-                        # 这玩意似乎没用，cursor瞎加的，改天再试试
-                        # # 添加温度退火
+                        # This thing seems useless, added by cursor randomly, will try again later
+                        # # Add temperature annealing
                         # if hasattr(self.model, 'anneal_temperature'):
                         #     self.model.anneal_temperature(epoch, self.args.num_epochs)
                         if (
@@ -821,7 +830,9 @@ class Trainer:
                             and self.args.check_grad_flow
                             and index % 100 == 0
                         ):
-                            print(f"\n[梯度检查] Epoch {epoch}, Iteration {index}")
+                            logging.info(
+                                f"\n[Gradient Check] Epoch {epoch}, Iteration {index}"
+                            )
                             try:
                                 grad_stats = check_grad_flow(
                                     self.model,
@@ -845,7 +856,7 @@ class Trainer:
                                         }
                                     )
                             except Exception as e:
-                                print(f"[WARNING] 梯度检查失败: {e}")
+                                logging.warning(f"[WARNING] Gradient check failed: {e}")
                                 if self.is_master:
                                     wandb.log(
                                         {
@@ -856,7 +867,7 @@ class Trainer:
                         self.fabric.backward(loss / self.args.grad_acc)
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
                         self.optimizer.step()
-                        self.scheduler.step()  # 每次optimizer.step()后更新学习率
+                        self.scheduler.step()  # Update learning rate after each optimizer.step()
                         self.optimizer.zero_grad()
 
                         average_loss = sum(accm_loss) / len(accm_loss)
@@ -872,7 +883,7 @@ class Trainer:
                             pred_dist_str = self.get_top_bins_distribution_str(
                                 final, discrete_expr_label, num_bins, topk=5
                             )
-                            # 新增：区间 MSE 展示
+                            # New: interval MSE display
                             interval_mse_str = ", ".join(
                                 [
                                     f"{k}:{sum(accm_interval_mse[k])/len(accm_interval_mse[k]):.4f}"
@@ -925,7 +936,7 @@ class Trainer:
                         self.validate(epoch, index)
                         self.model.train()
 
-                    # MoE塌缩检测
+                    # MoE collapse detection
                     if (
                         index != 0
                         and hasattr(self.args, "log_moe_collapse_every")
@@ -975,7 +986,7 @@ class Trainer:
                 self.args.model_name,
                 self.args.ckpt_dir,
                 self.fabric,
-                iteration=0,  # 重置迭代计数器
+                iteration=0,  # Reset iteration counter
                 chunk_idx=0,  # 重置chunk索引
             )
 
@@ -984,14 +995,14 @@ class Trainer:
         logits: (batch, seq_len, num_bins)
         discrete_expr_label: (batch, seq_len)
         返回: (num_bins,) 每个bin的平均交叉熵损失
-        计算平均时不包括bin0
+        Average calculation does not include bin0
         """
         num_bins = self.args.model.num_bins
         ce_losses = []
         logits_flat = logits.reshape(-1, num_bins + 1)
         labels_flat = discrete_expr_label.reshape(-1)
-        for i in range(1, num_bins + 1):  # 跳过bin0
-            # 只统计label为i且不是ignore_index的样本
+        for i in range(1, num_bins + 1):  # Skip bin0
+            # Only count samples where label is i and not ignore_index
             mask = (labels_flat == i) & (labels_flat != ignore_index)
             if mask.sum() == 0:
                 ce_losses.append(torch.tensor(0.0, device=logits.device))
@@ -1030,7 +1041,7 @@ class Trainer:
         l0_loss = 0.0
         per_bin_ce_loss = None
         if enable_ce and logits is not None and discrete_expr_label is not None:
-            # 保证label和logits在同一device
+            # Ensure label and logits are on the same device
             discrete_expr_label = discrete_expr_label.to(logits.device)
             if self.args.enable_alternating_ldam_mean_ce_loss:
                 ce_loss = self.calculate_alternating_ldam_mean_ce_loss(
@@ -1094,7 +1105,7 @@ class Trainer:
             )
             total_loss += 0.1 * l0_loss
         else:
-            l0_loss = torch.tensor(0.0)  # 保证是 Tensor
+            l0_loss = torch.tensor(0.0)  # Ensure it's a Tensor
         return total_loss, ce_loss, regression_loss, l0_loss
 
     def get_top_bins_distribution_str(
@@ -1112,13 +1123,13 @@ class Trainer:
         ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.ckpt")
         if not os.path.exists(ckpt_file):
             if self.is_master:
-                print(f"[WARN] 未找到检查点 {ckpt_file}")
+                logging.warning(f"[WARN] Checkpoint not found: {ckpt_file}")
             return False
 
-        # 直接读取 state dict
+        # Directly read state dict
         remainder = self.fabric.load(ckpt_file)
 
-        # 恢复模型、优化器、调度器的参数
+        # Restore model, optimizer, scheduler parameters
         if "model" in remainder:
             self.model.load_state_dict(remainder["model"])
         if "optimizer" in remainder and self.optimizer is not None:
@@ -1130,7 +1141,7 @@ class Trainer:
         ):
             self.scheduler.load_state_dict(remainder["scheduler"])
 
-        # 恢复计数器
+        # Restore counters
         if self.args.resume_last_training:
             self.last_iteration = remainder.get("iteration", 0)
             self.last_epoch = remainder.get("epoch", 1)
@@ -1140,14 +1151,14 @@ class Trainer:
             self.last_epoch = 1
             self.last_chunk_idx = 0
 
-        # 恢复 wandb 会话
+        # Restore wandb session
         if self.is_master:
             saved_run_id = remainder.get("wandb_run_id", None)
             saved_wandb_config = remainder.get("wandb_config", None)
 
             if saved_run_id:
-                print(f"[INFO] 找到保存的wandb run_id: {saved_run_id}")
-                print("[INFO] 使用原始run_id恢复wandb会话...")
+                logging.info(f"[INFO] Found saved wandb run_id: {saved_run_id}")
+                logging.info("[INFO] Using original run_id to restore wandb session...")
                 if saved_wandb_config:
                     wandb.init(
                         id=saved_run_id,
@@ -1175,34 +1186,38 @@ class Trainer:
                         tags=self.args.tags,
                         config=dict(self.args),
                     )
-                print(f"[INFO] 已恢复wandb会话，run_id: {wandb.run.id}")
-                print(f"[INFO] 项目: {wandb.run.project}, 名称: {wandb.run.name}")
+                logging.info(f"[INFO] Restored wandb session, run_id: {wandb.run.id}")
+                logging.info(
+                    f"[INFO] Project: {wandb.run.project}, Name: {wandb.run.name}"
+                )
             else:
-                print("[INFO] 检查点中未找到wandb run_id，将创建新的wandb run")
+                logging.info(
+                    "[INFO] wandb run_id not found in checkpoint, will create new wandb run"
+                )
 
         if self.is_master:
-            print(
+            logging.info(
                 f"[INFO] reload epoch={self.last_epoch}, chunk={self.last_chunk_idx}, iter={self.last_iteration}"
             )
         return True
 
     def _calculate_per_bin_accuracy(self, final, discrete_expr_label, num_bins):
         """
-        计算每个bin的accuracy，然后对bin求平均（不包括bin0）
+        Calculate accuracy for each bin, then average over bins (excluding bin0)
         final: (batch, seq_len)
         discrete_expr_label: (batch, seq_len)
         num_bins: int
-        返回: float, 平均每个bin的accuracy（不含bin0）
+        Returns: float, average accuracy per bin (excluding bin0)
         """
         accuracies = []
-        # 排除-100的情况
+        # Exclude -100 cases
         valid_mask = discrete_expr_label != -100
-        for bin_idx in range(1, num_bins + 1):  # 跳过bin0
-            # 只考虑非-100且label为bin_idx的样本
+        for bin_idx in range(1, num_bins + 1):  # Skip bin0
+            # Only consider samples that are non -100 and label is bin_idx
             mask = (discrete_expr_label == bin_idx) & valid_mask
             total = mask.sum()
             if total == 0:
-                continue  # 该bin没有样本
+                continue  # This bin has no samples
             correct = ((final == bin_idx) & mask).sum()
             acc = correct.float() / total.float()
             accuracies.append(acc)
@@ -1256,9 +1271,9 @@ class Trainer:
                 self.acc_macro_f1 = []
 
     def draw_expr_emb_analysis(self, E, epoch, iteration=0):
-        # --------- 新增：分析expr_emb秩 ---------
+        # --------- New: analyze expr_emb rank ---------
         if self.is_master:
-            # t-SNE可视化
+            # t-SNE visualization
             try:
                 import matplotlib.pyplot as plt
                 from sklearn.manifold import TSNE
@@ -1281,8 +1296,8 @@ class Trainer:
                 tsne_path = os.path.join(
                     tsne_dir, f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png"
                 )
-                print(f"[Embedding Analysis] t-SNE plot saved:\n  {tsne_path}")
-                # 新增：将t-SNE图片上传到wandb
+                logging.info(f"[Embedding Analysis] t-SNE plot saved:\n  {tsne_path}")
+                # New: upload t-SNE image to wandb
                 wandb.log(
                     {
                         "tsne": wandb.Image(tsne_path),
@@ -1290,7 +1305,7 @@ class Trainer:
                 )
                 plt.close()
 
-                # 新增：UMAP可视化
+                # New: UMAP visualization
                 import umap
 
                 reducer = umap.UMAP(n_components=2, random_state=0)
@@ -1309,14 +1324,14 @@ class Trainer:
                     }
                 )
                 plt.close()
-                print("[Embedding Analysis] t-SNE and UMAP plots saved")
+                logging.info("[Embedding Analysis] t-SNE and UMAP plots saved")
             except Exception as e:
-                print(f"[Embedding Analysis] t-SNE failed: {e}")
+                logging.error(f"[Embedding Analysis] t-SNE failed: {e}")
 
     def draw_continuous_pred_label_scatter(
         self, all_masked_preds, all_masked_labels, epoch, iteration=0
     ):
-        # --------- 新增：画pred-label散点图并上传到wandb（只在validate末尾画一次）
+        # --------- New: draw pred-label scatter plot and upload to wandb (only draw once at the end of validate)
         if self.is_master and len(all_masked_preds) > 0:
             import matplotlib.pyplot as plt
 
@@ -1343,73 +1358,77 @@ class Trainer:
 
     def calculate_class_counts(self):
         """
-        计算每个bin的样本数量，用于LDAM loss
-        返回: torch.Tensor, shape为(num_bins+1,)，包含每个bin的样本数量
+        Calculate sample count for each bin, used for LDAM loss
+        Returns: torch.Tensor, shape is (num_bins+1,), contains sample count for each bin
         """
-        print("Calculating class counts")
+        logging.info("Calculating class counts")
 
-        # 初始化计数器
+        # Initialize counter
         class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
 
-        # 遍历训练数据集计算每个bin的样本数量
+        # Traverse training dataset to calculate sample count for each bin
         temp_loader = DataLoader(
             self.train_dataset,
-            batch_size=32,  # 使用较小的batch size以节省内存
+            batch_size=32,  # Use smaller batch size to save memory
             shuffle=False,
             num_workers=4,
             collate_fn=DataCollator(
                 do_padding=True,
                 pad_token_id=0,
                 pad_value=0,
-                do_mlm=False,  # 不使用masking，获取原始数据
+                do_mlm=False,  # Don't use masking, get original data
                 do_binning=True,
                 max_length=self.args.sequence_length,
                 num_genes=self.args.model.num_genes,
                 num_bins=self.args.model.num_bins,
-                # 这里不需要dynamic_mask_probabilities，因为我们只是统计分布
+                # dynamic_mask_probabilities not needed here, as we're just counting distribution
             ),
         )
 
         total_samples = 0
         for batch in tqdm(temp_loader, desc="Counting class samples"):
-            # 获取原始数据，不包含masking
+            # Get original data, without masking
             discrete_expr = batch[
                 "masked_discrete_expr"
-            ]  # 这里实际上是原始数据，因为do_mlm=False
-            # 统计每个bin的样本数量（不包括pad_value的位置）
+            ]  # This is actually original data because do_mlm=False
+            # Count sample number for each bin (excluding pad_value positions)
             valid_mask = discrete_expr != 0
             for bin_idx in range(self.args.model.num_bins + 1):
                 count = ((discrete_expr == bin_idx) & valid_mask).sum().item()
                 class_counts[bin_idx] += count
-                if bin_idx > 0:  # 只对非padding类累加总样本数
+                if bin_idx > 0:  # Only accumulate total samples for non-padding classes
                     total_samples += count
 
-        # 打印统计信息
-        print(f"Total valid samples (excluding padding): {total_samples}")
-        print("Class distribution:")
+        # Print statistical information
+        logging.info(f"Total valid samples (excluding padding): {total_samples}")
+        logging.info("Class distribution:")
         for i, count in enumerate(class_counts):
             if i == 0:
-                print(f"  Bin {i} (padding): {count} samples (excluded from LDAM)")
+                logging.info(
+                    f"  Bin {i} (padding): {count} samples (excluded from LDAM)"
+                )
             else:
                 percentage = (count / total_samples * 100) if total_samples > 0 else 0
-                print(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
+                logging.info(f"  Bin {i}: {count} samples ({percentage:.2f}%)")
 
         return class_counts
 
     def calculate_dynamic_mask_probabilities(self):
         """
-        根据bin的分布比例动态设置掩码概率
-        返回: dict, 包含每个bin的掩码概率
+        Dynamically set mask probabilities based on bin distribution ratio
+        Returns: dict, containing mask probability for each bin
         """
-        print("Calculating dynamic mask probabilities based on bin distribution...")
+        logging.info(
+            "Calculating dynamic mask probabilities based on bin distribution..."
+        )
 
         # 使用缓存的class_counts
         class_counts = self.class_counts
 
-        # 计算总有效样本数（不包括padding）
+        # Calculate total valid samples (excluding padding)
         total_samples = class_counts[1:].sum().item()
 
-        # 计算每个bin的比例
+        # Calculate ratio for each bin
         bin_ratios = {}
         for bin_idx in range(1, self.args.model.num_bins + 1):
             ratio = (
@@ -1419,39 +1438,39 @@ class Trainer:
             )
             bin_ratios[bin_idx] = ratio
 
-        # 根据比例设置掩码概率
+        # Set mask probability based on ratio
         mask_probabilities = {}
         for bin_idx in range(1, self.args.model.num_bins + 1):
             ratio = bin_ratios[bin_idx]
             if ratio < 1.0:
-                # 比例小于1%的bin设为掩码概率为0.7
+                # Bins with ratio less than 1% set mask probability to 0.7
                 mask_probabilities[bin_idx] = 0.7
             elif ratio < 5.0:
-                # 比例小于5%的bin设为掩码概率为0.5
+                # Bins with ratio less than 5% set mask probability to 0.5
                 mask_probabilities[bin_idx] = 0.5
             elif ratio < 12.5:
-                # 比例小于10%的bin设为掩码概率为0.3
+                # Bins with ratio less than 10% set mask probability to 0.3
                 mask_probabilities[bin_idx] = 0.3
             elif ratio < 20.0:
-                # 比例小于20%的bin设为掩码概率为0.15
+                # Bins with ratio less than 20% set mask probability to 0.15
                 mask_probabilities[bin_idx] = 0.15
             else:
-                # 其他的掩码概率0.1
+                # Others have mask probability 0.1
                 mask_probabilities[bin_idx] = 0.1
 
-        # 打印掩码概率设置
-        print("Dynamic mask probabilities:")
+        # Print mask probability settings
+        logging.info("Dynamic mask probabilities:")
         for bin_idx in range(1, self.args.model.num_bins + 1):
             ratio = bin_ratios[bin_idx]
             prob = mask_probabilities[bin_idx]
-            print(f"  Bin {bin_idx}: {ratio:.2f}% -> mask_prob={prob}")
+            logging.info(f"  Bin {bin_idx}: {ratio:.2f}% -> mask_prob={prob}")
 
         return mask_probabilities
 
     # need to predefine the weight and also need to ensure that the length of weight corresponding to the number of bins
     def init_weighted_ce_loss(self):
-        # 使用原有的加权 CrossEntropyLoss
-        print("Using weighted CrossEntropyLoss...")
+        # Use original weighted CrossEntropyLoss
+        logging.info("Using weighted CrossEntropyLoss...")
         # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
         ce_weight = torch.tensor([0, 1, 6.9, 118.7])
         self.weighted_ce_loss_fn = nn.CrossEntropyLoss(
@@ -1465,17 +1484,19 @@ class Trainer:
         return self.weighted_ce_loss_fn(logits_reshaped, labels_reshaped)
 
     def init_ldam_loss(self):
-        print("Using LDAM loss...")
+        logging.info("Using LDAM loss...")
         # 使用缓存的class_counts
         class_counts = self.class_counts
         cls_num_list = class_counts.cpu().numpy()
 
-        # 确保padding类（第0类）有合理的权重，避免除零错误
+        # Ensure padding class (class 0) has reasonable weight, avoid division by zero error
         if cls_num_list[0] == 0:
-            print(
+            logging.warning(
                 "Warning: Padding class (bin 0) has 0 samples, setting to 1 to avoid division by zero"
             )
-            cls_num_list[0] = 1  # 设置为1避免除零，但不影响实际训练
+            cls_num_list[0] = (
+                1  # Set to 1 to avoid division by zero, but doesn't affect actual training
+            )
 
         return LDAMLoss(cls_num_list=cls_num_list, max_m=0.5, s=30, ignore_index=-100)
 
@@ -1507,14 +1528,14 @@ class Trainer:
     ):
         ldam_loss = self.calculate_ldam_ce_loss(logits, discrete_expr_label)
         per_bin_ce_loss_mean = self.calculate_mean_ce_loss(logits, discrete_expr_label)
-        # 单数回合的前半段偏向ldam，偶数回合前半段偏向ce
+        # Odd rounds: first half biased towards ldam, even rounds: first half biased towards ce
         progress = index / epoch_length if epoch_length > 0 else 0.0
         if epoch % 2 == 1:
-            # 单数回合：前半段ldam多，后半段ce多
+            # Odd rounds: first half more ldam, second half more ce
             ldam_weight = 1.0 - progress
             ce_weight = progress
         else:
-            # 偶数回合：前半段ce多，后半段ldam多
+            # Even rounds: first half more ce, second half more ldam
             ldam_weight = progress
             ce_weight = 1.0 - progress
         if index % 20 == 0:
@@ -1587,8 +1608,8 @@ class Trainer:
         检查MoE塌缩情况并记录到日志
 
         Args:
-            epoch: 当前epoch
-            iteration: 当前iteration
+            epoch: current epoch
+            iteration: current iteration
         """
         try:
             # 检查模型是否有MoE塌缩检测功能
@@ -1601,7 +1622,7 @@ class Trainer:
             collapse_results = self.model.check_moe_collapse(threshold=0.8)
 
             if not collapse_results:
-                print("未发现MoE层或MoE功能未启用")
+                logging.info("No MoE layers found or MoE function not enabled")
                 return
 
             # 统计塌缩情况
@@ -1611,30 +1632,33 @@ class Trainer:
             )
             healthy_layers = total_layers - collapsed_layers
 
-            # 记录到控制台
-            print(
-                f"MoE状态总结: 总层数={total_layers}, 塌缩层数={collapsed_layers}, 健康层数={healthy_layers}"
+            # Log to console
+            logging.info(
+                f"MoE status summary: total_layers={total_layers}, "
+                f"collapsed_layers={collapsed_layers}, healthy_layers={healthy_layers}"
             )
 
-            # 如果有塌缩，打印详细报告
+            # If there's collapse, print detailed report
             if collapsed_layers > 0:
-                print("⚠️  检测到MoE塌缩！详细信息:")
+                logging.warning("⚠️  MoE collapse detected! Detailed information:")
                 for layer_name, result in collapse_results.items():
                     if result["is_collapsed"]:
-                        print(
-                            f"  🚨 {layer_name}: 塌缩比例={result['collapse_ratio']:.4f}, 熵值={result['entropy']:.4f}"
+                        logging.warning(
+                            f"  🚨 {layer_name}: collapse_ratio={result['collapse_ratio']:.4f}, "
+                            f"entropy={result['entropy']:.4f}"
                         )
 
-                        # 找出使用最多的专家
+                        # Find the most used expert
                         usage_ratios = result["expert_usage_ratio"]
                         max_expert_idx = usage_ratios.index(max(usage_ratios))
-                        print(
-                            f"     最常用专家: Expert-{max_expert_idx} (使用率: {usage_ratios[max_expert_idx]:.4f})"
+                        logging.warning(
+                            f"     Most used expert: Expert-{max_expert_idx} "
+                            f"(usage_rate: {usage_ratios[max_expert_idx]:.4f})"
                         )
             else:
-                print("✅ 所有MoE层状态健康")
+                logging.info("✅ All MoE layers are healthy")
 
-            # 记录到wandb (如果启用)
+            # Log to wandb (if enabled)
             if hasattr(self, "wandb_run") and self.wandb_run is not None:
                 wandb_logs = {
                     "moe/total_layers": total_layers,
@@ -1645,7 +1669,7 @@ class Trainer:
                     ),
                 }
 
-                # 记录每一层的详细信息
+                # Log detailed information for each layer
                 for layer_name, result in collapse_results.items():
                     layer_key = layer_name.replace("/", "_").replace("-", "_")
                     wandb_logs[f"moe_layers/{layer_key}/collapse_ratio"] = result[
@@ -1660,10 +1684,12 @@ class Trainer:
 
                 wandb.log(wandb_logs, step=self.iteration)
 
-            print(f"MoE塌缩检测完成 [Epoch {epoch}, Iter {iteration}]\n")
+            logging.info(
+                f"MoE collapse detection completed [Epoch {epoch}, Iter {iteration}]\n"
+            )
 
         except Exception as e:
-            print(f"MoE塌缩检测出错: {e}")
+            logging.error(f"MoE collapse detection error: {e}")
             import traceback
 
             traceback.print_exc()
