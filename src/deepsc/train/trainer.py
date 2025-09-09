@@ -26,10 +26,13 @@ from src.deepsc.utils import (
     CosineAnnealingWarmupRestarts,
     LDAMLoss,
     check_grad_flow,
+    check_moe_collapse,
     compute_bin_distribution,
     compute_classification_metrics,
     compute_M_from_y,
     distributed_concat,
+    draw_continuous_pred_label_scatter,
+    draw_expr_emb_analysis,
     get_reduced_with_fabric,
     interval_masked_mse_loss,
     log_stats,
@@ -579,15 +582,24 @@ class Trainer:
             logging.info(
                 f"[Embedding Analysis] Top 10 singular values: {S[:10].cpu().numpy()}"
             )
-            if self.args.plot_tsne_and_umap:
-                self.draw_expr_emb_analysis(
+            if self.args.plot_tsne_and_umap and self.is_master:
+                draw_expr_emb_analysis(
                     E,
                     epoch,
+                    self.args.ckpt_dir,
                     iteration,
                 )
-            if self.args.enable_mse and self.args.draw_continuous_pred_label_scatter:
-                self.draw_continuous_pred_label_scatter(
-                    all_masked_preds, all_masked_labels, epoch, iteration
+            if (
+                self.args.enable_mse
+                and self.args.draw_continuous_pred_label_scatter
+                and self.is_master
+            ):
+                draw_continuous_pred_label_scatter(
+                    all_masked_preds,
+                    all_masked_labels,
+                    epoch,
+                    self.args.ckpt_dir,
+                    iteration,
                 )
 
             val_loss = get_reduced_with_fabric(
@@ -943,7 +955,7 @@ class Trainer:
                         and index % self.args.log_moe_collapse_every == 0
                         and self.is_master
                     ):
-                        self.check_moe_collapse(epoch, index)
+                        check_moe_collapse(self.model, epoch, index)
 
                     if index != 0 and index % self.args.save_ckpt_every == 0:
                         save_ckpt_fabric(
@@ -1270,92 +1282,6 @@ class Trainer:
                 self.acc_precision = []
                 self.acc_macro_f1 = []
 
-    def draw_expr_emb_analysis(self, E, epoch, iteration=0):
-        # --------- New: analyze expr_emb rank ---------
-        if self.is_master:
-            # t-SNE visualization
-            try:
-                import matplotlib.pyplot as plt
-                from sklearn.manifold import TSNE
-
-                tsne = TSNE(n_components=2, random_state=0, perplexity=30, n_iter=1000)
-                E_np = E.cpu().numpy()
-                E_tsne = tsne.fit_transform(E_np)
-                plt.figure(figsize=(6, 6))
-                plt.scatter(E_tsne[:, 0], E_tsne[:, 1], s=2, alpha=0.5)
-                plt.title(f"expr_emb t-SNE (epoch {epoch}, iteration {iteration})")
-                plt.tight_layout()
-                tsne_dir = os.path.join(self.args.ckpt_dir, "tsne_vis")
-                os.makedirs(tsne_dir, exist_ok=True)
-                plt.savefig(
-                    os.path.join(
-                        tsne_dir,
-                        f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png",
-                    )
-                )
-                tsne_path = os.path.join(
-                    tsne_dir, f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png"
-                )
-                logging.info(f"[Embedding Analysis] t-SNE plot saved:\n  {tsne_path}")
-                # New: upload t-SNE image to wandb
-                wandb.log(
-                    {
-                        "tsne": wandb.Image(tsne_path),
-                    }
-                )
-                plt.close()
-
-                # New: UMAP visualization
-                import umap
-
-                reducer = umap.UMAP(n_components=2, random_state=0)
-                E_umap = reducer.fit_transform(E_np)
-                plt.figure(figsize=(6, 6))
-                plt.scatter(E_umap[:, 0], E_umap[:, 1], s=2, alpha=0.5)
-                plt.title(f"expr_emb UMAP (epoch {epoch}, iteration {iteration})")
-                plt.tight_layout()
-                umap_path = os.path.join(
-                    tsne_dir, f"expr_emb_umap_epoch{epoch}_iteration{iteration}.png"
-                )
-                plt.savefig(umap_path)
-                wandb.log(
-                    {
-                        "umap": wandb.Image(umap_path),
-                    }
-                )
-                plt.close()
-                logging.info("[Embedding Analysis] t-SNE and UMAP plots saved")
-            except Exception as e:
-                logging.error(f"[Embedding Analysis] t-SNE failed: {e}")
-
-    def draw_continuous_pred_label_scatter(
-        self, all_masked_preds, all_masked_labels, epoch, iteration=0
-    ):
-        # --------- New: draw pred-label scatter plot and upload to wandb (only draw once at the end of validate)
-        if self.is_master and len(all_masked_preds) > 0:
-            import matplotlib.pyplot as plt
-
-            preds = torch.cat(all_masked_preds, dim=0).numpy().flatten()
-            labels = torch.cat(all_masked_labels, dim=0).numpy().flatten()
-            plt.figure(figsize=(6, 6))
-            plt.scatter(labels, preds, s=2, alpha=0.5)
-            plt.xlabel("Label")
-            plt.ylabel("Prediction")
-            plt.title(f"Pred vs Label (epoch {epoch}, iter {iteration})")
-            plt.tight_layout()
-            scatter_dir = os.path.join(self.args.ckpt_dir, "scatter_vis")
-            os.makedirs(scatter_dir, exist_ok=True)
-            scatter_path = os.path.join(
-                scatter_dir, f"pred_vs_label_epoch{epoch}_iter{iteration}.png"
-            )
-            plt.savefig(scatter_path)
-            wandb.log(
-                {
-                    "pred_vs_label_scatter": wandb.Image(scatter_path),
-                }
-            )
-            plt.close()
-
     def calculate_class_counts(self):
         """
         Calculate sample count for each bin, used for LDAM loss
@@ -1602,94 +1528,3 @@ class Trainer:
             self.regression_loss_fn = nn.MSELoss(reduction="none")
         elif self.args.enable_huber_loss:
             self.regression_loss_fn = nn.HuberLoss(reduction="none")
-
-    def check_moe_collapse(self, epoch, iteration):
-        """
-        检查MoE塌缩情况并记录到日志
-
-        Args:
-            epoch: current epoch
-            iteration: current iteration
-        """
-        try:
-            # 检查模型是否有MoE塌缩检测功能
-            if not hasattr(self.model, "check_moe_collapse"):
-                return
-
-            print(f"\n[Epoch {epoch}, Iter {iteration}] 检查MoE塌缩状态...")
-
-            # 获取塌缩检测结果
-            collapse_results = self.model.check_moe_collapse(threshold=0.8)
-
-            if not collapse_results:
-                logging.info("No MoE layers found or MoE function not enabled")
-                return
-
-            # 统计塌缩情况
-            total_layers = len(collapse_results)
-            collapsed_layers = sum(
-                1 for result in collapse_results.values() if result["is_collapsed"]
-            )
-            healthy_layers = total_layers - collapsed_layers
-
-            # Log to console
-            logging.info(
-                f"MoE status summary: total_layers={total_layers}, "
-                f"collapsed_layers={collapsed_layers}, healthy_layers={healthy_layers}"
-            )
-
-            # If there's collapse, print detailed report
-            if collapsed_layers > 0:
-                logging.warning("⚠️  MoE collapse detected! Detailed information:")
-                for layer_name, result in collapse_results.items():
-                    if result["is_collapsed"]:
-                        logging.warning(
-                            f"  🚨 {layer_name}: collapse_ratio={result['collapse_ratio']:.4f}, "
-                            f"entropy={result['entropy']:.4f}"
-                        )
-
-                        # Find the most used expert
-                        usage_ratios = result["expert_usage_ratio"]
-                        max_expert_idx = usage_ratios.index(max(usage_ratios))
-                        logging.warning(
-                            f"     Most used expert: Expert-{max_expert_idx} "
-                            f"(usage_rate: {usage_ratios[max_expert_idx]:.4f})"
-                        )
-            else:
-                logging.info("✅ All MoE layers are healthy")
-
-            # Log to wandb (if enabled)
-            if hasattr(self, "wandb_run") and self.wandb_run is not None:
-                wandb_logs = {
-                    "moe/total_layers": total_layers,
-                    "moe/collapsed_layers": collapsed_layers,
-                    "moe/healthy_layers": healthy_layers,
-                    "moe/collapse_ratio": (
-                        collapsed_layers / total_layers if total_layers > 0 else 0.0
-                    ),
-                }
-
-                # Log detailed information for each layer
-                for layer_name, result in collapse_results.items():
-                    layer_key = layer_name.replace("/", "_").replace("-", "_")
-                    wandb_logs[f"moe_layers/{layer_key}/collapse_ratio"] = result[
-                        "collapse_ratio"
-                    ]
-                    wandb_logs[f"moe_layers/{layer_key}/entropy"] = result["entropy"]
-                    wandb_logs[f"moe_layers/{layer_key}/is_collapsed"] = int(
-                        result["is_collapsed"]
-                    )
-
-                import wandb
-
-                wandb.log(wandb_logs, step=self.iteration)
-
-            logging.info(
-                f"MoE collapse detection completed [Epoch {epoch}, Iter {iteration}]\n"
-            )
-
-        except Exception as e:
-            logging.error(f"MoE collapse detection error: {e}")
-            import traceback
-
-            traceback.print_exc()
