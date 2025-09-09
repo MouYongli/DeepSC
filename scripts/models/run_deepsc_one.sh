@@ -7,7 +7,7 @@ export OMP_NUM_THREADS=64
 NUM_GPUS=2
 MASTER_PORT=12620
 
-PYTHONPATH=src torchrun \
+torchrun \
   --nproc_per_node=$NUM_GPUS \
   --master_port=$MASTER_PORT \
   -m deepsc.pretrain.pretrain

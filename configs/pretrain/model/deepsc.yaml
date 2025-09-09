@@ -1,6 +1,6 @@
 _target_: src.deepsc.models.deepsc.model.DeepSC
 embedding_dim: 256
-num_genes: 34682
+num_genes: 34683
 num_layers: 10 # remember to check gene_embedding_participate_til_layer and n_moe_layers
 attn_dropout: 0.1
 ffn_dropout: 0.1
@@ -12,7 +12,7 @@ mask_layer_start: 2
 enable_l0: ${enable_l0}
 enable_mse: ${enable_mse}
 enable_ce: ${enable_ce}
-num_layers_ffn: 6
+num_layers_ffn: 2
 use_moe_regressor: ${use_moe_regressor}
 use_M_matrix: ${use_M_matrix}
 gene_embedding_participate_til_layer: 3
