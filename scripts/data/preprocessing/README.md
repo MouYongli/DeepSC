@@ -14,8 +14,8 @@ export DEEPSC_HGNC_DATABASE=$DEEPSC_SCRIPTS_ROOT/data/preprocessing/HGNC_databas
 export DEEPSC_GENE_MAP_PATH=$DEEPSC_SCRIPTS_ROOT/data/preprocessing/gene_map.csv
 
 export INTERMEDIATE_ARTIFACTS_TEMP=$DEEPSC_DATA_ROOT/intermediate_artifacts
-export TEMPORARY_DATA_PATH_3CA=$DEEPSC_DATA_ROOT/3ca/TEMPORARY_DATA
-export TEMPORARY_DATA_PATH_CXG=$DEEPSC_DATA_ROOT/cellxgene/TEMPORARY_DATA
+export TEMPORARY_DATA_PATH_3CA=$DEEPSC_DATA_ROOT/3ca/temp
+export TEMPORARY_DATA_PATH_CXG=$DEEPSC_DATA_ROOT/cellxgene/temp
 
 export MAPPED_DATA_PATH_3CA=$TEMPORARY_DATA_PATH_3CA/mapped_batch_data
 export MERGED_DATA_PATH_3CA=$TEMPORARY_DATA_PATH_3CA/merged_batch_data
@@ -108,5 +108,3 @@ TODO:
 - [] `gene_name_normalization.py` GENE_MAP_PATH, HGNC_DATABASE, SCRIPTS_ROOT环境变量设置，路径硬编码问题。
 - [] `get_feature_name_3ca_cxg.py` 环境变量设置，路径硬编码问题。
 
-- [x] scripts/data/download/README.md 中，确认环境变量和.env中的环境变量的一致性。
-- [x] preprocessing/README.md的文档说明。
