@@ -61,6 +61,7 @@ class PPNEW:
                 print("self does not have attribute 'node_map'")
 
     def setup_fixed_gene_subset(self):
+        print("setup_fixed_gene_subset")
         """建立固定的基因子集，用于所有训练和评估批次"""
         # 选择所有在vocab中的有效基因
         valid_gene_indices = torch.nonzero(self.valid_gene_mask, as_tuple=True)[0]
@@ -270,16 +271,6 @@ class PPNEW:
                         input_gene_ids = (
                             ori_gene_values.nonzero()[:, 1].flatten().unique().sort()[0]
                         )  # 得到整个batch里面没有0表达的基因原始索引
-                    if len(input_gene_ids) > self.args.data_length:
-                        # input_gene_ids = torch.randperm(len(input_gene_ids), device=device)[
-                        # 使用统一的种子确保所有GPU的基因选择一致
-                        generator = torch.Generator(device=device)
-                        generator.manual_seed(self.args.seed)
-                        input_gene_ids = torch.randperm(
-                            len(input_gene_ids), device=device, generator=generator
-                        )[: self.args.data_length]
-                        # 核心修复：使用固定基因子集，而不是动态选择
-                        # input_gene_ids = self.fixed_gene_subset.to(device)
                     input_values = ori_gene_values[:, input_gene_ids]
                     target_values = target_gene_values[:, input_gene_ids]
                     input_pert_flags = pert_flags[:, input_gene_ids]
@@ -372,7 +363,6 @@ class PPNEW:
                         input_gene_ids = (
                             ori_gene_values.nonzero()[:, 1].flatten().unique().sort()[0]
                         )  # 得到整个batch里面没有0表达的基因原始索引
-                        # input_gene_ids = self.fixed_gene_subset.to(device)
                     input_values = ori_gene_values[:, input_gene_ids]
                     input_pert_flags = all_pert_flags[:, input_gene_ids]
                     discrete_input_bins = self._discretize_expression(input_values)
@@ -398,20 +388,7 @@ class PPNEW:
                     for itr, de_idx in enumerate(batch_data.de_idx):
                         pred_de.append(pred_gene_values[itr, de_idx])
                         truth_de.append(t[itr, de_idx])
-
-        # print(torch.unique(self.gene_ids, return_counts=True))
-        # unique_vals, counts = np.unique(self.gene_ids, return_counts=True)
-        # print("unique_vals:",unique_vals)
-        # print("counts:",counts)
-        # results["pert_cat"] = np.array(pert_cat)
-        # pred = torch.stack(pred)
-        # truth = torch.stack(truth)
-        # results["pred"] = pred.detach().cpu().numpy().astype(np.float64)
-        # results["truth"] = truth.detach().cpu().numpy().astype(np.float64)
-        # results["pred_de"] = torch.stack(pred_de).detach().cpu().numpy().astype(np.float64)
-        # results["truth_de"] = torch.stack(truth_de).detach().cpu().numpy().astype(np.float64)
         # 收集和对齐多GPU结果
-
         results = self._gather_multiprocess_results(
             pred, truth, pred_de, truth_de, pert_cat
         )
