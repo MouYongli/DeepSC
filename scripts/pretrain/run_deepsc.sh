@@ -1,6 +1,7 @@
 #!/usr/bin/zsh
 
-# 使用物理编号为 2 和 3 的 GP
+# Use GPU/GPUs on one machine
+# Here the example is using GPUs with physical numbers 2 and 3
 export CUDA_VISIBLE_DEVICES=1,2
 export OMP_NUM_THREADS=64
 
