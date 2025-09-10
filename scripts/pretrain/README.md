@@ -1,6 +1,6 @@
-# Scripts for Model Training
+# Scripts for Model Pre-training
 
-This directory contains scripts for training the DeepSC model using different computational environments.
+This directory contains scripts for pretraining models using different computational environments.
 
 ## 0. Environment Setup
 
@@ -14,16 +14,19 @@ conda activate deepsc
 
 ### 1.1 Local GPU Training
 
-For training on a single machine with multiple GPUs, use [`./scripts/model/run_deepsc_one.sh`](./scripts/model/run_deepsc_one.sh).
+For training on a single machine with multiple GPUs, use [`./scripts/pretrain/run_deepsc.sh`](./scripts/pretrain/run_deepsc.sh).
 
 This script is configured to:
 - Use GPUs 1 and 2 (CUDA_VISIBLE_DEVICES=1,2)
 - Run with 2 GPUs using torchrun
 - Set master port to 12620
 
+Here, as the example, we use run the pretraining script for DeepSC model.
+
 ```bash
-bash ./scripts/models/run_deepsc_one.sh
+bash ./scripts/pretrain/run_deepsc.sh
 ```
+
 
 **Requirements:**
 - At least 1 GPUs available
@@ -32,7 +35,7 @@ bash ./scripts/models/run_deepsc_one.sh
 
 ### 2.1 SLURM Distributed Training
 
-For distributed training on HPC clusters with SLURM, use [`./scripts/model/run_deepsc_hpc.sh`](./scripts/model/run_deepsc_hpc.sh).
+For distributed training on HPC clusters with SLURM, use [`./scripts/pretrain/run_deepsc_hpc.sh`](./scripts/pretrain/run_deepsc_hpc.sh).
 
 This script is configured to:
 - Use 2 nodes with 4 tasks per node
@@ -42,7 +45,7 @@ This script is configured to:
 - Automatic port configuration to avoid conflicts
 
 ```bash
-sbatch ./scripts/models/run_deepsc_hpc.sh
+sbatch ./scripts/pretrain/run_deepsc_hpc.sh
 ```
 
 ### 2.2 Log Management
@@ -110,3 +113,18 @@ Before running these scripts, ensure that:
    - `use_M_matrix: ${use_M_matrix}` - Enable M matrix
    - `fused: False` - Whether to fuse expression and gene embedding at the expression attention layer
 3. **Arguments of pretrianing are correctly configured in[`./configs/pretrain/pretrain.yaml`](./configs/pretrain/pretrain.yaml)**
+
+
+## TODO
+
+- [ ] `src/deepsc/pretrain/pretrain.py`文件中的main函数可以配置的参数列表，并添加到`./scripts/pretrain/run_deepsc.sh`文件中。
+
+```bash
+torchrun \
+  --nproc_per_node=$NUM_GPUS \
+  --master_port=$MASTER_PORT \
+  -m deepsc.pretrain.pretrain \
+  --model deepsc
+```
+
+- [ ] `configs/pretrain/pretrain.yaml`文件中的`defaults`中的dataset是不是有必要？
