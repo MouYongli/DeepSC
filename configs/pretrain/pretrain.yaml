@@ -1,7 +1,6 @@
 defaults:
   - _self_
   - model: deepsc
-  - dataset: tripleca
 
 wandb_project: "DeepSC"
 tags: ["256hd", "big dataset", "mean ce", "adaptive mse and no adaptiv0 l0", "medium learning rate"]

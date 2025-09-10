@@ -50,6 +50,7 @@ def pretrain(cfg: DictConfig) -> None:
         strategy=DDPStrategy(find_unused_parameters=False),  # Distributed data parallel
         precision="bf16-mixed",  # Mixed precision training for efficiency
     )
+    print(f"cfg: {cfg.model}")
     fabric.launch()
 
     # Initialize logging system with fabric's global rank

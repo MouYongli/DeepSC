@@ -1,26 +1,42 @@
+# scGPT: Single-cell Generative Pre-trained Transformer Configuration
 _target_: deepsc.models.scgpt.model.TransformerModel
-ntoken: 34500
-d_model: 64
-nhead: 4
-d_hid: 64
-nlayers: 4
-nlayers_cls: 3
-n_cls: 1
+
+# Model Architecture
+ntoken: 34500  # Size of gene vocabulary
+d_model: 512   # Embedding dimension (increased for better capacity)
+nhead: 8       # Number of attention heads
+d_hid: 2048    # Hidden dimension in feedforward layers
+nlayers: 12    # Number of transformer encoder layers (increased for deeper model)
+
+# Classification Head
+nlayers_cls: 3  # Number of layers in classification head
+n_cls: 10      # Number of cell type classes (adjust based on dataset)
+
+# Embedding Configuration
 vocab: None
-dropout: 0.5
+dropout: 0.1   # Reduced dropout for better training stability
 pad_token: "<pad>"
 pad_value: 0
-do_mvc: false
-do_dab: false
-use_batch_labels: false
-num_batch_labels: false
-domain_spec_batchnorm: false
-input_emb_style: "continuous"
+input_emb_style: "continuous"  # Use continuous expression values
 n_input_bins: None
-cell_emb_style: "cls"
-mvc_decoder_style: "inner product"
+cell_emb_style: "cls"  # Use CLS token for cell representation
+explicit_zero_prob: true  # Model zero expression probability explicitly
+
+# Task Configuration
+do_mvc: true   # Enable Masked Value Prediction
+do_dab: false  # Domain Adversarial Training (set to true if needed)
+use_batch_labels: false
+num_batch_labels: null
+domain_spec_batchnorm: false
+mvc_decoder_style: "inner product"  # Efficient decoder style
 ecs_threshold: 0.3
-explicit_zero_prob: false
-use_fast_transformer: false
+
+# Performance Optimization
+use_fast_transformer: true   # Enable flash attention for efficiency
 fast_transformer_backend: "flash"
-pre_norm: false
+pre_norm: true  # Pre-layer normalization for better training
+
+# Additional Model Settings
+temperature: 1.0  # Sampling temperature for generation
+max_seq_length: 3000  # Maximum sequence length for cells
+gradient_checkpointing: false  # Enable for memory efficiency with large models

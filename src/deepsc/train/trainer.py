@@ -97,21 +97,6 @@ class Trainer:
         self.prepare_model()
         self.scheduler = self.create_scheduler(self.optimizer, self.args)
 
-    # def load_all_csr_from_folder(self, datapath):
-    #     """
-    #     加载文件夹内所有.npz文件，并拼接为一个csr_matrix
-    #     """
-    #     import scipy.sparse
-
-    #     matrices = []
-    #     for file in os.listdir(datapath):
-    #         if file.endswith(".npz"):
-    #             path = os.path.join(datapath, file)
-    #             matrix = scipy.sparse.load_npz(path)
-    #             matrices.append(matrix)
-    #     if not matrices:
-    #         raise ValueError(f"No .npz files found in {datapath}")
-    #     return scipy.sparse.vstack(matrices)
     def _load_all_csr_from_files(self, files):
         import scipy.sparse
 
