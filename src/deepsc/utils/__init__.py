@@ -23,7 +23,6 @@ from .utils import (
     extract_state_dict_with_encoder_prefix,
     get_reduced,
     get_reduced_with_fabric,
-    interval_masked_mse_loss,
     log_stats,
     masked_mse_loss,
     numel,

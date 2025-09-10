@@ -1096,30 +1096,6 @@ class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
         self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
 
 
-def interval_masked_mse_loss(pred, target, mask):
-    """
-    统计四个区间的未加权 MSE
-    返回: dict, key为区间名，value为MSE
-    区间：lt3, 3to5, 5to7, ge7
-    """
-    loss_fn = nn.MSELoss(reduction="none")
-    elementwise_loss = loss_fn(pred, target)
-    results = {}
-    intervals = [
-        ("lt3", target < 3),
-        ("3to5", (target >= 3) & (target < 5)),
-        ("5to7", (target >= 5) & (target < 7)),
-        ("ge7", target >= 7),
-    ]
-    for name, cond in intervals:
-        interval_mask = cond & mask
-        if interval_mask.sum() == 0:
-            results[name] = torch.tensor(0.0, device=pred.device)
-        else:
-            results[name] = elementwise_loss[interval_mask].mean()
-    return results
-
-
 class LDAMLoss(nn.Module):
     def __init__(self, cls_num_list, max_m=0.5, weight=None, s=30, ignore_index=-100):
         super(LDAMLoss, self).__init__()

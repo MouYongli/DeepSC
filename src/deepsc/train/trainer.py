@@ -18,7 +18,6 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-import time
 import wandb
 from src.deepsc.data import DataCollator
 from src.deepsc.utils import (
@@ -34,7 +33,6 @@ from src.deepsc.utils import (
     draw_continuous_pred_label_scatter,
     draw_expr_emb_analysis,
     get_reduced_with_fabric,
-    interval_masked_mse_loss,
     log_stats,
     masked_mse_loss,
     print_m_matrix,
@@ -43,18 +41,6 @@ from src.deepsc.utils import (
     weighted_masked_mse_loss,
     weighted_masked_mse_loss_v2,
 )
-
-
-# timeit decorator
-def timeit(func):
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        logging.info(f"Time taken: {end_time - start_time} seconds")
-        return result
-
-    return wrapper
 
 
 class Trainer:
@@ -173,32 +159,6 @@ class Trainer:
         self.all_files = all_files
         self.file_chunks = chunks
 
-    def init_dataset_and_sampler(self):
-        # Support single .npz file or directory
-        import scipy.sparse
-
-        from deepsc.data.dataset import GeneExpressionDatasetNew
-
-        if os.path.isdir(self.args.data_path):
-            csr_matrix = self.load_all_csr_from_folder(self.args.data_path)
-        else:
-            assert self.args.data_path.endswith(
-                ".npz"
-            ), "data_path must be a .npz file or directory containing .npz files"
-            csr_matrix = scipy.sparse.load_npz(self.args.data_path)
-        row_indices = np.arange(csr_matrix.shape[0])
-        train_idx, val_idx = train_test_split(
-            row_indices, test_size=0.05, random_state=self.args.seed
-        )
-        train_csr = csr_matrix[train_idx]
-        val_csr = csr_matrix[val_idx]
-        self.train_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=train_csr)
-        self.val_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=val_csr)
-        self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
-        self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
-        # 计算动态掩码概率（使用已缓存的class_counts）
-
-    @timeit
     def load_data(self):
         dynamic_mask_probabilities = self.dynamic_mask_probabilities
         logging.info("Dynamic mask probabilities in train:")
@@ -406,12 +366,6 @@ class Trainer:
 
         else:
             final = None
-        # New: interval MSE statistics
-        interval_mse = None
-        if self.args.enable_mse and regression_output is not None:
-            interval_mse = interval_masked_mse_loss(
-                regression_output, continuous_expr_label, mask
-            )
         masked_preds = torch.tensor(
             []
         )  # Can add device and dtype to ensure compatibility
@@ -426,13 +380,12 @@ class Trainer:
                 mse_loss,
                 ce_loss,
                 l0_loss,
-                interval_mse,
                 masked_preds,
                 masked_labels,
                 expr_emb,
                 y,
             )
-        return loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y
+        return loss, final, mse_loss, ce_loss, l0_loss, y
 
     def validate(self, epoch, iteration=0):
         self.softmax_prob_sum = torch.zeros(
@@ -459,7 +412,6 @@ class Trainer:
             accm_mse_loss = []
             accm_per_bin_acc = []
             accm_total_acc = []
-            accm_interval_mse = {k: [] for k in {"lt3", "3to5", "5to7", "ge7"}}
             for index, data in enumerate(data_iter):
                 # --------- Original loss/acc calculation ---------
                 (
@@ -468,7 +420,6 @@ class Trainer:
                     mse_loss,
                     ce_loss,
                     l0_loss,
-                    interval_mse,
                     masked_preds,
                     masked_labels,
                     expr_emb,
@@ -495,28 +446,6 @@ class Trainer:
                     truths.append(torch.tensor([]))
                     accm_per_bin_acc.append(0.0)
                     accm_total_acc.append(0.0)
-                if self.args.enable_mse:
-                    # 新增：累加区间 MSE
-                    if index == 0:
-                        accm_interval_mse = {
-                            k: [] for k in {"lt3", "3to5", "5to7", "ge7"}
-                        }
-                    for k in {"lt3", "3to5", "5to7", "ge7"}:
-                        accm_interval_mse[k].append(float(interval_mse[k]))
-                    interval_mse_str = ", ".join(
-                        [
-                            f"{k}:{sum(accm_interval_mse[k])/len(accm_interval_mse[k]):.4f}"
-                            for k in accm_interval_mse
-                        ]
-                    )
-                else:
-                    interval_mse_str = "N/A"
-                    accm_interval_mse = {
-                        "lt3": [0.0],
-                        "3to5": [0.0],
-                        "5to7": [0.0],
-                        "ge7": [0.0],
-                    }
                 if self.is_master:
                     data_iter.set_postfix(
                         loss=sum(accm_loss) / len(accm_loss),
@@ -525,7 +454,6 @@ class Trainer:
                         l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
                         per_bin_acc=sum(accm_per_bin_acc) / len(accm_per_bin_acc),
                         total_acc=sum(accm_total_acc) / len(accm_total_acc),
-                        interval_mse=interval_mse_str,
                     )
                 if self.args.enable_mse and mse_loss is not None:
                     all_masked_preds.append(masked_preds)
@@ -636,12 +564,6 @@ class Trainer:
                         "val/l0_loss": val_l0_loss,
                         "epoch": epoch,
                         "val/expr_emb_rank": rank.item(),
-                        "ValRegression/interval_mse_5to7": sum(
-                            accm_interval_mse["5to7"]
-                        )
-                        / len(accm_interval_mse["5to7"]),
-                        "ValRegression/interval_mse_ge7": sum(accm_interval_mse["ge7"])
-                        / len(accm_interval_mse["ge7"]),
                     }
                 )
         avg_probs = self.softmax_prob_sum / self.softmax_total_count
@@ -760,16 +682,14 @@ class Trainer:
 
                 accm_loss, accm_ce_loss, accm_l0_loss, accm_mse_loss = [], [], [], []
                 accm_per_bin_acc, accm_total_acc = [], []
-                interval_mse = {"lt3": 0.0, "3to5": 0.0, "5to7": 0.0, "ge7": 0.0}
-                accm_interval_mse = {k: [] for k in interval_mse}
                 average_loss = 0.0
 
                 for index, data in enumerate(data_iter):
                     if index < self.last_iteration:
                         continue
                     self.iteration = index
-                    loss, final, mse_loss, ce_loss, l0_loss, interval_mse, y = (
-                        self._process_batch(data)
+                    loss, final, mse_loss, ce_loss, l0_loss, y = self._process_batch(
+                        data
                     )
 
                     # Print M matrix every 10 iterations
@@ -782,13 +702,6 @@ class Trainer:
                         print_m_matrix(epoch, index, M)
 
                     discrete_expr_label = data["discrete_expr_label"]
-                    if interval_mse is None:
-                        interval_mse = {
-                            "lt3": 0.0,
-                            "3to5": 0.0,
-                            "5to7": 0.0,
-                            "ge7": 0.0,
-                        }
                     per_bin_accuracy = self._calculate_per_bin_accuracy(
                         final, discrete_expr_label, self.args.model.num_bins
                     )
@@ -802,12 +715,6 @@ class Trainer:
                     accm_mse_loss.append(mse_loss.item())
                     accm_per_bin_acc.append(per_bin_accuracy)
                     accm_total_acc.append(total_acc)
-                    # 新增：累加区间 MSE
-                    if index == 1:
-                        accm_interval_mse = {k: [] for k in interval_mse}
-                    for k in interval_mse:
-                        accm_interval_mse[k].append(float(interval_mse[k]))
-
                     is_accumulating = (index + 1) % self.args.grad_acc != 0
                     if is_accumulating:
                         with self.fabric.no_backward_sync(
@@ -880,13 +787,6 @@ class Trainer:
                             pred_dist_str = self.get_top_bins_distribution_str(
                                 final, discrete_expr_label, num_bins, topk=5
                             )
-                            # New: interval MSE display
-                            interval_mse_str = ", ".join(
-                                [
-                                    f"{k}:{sum(accm_interval_mse[k])/len(accm_interval_mse[k]):.4f}"
-                                    for k in accm_interval_mse
-                                ]
-                            )
                             data_iter.set_postfix(
                                 loss=average_loss,
                                 mse_loss=average_mse_loss,
@@ -895,7 +795,6 @@ class Trainer:
                                 ce_loss=average_ce_loss,
                                 l0_loss=average_l0_loss,
                                 pred_dist=pred_dist_str,
-                                interval_mse=interval_mse_str,
                             )
                             wandb.log(
                                 {
@@ -905,14 +804,6 @@ class Trainer:
                                     "train/total_acc": average_total_acc,
                                     "train/ce_loss": average_ce_loss,
                                     "train/l0_loss": average_l0_loss,
-                                    "TrainRegressionMetrics/interval_mse_5to7": sum(
-                                        accm_interval_mse["5to7"]
-                                    )
-                                    / len(accm_interval_mse["5to7"]),
-                                    "TrainRegressionMetrics/interval_mse_ge7": sum(
-                                        accm_interval_mse["ge7"]
-                                    )
-                                    / len(accm_interval_mse["ge7"]),
                                     "TrainLossWeight/ce_loss_weight": self.args.ce_loss_weight,
                                     "TrainLossWeight/mse_loss_weight": self.mse_loss_weight,
                                     "epoch": epoch,
