@@ -4,7 +4,6 @@ import os
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.optim import Adam
@@ -201,42 +200,24 @@ class Trainer:
             train_loader, val_loader
         )
 
-    # for validation part, to pad the predictions to the same length. It does not
-    # affect the training part. Considering moving to the utils part.
-    def pad_for_val(self, seq):
-        max_len = max(p.size(1) for p in seq)
-        padded_preds = []
-        for p in seq:
-            seq_len = p.size(1)
-            if seq_len < max_len:
-                # Pad at the end of dimension 1 (padding_value can be customized)
-                pad_amount = max_len - seq_len
-                # F.pad parameters: (left padding, right padding), here pad pad_amount to the right of dim=1
-                p = F.pad(p, (0, pad_amount), value=-100)
-            else:
-                # If exceeds max_len, truncate
-                p = p[:, :max_len]
-            padded_preds.append(p)
-        return padded_preds
-
-    def pad_for_emb(self, embs):
-        """
-        Apply padding to expr_emb list to make all tensors have consistent length in dim=1.
-        embs: List[Tensor], each shape is (batch, g, d)
-        Returns: List[Tensor], each shape is (batch, max_g, d)
-        """
-        max_len = max(e.shape[1] for e in embs)
-        padded_embs = []
-        for e in embs:
-            seq_len = e.shape[1]
-            if seq_len < max_len:
-                pad_amount = max_len - seq_len
-                # pad: (batch, g, d) → pad right side of g dimension
-                e = torch.nn.functional.pad(e, (0, 0, 0, pad_amount), value=0)
-            else:
-                e = e[:, :max_len, :]
-            padded_embs.append(e)
-        return padded_embs
+    # Generic padding helper: pad/truncate tensors along a given dimension to a common length
+    def pad_list(self, tensors, dim=1, pad_value=0):
+        if tensors is None or len(tensors) == 0:
+            return tensors
+        max_len = max(t.shape[dim] for t in tensors)
+        padded = []
+        for t in tensors:
+            target_shape = list(t.shape)
+            target_shape[dim] = max_len
+            out = t.new_full(target_shape, pad_value)
+            copy_len = min(t.shape[dim], max_len)
+            index = [slice(None)] * t.ndim
+            index[dim] = slice(0, copy_len)
+            out[tuple(index)] = (
+                t[tuple(index)] if copy_len == t.shape[dim] else t[tuple(index)]
+            )
+            padded.append(out)
+        return padded
 
     def prepare_model(self):
         args = self.args
@@ -410,7 +391,7 @@ class Trainer:
             accm_ce_loss = []
             accm_l0_loss = []
             accm_mse_loss = []
-            accm_per_bin_acc = []
+            accm_per_bin_recall = []
             accm_total_acc = []
             for index, data in enumerate(data_iter):
                 # --------- Original loss/acc calculation ---------
@@ -434,17 +415,17 @@ class Trainer:
                 if final is not None:
                     predictions.append(final)
                     truths.append(discrete_expr_label)
-                    per_bin_accuracy = self._calculate_per_bin_accuracy(
+                    per_bin_recall = self._calculate_per_bin_recall(
                         final, discrete_expr_label, self.args.model.num_bins
                     )
                     # Calculate overall accuracy
                     total_acc = self._calculate_accuracy(final, discrete_expr_label)
-                    accm_per_bin_acc.append(per_bin_accuracy)
+                    accm_per_bin_recall.append(per_bin_recall)
                     accm_total_acc.append(total_acc)
                 else:
                     predictions.append(torch.tensor([]))
                     truths.append(torch.tensor([]))
-                    accm_per_bin_acc.append(0.0)
+                    accm_per_bin_recall.append(0.0)
                     accm_total_acc.append(0.0)
                 if self.is_master:
                     data_iter.set_postfix(
@@ -452,7 +433,8 @@ class Trainer:
                         mse_loss=sum(accm_mse_loss) / len(accm_mse_loss),
                         ce_loss=sum(accm_ce_loss) / len(accm_ce_loss),
                         l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
-                        per_bin_acc=sum(accm_per_bin_acc) / len(accm_per_bin_acc),
+                        per_bin_recall=sum(accm_per_bin_recall)
+                        / len(accm_per_bin_recall),
                         total_acc=sum(accm_total_acc) / len(accm_total_acc),
                     )
                 if self.args.enable_mse and mse_loss is not None:
@@ -460,8 +442,20 @@ class Trainer:
                     all_masked_labels.append(masked_labels)
             # Only perform pad and evaluation when there are classification tasks
             if len(predictions) > 0:
-                predictions = self.pad_for_val(predictions)
-                truths = self.pad_for_val(truths)
+                # Filter out any empty tensors produced when final is None
+                predictions = [
+                    t
+                    for t in predictions
+                    if isinstance(t, torch.Tensor) and t.numel() > 0
+                ]
+                truths = [
+                    t for t in truths if isinstance(t, torch.Tensor) and t.numel() > 0
+                ]
+                if len(predictions) > 0 and len(truths) > 0:
+                    predictions = self.pad_list(predictions, dim=1, pad_value=-100)
+                    truths = self.pad_list(truths, dim=1, pad_value=-100)
+                else:
+                    predictions, truths = [], []
                 predictions = distributed_concat(
                     torch.cat(predictions, dim=0),
                     len(self.val_sampler.dataset),
@@ -481,7 +475,7 @@ class Trainer:
                     index=0,
                     print_detailed_stats=True,
                 )
-            all_expr_embs = self.pad_for_emb(all_expr_embs)
+            all_expr_embs = self.pad_list(all_expr_embs, dim=1, pad_value=0)
             all_expr_embs = torch.cat(all_expr_embs, dim=0)  # (total_batch, g, d)
             E = all_expr_embs.reshape(-1, all_expr_embs.shape[-1])  # (N, d)
             # Sample at most 10000
@@ -522,8 +516,9 @@ class Trainer:
                 sum(accm_mse_loss) / len(accm_mse_loss), self.fabric
             )
             if self.args.enable_ce:
-                val_per_bin_acc = get_reduced_with_fabric(
-                    100 * sum(accm_per_bin_acc) / len(accm_per_bin_acc), self.fabric
+                val_per_bin_recall = get_reduced_with_fabric(
+                    100 * sum(accm_per_bin_recall) / len(accm_per_bin_recall),
+                    self.fabric,
                 )
                 val_total_acc = get_reduced_with_fabric(
                     100 * sum(accm_total_acc) / len(accm_total_acc),
@@ -533,7 +528,7 @@ class Trainer:
                     sum(accm_ce_loss) / len(accm_ce_loss), self.fabric
                 )
             else:
-                val_per_bin_acc = 0.0
+                val_per_bin_recall = 0.0
                 val_total_acc = 0.0
                 val_ce_loss = 0.0
             val_l0_loss = get_reduced_with_fabric(
@@ -541,12 +536,12 @@ class Trainer:
             )
             if self.is_master:
                 logging.info(
-                    "Val E%d I%d | L:%.4f | Acc:%.2f%% | BinAcc:%.2f%%",
+                    "Val E%d I%d | L:%.4f | Acc:%.2f%% | BinRecall:%.2f%%",
                     epoch,
                     iteration,
                     val_loss,
                     val_total_acc,
-                    val_per_bin_acc,
+                    val_per_bin_recall,
                 )
                 logging.info(
                     "MSE:%.4f | CE:%.4f | L0:%.4f",
@@ -558,7 +553,7 @@ class Trainer:
                     {
                         "val/loss": val_loss,
                         "val/mse_loss": val_mse_loss,
-                        "val/per_bin_acc": val_per_bin_acc,
+                        "val/per_bin_recall": val_per_bin_recall,
                         "val/total_acc": val_total_acc,
                         "val/ce_loss": val_ce_loss,
                         "val/l0_loss": val_l0_loss,
@@ -657,7 +652,7 @@ class Trainer:
                     self.class_counts = self.calculate_class_counts()
                     self.init_loss_fn()
                     self.dynamic_mask_probabilities = (
-                        self.calculate_dynamic_mask_probabilities()
+                        self.set_dynamic_mask_probabilities()
                         if self.args.enable_data_augmentation
                         else None
                     )
@@ -681,7 +676,7 @@ class Trainer:
                     )
 
                 accm_loss, accm_ce_loss, accm_l0_loss, accm_mse_loss = [], [], [], []
-                accm_per_bin_acc, accm_total_acc = [], []
+                accm_per_bin_recall, accm_total_acc = [], []
                 average_loss = 0.0
 
                 for index, data in enumerate(data_iter):
@@ -702,7 +697,7 @@ class Trainer:
                         print_m_matrix(epoch, index, M)
 
                     discrete_expr_label = data["discrete_expr_label"]
-                    per_bin_accuracy = self._calculate_per_bin_accuracy(
+                    per_bin_recall = self._calculate_per_bin_recall(
                         final, discrete_expr_label, self.args.model.num_bins
                     )
                     self.accumulate_or_log_classification_metrics(
@@ -713,7 +708,7 @@ class Trainer:
                     accm_ce_loss.append(ce_loss.item())
                     accm_l0_loss.append(l0_loss.item())
                     accm_mse_loss.append(mse_loss.item())
-                    accm_per_bin_acc.append(per_bin_accuracy)
+                    accm_per_bin_recall.append(per_bin_recall)
                     accm_total_acc.append(total_acc)
                     is_accumulating = (index + 1) % self.args.grad_acc != 0
                     if is_accumulating:
@@ -778,8 +773,8 @@ class Trainer:
                         average_ce_loss = sum(accm_ce_loss) / len(accm_ce_loss)
                         average_l0_loss = sum(accm_l0_loss) / len(accm_l0_loss)
                         average_mse_loss = sum(accm_mse_loss) / len(accm_mse_loss)
-                        average_per_bin_acc = sum(accm_per_bin_acc) / len(
-                            accm_per_bin_acc
+                        average_per_bin_recall = sum(accm_per_bin_recall) / len(
+                            accm_per_bin_recall
                         )
                         average_total_acc = sum(accm_total_acc) / len(accm_total_acc)
                         if self.is_master:
@@ -791,7 +786,7 @@ class Trainer:
                                 loss=average_loss,
                                 mse_loss=average_mse_loss,
                                 total_acc=average_total_acc,
-                                per_bin_acc=average_per_bin_acc,
+                                per_bin_recall=average_per_bin_recall,
                                 ce_loss=average_ce_loss,
                                 l0_loss=average_l0_loss,
                                 pred_dist=pred_dist_str,
@@ -800,7 +795,7 @@ class Trainer:
                                 {
                                     "train/loss": average_loss,
                                     "train/mse_loss": average_mse_loss,
-                                    "train/per_bin_acc": average_per_bin_acc,
+                                    "train/per_bin_recall": average_per_bin_recall,
                                     "train/total_acc": average_total_acc,
                                     "train/ce_loss": average_ce_loss,
                                     "train/l0_loss": average_l0_loss,
@@ -818,7 +813,7 @@ class Trainer:
                         accm_ce_loss.clear()
                         accm_l0_loss.clear()
                         accm_mse_loss.clear()
-                        accm_per_bin_acc.clear()
+                        accm_per_bin_recall.clear()
                         accm_total_acc.clear()
                     if index != 0 and index % self.args.valid_every == 0:
                         self.validate(epoch, index)
@@ -927,7 +922,6 @@ class Trainer:
             0.0, device=logits.device if logits is not None else "cpu"
         )
         l0_loss = 0.0
-        per_bin_ce_loss = None
         if enable_ce and logits is not None and discrete_expr_label is not None:
             # Ensure label and logits are on the same device
             discrete_expr_label = discrete_expr_label.to(logits.device)
@@ -945,8 +939,6 @@ class Trainer:
                     self.epoch_length,
                     self.iteration,
                 )
-            elif self.args.weighted_ce_loss:
-                ce_loss = self.calculate_weighted_ce_loss(logits, discrete_expr_label)
             elif self.args.use_ldam_loss:
                 ce_loss = self.calculate_ldam_ce_loss(logits, discrete_expr_label)
             elif self.args.mean_ce_loss:
@@ -1089,15 +1081,15 @@ class Trainer:
             )
         return True
 
-    def _calculate_per_bin_accuracy(self, final, discrete_expr_label, num_bins):
+    def _calculate_per_bin_recall(self, final, discrete_expr_label, num_bins):
         """
-        Calculate accuracy for each bin, then average over bins (excluding bin0)
+        Calculate recall for each bin, then average over bins (excluding bin0)
         final: (batch, seq_len)
         discrete_expr_label: (batch, seq_len)
         num_bins: int
-        Returns: float, average accuracy per bin (excluding bin0)
+        Returns: float, average recall per bin (excluding bin0)
         """
-        accuracies = []
+        recalls = []
         # Exclude -100 cases
         valid_mask = discrete_expr_label != -100
         for bin_idx in range(1, num_bins + 1):  # Skip bin0
@@ -1106,12 +1098,12 @@ class Trainer:
             total = mask.sum()
             if total == 0:
                 continue  # This bin has no samples
-            correct = ((final == bin_idx) & mask).sum()
-            acc = correct.float() / total.float()
-            accuracies.append(acc)
-        if len(accuracies) == 0:
+            true_positive = ((final == bin_idx) & mask).sum()
+            rec = true_positive.float() / total.float()
+            recalls.append(rec)
+        if len(recalls) == 0:
             return 0.0
-        return torch.stack(accuracies).mean().item()
+        return torch.stack(recalls).mean().item()
 
     def _calculate_accuracy(self, final, discrete_expr_label):
         pred_num = (discrete_expr_label != -100).sum(dim=-1)
@@ -1215,7 +1207,7 @@ class Trainer:
 
         return class_counts
 
-    def calculate_dynamic_mask_probabilities(self):
+    def set_dynamic_mask_probabilities(self):
         """
         Dynamically set mask probabilities based on bin distribution ratio
         Returns: dict, containing mask probability for each bin
@@ -1269,22 +1261,6 @@ class Trainer:
 
         return mask_probabilities
 
-    # need to predefine the weight and also need to ensure that the length of weight corresponding to the number of bins
-    def init_weighted_ce_loss(self):
-        # Use original weighted CrossEntropyLoss
-        logging.info("Using weighted CrossEntropyLoss...")
-        # bin0:0, bin1:1, bin2:6, bin3:36, bin4:100, bin5:300
-        ce_weight = torch.tensor([0, 1, 6.9, 118.7])
-        self.weighted_ce_loss_fn = nn.CrossEntropyLoss(
-            weight=ce_weight, reduction="mean", ignore_index=-100
-        )
-
-    def calculate_weighted_ce_loss(self, logits, discrete_expr_label):
-        self.weighted_ce_loss_fn.to(logits.device)
-        logits_reshaped = logits.view(-1, self.args.model.num_bins + 1)
-        labels_reshaped = discrete_expr_label.view(-1)
-        return self.weighted_ce_loss_fn(logits_reshaped, labels_reshaped)
-
     def init_ldam_loss(self):
         logging.info("Using LDAM loss...")
         # 使用缓存的class_counts
@@ -1317,8 +1293,6 @@ class Trainer:
     def calculate_mogaide_ce_loss(self, logits, discrete_expr_label):
         if self.epoch == 1 or self.epoch == 2:
             ce_loss = self.cross_entropy_loss_fn(logits, discrete_expr_label)
-        elif self.epoch == 3 or self.epoch == 4:
-            ce_loss = self.calculate_weighted_ce_loss(logits, discrete_expr_label)
         else:
             ce_loss = self.calculate_mean_ce_loss(logits, discrete_expr_label)
         return ce_loss
