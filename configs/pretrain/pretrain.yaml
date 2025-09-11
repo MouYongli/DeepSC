@@ -43,7 +43,6 @@ mean_ce_loss: True
 use_ldam_loss: False
 enable_adaptive_ce_loss: False
 enable_alternating_ldam_mean_ce_loss: False
-enable_warm_alternating_ldam_mean_ce_loss: False
 
 # 回归任务
 # 最多只能打开一个开关 选择huber还是mse
@@ -76,6 +75,7 @@ save_ckpt_every: 2000
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
+enable_moe_collapse_detection: False
 log_moe_collapse_every: 500  # 每500次iteration检查一次MoE塌缩
 sequence_length: 1024
 plot_tsne_and_umap: False

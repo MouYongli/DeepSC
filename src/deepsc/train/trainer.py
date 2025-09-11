@@ -3,6 +3,7 @@ import math
 import os
 
 import numpy as np
+import scipy.sparse
 import torch
 from omegaconf import DictConfig
 from sklearn.model_selection import train_test_split
@@ -18,14 +19,10 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-import scipy.sparse
-
 import wandb
-
-from deepsc.data.dataset import GeneExpressionDatasetNew
-
 from deepsc.data import DataCollator
-from deepsc.train.losses import LegacyLossCalculator
+from deepsc.data.dataset import GeneExpressionDataset
+from deepsc.train.losses import LossCalculator
 from deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     CosineAnnealingWarmupRestarts,
@@ -48,7 +45,7 @@ from deepsc.utils import (
 
 class Trainer:
     def __init__(self, args: DictConfig, fabric, model):
-        self.number_of_files = len(
+        self.num_files = len(
             [
                 f
                 for f in os.listdir(args.data_path)
@@ -60,7 +57,6 @@ class Trainer:
         self.fabric = fabric
         self.model = model
         self.epoch = 1  # Add epoch class variable
-        self.epoch_length = 0
         self.iteration = 0
         self.last_iteration = 0
         self.last_chunk_idx = 0  # Used to record last processed chunk index
@@ -115,8 +111,8 @@ class Trainer:
         )
         train_csr = csr_matrix[train_idx]
         val_csr = csr_matrix[val_idx]
-        self.train_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=train_csr)
-        self.val_dataset: Dataset = GeneExpressionDatasetNew(csr_matrix=val_csr)
+        self.train_dataset: Dataset = GeneExpressionDataset(csr_matrix=train_csr)
+        self.val_dataset: Dataset = GeneExpressionDataset(csr_matrix=val_csr)
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
         self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
         # 计算动态掩码概率（使用已缓存的class_counts）
@@ -224,7 +220,7 @@ class Trainer:
     def create_scheduler(self, optimizer, args):
 
         total_steps = args.epoch * math.ceil(
-            (self.number_of_files * args.data_length)
+            (self.num_files * args.data_length)
             / (args.batch_size * self.world_size * args.grad_acc)
         )
         warmup_ratio = self.args.warmup_ratio
@@ -406,16 +402,6 @@ class Trainer:
                 accm_ce_loss.append(ce_loss.item())
                 accm_l0_loss.append(l0_loss.item())
                 accm_mse_loss.append(mse_loss.item())
-                if self.is_master:
-                    data_iter.set_postfix(
-                        loss=sum(accm_loss) / len(accm_loss),
-                        mse_loss=sum(accm_mse_loss) / len(accm_mse_loss),
-                        ce_loss=sum(accm_ce_loss) / len(accm_ce_loss),
-                        l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
-                        per_bin_recall=sum(accm_per_bin_recall)
-                        / len(accm_per_bin_recall),
-                        total_acc=sum(accm_total_acc) / len(accm_total_acc),
-                    )
                 if final is not None:
                     predictions.append(final)
                     truths.append(discrete_expr_label)
@@ -431,6 +417,16 @@ class Trainer:
                     truths.append(torch.tensor([]))
                     accm_per_bin_recall.append(0.0)
                     accm_total_acc.append(0.0)
+                if self.is_master:
+                    data_iter.set_postfix(
+                        loss=sum(accm_loss) / len(accm_loss),
+                        mse_loss=sum(accm_mse_loss) / len(accm_mse_loss),
+                        ce_loss=sum(accm_ce_loss) / len(accm_ce_loss),
+                        l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
+                        per_bin_recall=sum(accm_per_bin_recall)
+                        / len(accm_per_bin_recall),
+                        total_acc=sum(accm_total_acc) / len(accm_total_acc),
+                    )
                 if self.args.enable_mse and mse_loss is not None:
                     all_masked_preds.append(masked_preds)
                     all_masked_labels.append(masked_labels)
@@ -594,7 +590,6 @@ class Trainer:
         # if self.args.model_name == "DeepSC":
         # self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
-        self.epoch_length = 0
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.epoch = epoch  # Update class variable epoch
             self._prepare_file_plan()
@@ -643,9 +638,6 @@ class Trainer:
                     self.init_loss_fn()
                     did_compute_class_counts = True
                 self.load_data()
-                self.epoch_length = len(
-                    self.train_loader
-                )  # Length of epoch, I'm not sure if this is correct...
                 self.train_loader.sampler.set_epoch(epoch)
                 self.model.train()
                 data_iter = self.train_loader
@@ -669,7 +661,6 @@ class Trainer:
                     if self.loss_calculator is not None:
                         self.loss_calculator.epoch = self.epoch
                         self.loss_calculator.iteration = self.iteration
-                        self.loss_calculator.epoch_length = self.epoch_length
 
                     loss, final, mse_loss, ce_loss, l0_loss, y = self._process_batch(
                         data
@@ -764,6 +755,7 @@ class Trainer:
                     # MoE collapse detection
                     if (
                         index != 0
+                        and self.args.enable_moe_collapse_detection
                         and hasattr(self.args, "log_moe_collapse_every")
                         and index % self.args.log_moe_collapse_every == 0
                         and self.is_master
@@ -921,10 +913,8 @@ class Trainer:
         valid_labels = discrete_expr_label[non_padded_mask]
         valid_preds = final[non_padded_mask]
         num_classes = self.args.model.num_bins + 1
-        recall, precision, f1, macro_f1, average_recall, average_precision = (
-            compute_classification_metrics(
-                valid_preds, valid_labels, num_classes, discrete_expr_label.device
-            )
+        macro_f1, average_recall, average_precision = compute_classification_metrics(
+            valid_preds, valid_labels, num_classes, discrete_expr_label.device
         )
         if not hasattr(self, "acc_recall"):
             self.acc_recall = []
@@ -1066,7 +1056,7 @@ class Trainer:
 
     def init_loss_fn(self):
         """Initialize the loss calculator with current class counts and configuration"""
-        self.loss_calculator = LegacyLossCalculator(
+        self.loss_calculator = LossCalculator(
             args=self.args,
             num_bins=self.args.model.num_bins,
             ignore_index=-100,
