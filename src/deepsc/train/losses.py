@@ -117,9 +117,12 @@ class LossCalculator:
         )
 
     def init_loss_fn(self):
-        if self.args.enable_alternating_ldam_mean_ce_loss or self.args.use_ldam_loss:
+        if (
+            self.args.loss.enable_alternating_ldam_mean_ce_loss
+            or self.args.loss.use_ldam_loss
+        ):
             self.ldam_loss_fn = self.init_ldam_loss()
-        elif self.args.weighted_ce_loss or self.args.enable_adaptive_ce_loss:
+        elif self.args.loss.weighted_ce_loss or self.args.loss.enable_adaptive_ce_loss:
             self.cross_entropy_loss_fn = nn.CrossEntropyLoss(
                 reduction="mean", ignore_index=self.ignore_index
             )
@@ -128,9 +131,9 @@ class LossCalculator:
                 reduction="mean", ignore_index=self.ignore_index
             )
 
-        if self.args.enable_mse_loss:
+        if self.args.loss.enable_mse_loss:
             self.regression_loss_fn = nn.MSELoss(reduction="none")
-        elif self.args.enable_huber_loss:
+        elif self.args.loss.enable_huber_loss:
             self.regression_loss_fn = nn.HuberLoss(reduction="none")
 
     def calculate_loss(
@@ -169,15 +172,15 @@ class LossCalculator:
         if enable_ce and logits is not None and discrete_expr_label is not None:
             # Ensure label and logits are on the same device
             discrete_expr_label = discrete_expr_label.to(logits.device)
-            if self.args.enable_alternating_ldam_mean_ce_loss:
+            if self.args.loss.enable_alternating_ldam_mean_ce_loss:
                 ce_loss = self.calculate_alternating_ldam_mean_ce_loss(
                     self.epoch, logits, discrete_expr_label
                 )
-            elif self.args.enable_adaptive_ce_loss:
+            elif self.args.loss.enable_adaptive_ce_loss:
                 ce_loss = self.calculate_mogaide_ce_loss(logits, discrete_expr_label)
-            elif self.args.use_ldam_loss:
+            elif self.args.loss.use_ldam_loss:
                 ce_loss = self.calculate_ldam_ce_loss(logits, discrete_expr_label)
-            elif self.args.mean_ce_loss:
+            elif self.args.loss.mean_ce_loss:
                 ce_loss = self.calculate_mean_ce_loss(logits, discrete_expr_label)
             else:
                 ce_loss = self.calculate_ce_loss(logits, discrete_expr_label)
@@ -189,7 +192,7 @@ class LossCalculator:
             and continuous_expr_label is not None
             and mask is not None
         ):
-            if self.args.use_normal_regression_loss:
+            if self.args.loss.use_normal_regression_loss:
                 regression_loss = masked_mse_loss(
                     regression_output,
                     continuous_expr_label,
@@ -197,23 +200,23 @@ class LossCalculator:
                     loss_fn=self.regression_loss_fn,
                     reduction="mean",
                 )
-            elif self.args.use_hard_regression_loss:
+            elif self.args.loss.use_hard_regression_loss:
                 regression_loss = weighted_masked_mse_loss(
                     regression_output,
                     continuous_expr_label,
                     mask,
                     loss_fn=self.regression_loss_fn,
                     reduction="mean",
-                    log_each=is_val and self.args.show_mse_loss_details,
+                    log_each=is_val and self.args.logging.show_mse_loss_details,
                 )
-            elif self.args.use_exp_regression_loss:
+            elif self.args.loss.use_exp_regression_loss:
                 regression_loss = weighted_masked_mse_loss_v2(
                     regression_output,
                     continuous_expr_label,
                     mask,
                     loss_fn=self.regression_loss_fn,
                     reduction="mean",
-                    log_each=is_val and self.args.show_mse_loss_details,
+                    log_each=is_val and self.args.logging.show_mse_loss_details,
                 )
             total_loss += mse_loss_weight * regression_loss
 

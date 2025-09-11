@@ -1,0 +1,5 @@
+# 新增warmup相关参数
+use_warmup: False
+warmup_ratio: 0.03
+use_scbert_scheduler: True
+use_mogaide_scheduler: False

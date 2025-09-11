@@ -1296,27 +1296,6 @@ def compute_classification_metrics(valid_preds, valid_labels, num_classes, devic
     return recall, precision, f1, macro_f1, average_recall, average_precision
 
 
-def get_l0_lambda(epoch, index, l0_warmup_start_epoch, l0_lambda_target, epoch_length):
-    """
-    计算l0 lambda，使用warmup策略
-    """
-    if epoch < l0_warmup_start_epoch:
-        return 0.0
-    elif epoch > l0_warmup_start_epoch:
-        return l0_lambda_target
-    else:
-        return calculate_l0_lambda_with_warmup_fine_grained(
-            index, l0_lambda_target, epoch_length
-        )
-
-
-def calculate_l0_lambda_with_warmup_fine_grained(index, l0_lambda_target, epoch_length):
-    """
-    计算当前的l0 lambda 按index在l0_warmup_start_epoch到l0_warmup_start_epoch + 1之间线性增加到l0_lambda_target
-    """
-    return l0_lambda_target * (index / epoch_length)
-
-
 def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
     """
     统计 h5ad 文件中 obs 的 cell_type 列的唯一值数量
@@ -1783,25 +1762,23 @@ def restore_wandb_session(wandb_run_id, wandb_config, args, is_master=True):
             wandb.init(
                 id=wandb_run_id,
                 resume="allow",
-                project=wandb_config.get(
-                    "project", args.get("wandb_project", "DeepSC")
-                ),
-                entity=wandb_config.get("entity", args.get("wandb_team", "rwth_lfb")),
+                project=wandb_config.get("project", args.logging.wandb_project),
+                entity=wandb_config.get("entity", args.logging.wandb_team),
                 name=wandb_config.get(
                     "name",
-                    f"{args.run_name}, lr: {args.learning_rate}",
+                    f"{args.logging.run_name}, lr: {args.learning_rate}",
                 ),
-                tags=wandb_config.get("tags", args.tags),
+                tags=wandb_config.get("tags", args.logging.tags),
                 config=wandb_config.get("config", dict(args)),
             )
         else:
             wandb.init(
                 id=wandb_run_id,
                 resume="allow",
-                project=args.get("wandb_project", "DeepSC"),
-                entity=args.get("wandb_team", "rwth_lfb"),
-                name=f"{args.run_name}, lr: {args.learning_rate}",
-                tags=args.tags,
+                project=args.logging.wandb_project,
+                entity=args.logging.wandb_team,
+                name=f"{args.logging.run_name}, lr: {args.learning_rate}",
+                tags=args.logging.tags,
                 config=dict(args),
             )
 

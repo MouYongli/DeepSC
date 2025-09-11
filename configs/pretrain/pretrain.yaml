@@ -1,102 +1,42 @@
 defaults:
   - _self_
   - model: deepsc
+  - data: default
+  - loss: default
+  - logging: default
+  - system: default
+  - experiment: default
+  - scheduler: default
+  - override hydra/job_logging: colorlog
 
-wandb_project: "DeepSC"
-wandb_team: "rwth_lfb"
-tags: ["256hd", "big dataset", "mean ce", "adaptive mse and no adaptiv0 l0", "medium learning rate"]
-run_name: "mogaide scheduler, mean ce, adaptive mse, 5bin ,hd256, alpha0.3"
-
-#文件加载相关
-chunksize: 4
-shuffel_files_each_epoch: False
-
-# Loss weights
-enable_l0: True
-enable_mse: True
-enable_ce: True
-ce_loss_weight: 1.0
-target_mse_loss_weight: 3.0
-#control the weight of mse loss
-adaptive_mse_weight: False
-
-# MoE Regressor settings
-use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简单回归器
-# True:  使用MoE回归器（3个专家网络：low/mid/high expert + gate网络）
-# False: 使用原来的简单回归器（单一sequential网络）
-use_M_matrix: False
-use_moe_ffn: True
-expert_parallelism: False
-use_compile: False
-
-# L0 loss warmup parameters
-l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
-enable_l0_warmup: False
-l0_lambda: 0.1
-# 数据增强相关
-enable_data_augmentation: True  # 是否启用数据增强（动态掩码概率）
-
-# 分类任务
-# 最多只能打开一个开关
-weighted_ce_loss: False
-mean_ce_loss: True
-use_ldam_loss: False
-enable_adaptive_ce_loss: False
-enable_alternating_ldam_mean_ce_loss: False
-
-# 回归任务
-# 最多只能打开一个开关 选择huber还是mse
-enable_mse_loss: False
-enable_huber_loss: True
-# 回归任务
-# 最多只能打开一个开关 选择普通的还是加权的
-use_normal_regression_loss: True
-use_hard_regression_loss: False
-use_exp_regression_loss: False
-
-#Print details of mse loss in log
-show_mse_loss_details: False
-output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
-
-data_path: "/home/angli/baseline/DeepSC/data/processed/npz_data_after_shuffel"
-data_length: 5000
 seed: 42
-ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
-num_device: 2
-num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 valid_every: 2000
-model_name: "DeepSC_heart9_blood_others_blood"
+model_name: "DeepSC"
 grad_acc: 20
 learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
-save_ckpt_every: 2000
 
-log_on_wandb_every: 20
-log_m_matrix_every: 1000
-enable_moe_collapse_detection: False
-log_moe_collapse_every: 500  # 每500次iteration检查一次MoE塌缩
-sequence_length: 1024
-plot_tsne_and_umap: False
-draw_continuous_pred_label_scatter: True
-# 新增warmup相关参数
-use_warmup: False
-warmup_ratio: 0.03
-use_warmup_with_decay: False
-use_scbert_scheduler: True
-use_mogaide_scheduler: False
-
-save_ckpt: True
-
-# 新增checkpoint相关参数
 resume_last_training: True
-
-# 梯度检查相关参数
+save_ckpt: True
+save_ckpt_every: 2000
+sequence_length: 1024
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用
+
+chunk_size: ${data.chunk_size}
+enable_l0: ${loss.enable_l0}
+enable_mse: ${loss.enable_mse}
+enable_ce: ${loss.enable_ce}
+use_moe_regressor: ${experiment.use_moe_regressor}
+use_M_matrix: ${experiment.use_M_matrix}
+use_moe_ffn: ${experiment.use_moe_ffn}
+
+
+
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
-  verbose: False
+  verbose: false
   # Logs to stdout and to a file.
   job_logging:
     handlers:
@@ -104,5 +44,4 @@ hydra:
         class: logging.StreamHandler
         stream: ext://sys.stdout
       file:
-        filename:
-          ${hydra.runtime.output_dir}/${hydra.job.name}_${oc.select:hydra.job.num, 0}.log
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}_${oc.select:hydra.job.num, 0}.log

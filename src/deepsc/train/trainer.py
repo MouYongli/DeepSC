@@ -48,8 +48,8 @@ class Trainer:
         self.num_files = len(
             [
                 f
-                for f in os.listdir(args.data_path)
-                if os.path.isfile(os.path.join(args.data_path, f))
+                for f in os.listdir(args.data.data_path)
+                if os.path.isfile(os.path.join(args.data.data_path, f))
             ]
         )
         self.log_each = False
@@ -64,18 +64,16 @@ class Trainer:
         self.world_size = self.fabric.world_size
         # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
-        self.data_is_directory = os.path.isdir(self.args.data_path)
+        self.data_is_directory = os.path.isdir(self.args.data.data_path)
         self.all_files = None  # List of all .npz files in directory
         self.file_chunks = None  # List of file subsets split by chunk_size
-        self.chunk_size = getattr(
-            self.args, "chunk_size", 4
-        )  # Number of files processed per training iteration
+        self.chunk_size = self.args.data.chunk_size
         self.shuffle_files_each_epoch = getattr(
             self.args, "shuffle_files_each_epoch", True
         )
         self.class_counts = None
         self.dynamic_mask_probabilities = None
-        self.mse_loss_weight = self.args.target_mse_loss_weight
+        self.mse_loss_weight = self.args.loss.target_mse_loss_weight
         self.prepare_model()
         self.scheduler = self.create_scheduler(self.optimizer, self.args)
 
@@ -122,17 +120,19 @@ class Trainer:
         (no shuffling, convenient for checkpoint recovery)."""
         if not self.data_is_directory:
             # Single file: one chunk
-            self.all_files = [self.args.data_path]
+            self.all_files = [self.args.data.data_path]
             self.file_chunks = [self.all_files]
             return
 
         # Collect all .npz files
         all_files = []
-        for fn in os.listdir(self.args.data_path):
+        for fn in os.listdir(self.args.data.data_path):
             if fn.endswith(".npz"):
-                all_files.append(os.path.join(self.args.data_path, fn))
+                all_files.append(os.path.join(self.args.data.data_path, fn))
         if not all_files:
-            raise ValueError(f"No .npz files found in directory: {self.args.data_path}")
+            raise ValueError(
+                f"No .npz files found in directory: {self.args.data.data_path}"
+            )
         import re
 
         def _nat_key(s: str):
@@ -213,20 +213,20 @@ class Trainer:
         args = self.args
         self.optimizer = Adam(self.model.parameters(), lr=args.learning_rate)
         self.softmax = nn.Softmax(dim=-1)
-        if self.args.use_compile:
+        if self.args.experiment.use_compile:
             self.model = torch.compile(self.model)  # Before setup
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
 
     def create_scheduler(self, optimizer, args):
 
         total_steps = args.epoch * math.ceil(
-            (self.num_files * args.data_length)
+            (self.num_files * args.data.dataset_size)
             / (args.batch_size * self.world_size * args.grad_acc)
         )
-        warmup_ratio = self.args.warmup_ratio
+        warmup_ratio = self.args.scheduler.warmup_ratio
         warmup_steps = math.ceil(total_steps * warmup_ratio)
         main_steps = total_steps - warmup_steps
-        if self.args.use_scbert_scheduler:
+        if self.args.scheduler.use_scbert_scheduler:
             scheduler = CosineAnnealingWarmupRestarts(
                 optimizer,
                 first_cycle_steps=warmup_steps * 3,
@@ -237,7 +237,7 @@ class Trainer:
                 gamma=0.9,
             )
             return scheduler
-        elif self.args.use_mogaide_scheduler:
+        elif self.args.scheduler.use_mogaide_scheduler:
             linear_warmup = LinearLR(
                 optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
             )
@@ -253,7 +253,7 @@ class Trainer:
                 schedulers=[linear_warmup, cosine_anneal],
                 milestones=[warmup_steps],
             )
-        elif self.args.use_warmup:
+        elif self.args.scheduler.use_warmup:
             linear_warmup = LinearLR(
                 optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
             )
@@ -292,7 +292,7 @@ class Trainer:
         continuous_expr_label = data["continuous_expr_label"]
         mask = data["mask"]
         logits = regression_output = y = None
-        if self.args.enable_ce and self.args.enable_mse:
+        if self.args.loss.enable_ce and self.args.loss.enable_mse:
             logits, regression_output, y, _, expr_emb = self.model(
                 gene,
                 masked_discrete_expr,
@@ -306,7 +306,7 @@ class Trainer:
                 masked_continuous_expr,
                 return_mask_prob=True,
             )
-        elif self.args.enable_mse:
+        elif self.args.loss.enable_mse:
             regression_output, y, _, expr_emb = self.model(
                 gene,
                 masked_discrete_expr,
@@ -314,17 +314,17 @@ class Trainer:
                 return_mask_prob=True,
             )
         loss, ce_loss, mse_loss, l0_loss = self.loss_calculator.calculate_loss(
-            self.args.enable_ce,
-            self.args.enable_mse,
+            self.args.loss.enable_ce,
+            self.args.loss.enable_mse,
             logits=logits,
             discrete_expr_label=discrete_expr_label,
             regression_output=regression_output,
             continuous_expr_label=continuous_expr_label,
             mask=mask,
             y=y,
-            ce_loss_weight=self.args.ce_loss_weight,
-            mse_loss_weight=self.mse_loss_weight,
-            l0_lambda=self.args.l0_lambda,
+            ce_loss_weight=self.args.loss.ce_loss_weight,
+            mse_loss_weight=self.args.loss.target_mse_loss_weight,
+            l0_lambda=self.args.loss.l0_lambda,
             is_val=is_val,
         )
         if logits is not None:
@@ -342,7 +342,7 @@ class Trainer:
         )  # Can add device and dtype to ensure compatibility
         masked_labels = torch.tensor([])
         if is_val:
-            if self.args.enable_mse:
+            if self.args.loss.enable_mse:
                 masked_preds = regression_output[mask].detach().cpu()
                 masked_labels = continuous_expr_label[mask].detach().cpu()
             return (
@@ -427,7 +427,7 @@ class Trainer:
                         / len(accm_per_bin_recall),
                         total_acc=sum(accm_total_acc) / len(accm_total_acc),
                     )
-                if self.args.enable_mse and mse_loss is not None:
+                if self.args.loss.enable_mse and mse_loss is not None:
                     all_masked_preds.append(masked_preds)
                     all_masked_labels.append(masked_labels)
             # Only perform pad and evaluation when there are classification tasks
@@ -479,23 +479,23 @@ class Trainer:
             logging.info(
                 f"[Embedding Analysis] Top 10 singular values: {S[:10].cpu().numpy()}"
             )
-            if self.args.plot_tsne_and_umap and self.is_master:
+            if self.args.logging.plot_tsne_and_umap and self.is_master:
                 draw_expr_emb_analysis(
                     E,
                     epoch,
-                    self.args.ckpt_dir,
+                    self.args.system.ckpt_dir,
                     iteration,
                 )
             if (
-                self.args.enable_mse
-                and self.args.draw_continuous_pred_label_scatter
+                self.args.loss.enable_mse
+                and self.args.logging.draw_continuous_pred_label_scatter
                 and self.is_master
             ):
                 draw_continuous_pred_label_scatter(
                     all_masked_preds,
                     all_masked_labels,
                     epoch,
-                    self.args.ckpt_dir,
+                    self.args.system.ckpt_dir,
                     iteration,
                 )
 
@@ -600,6 +600,8 @@ class Trainer:
             # Mark: whether scheduler has been created; whether class_count has been calculated
             did_compute_class_counts = self.class_counts is not None
             chunk_total = len(self.file_chunks)
+            print(f"chunk_total: {chunk_total}")
+            print(f"self.file_chunks: {self.file_chunks}")
             chunk_bar = tqdm(
                 total=chunk_total,
                 initial=start_chunk_idx,  # Display immediately and set progress to recovery point
@@ -621,16 +623,15 @@ class Trainer:
                 )
                 self._build_datasets_from_files(files_subset)
                 if not did_compute_class_counts and (
-                    self.args.enable_data_augmentation
-                    or self.args.use_ldam_loss
-                    or self.args.enable_alternating_ldam_mean_ce_loss
-                    or self.args.enable_warm_alternating_ldam_mean_ce_loss
+                    self.args.data.enable_data_augmentation
+                    or self.args.loss.use_ldam_loss
+                    or self.args.loss.enable_alternating_ldam_mean_ce_loss
                 ):
                     self.class_counts = self.calculate_class_counts()
                     self.init_loss_fn()
                     self.dynamic_mask_probabilities = (
                         self.set_dynamic_mask_probabilities()
-                        if self.args.enable_data_augmentation
+                        if self.args.data.enable_data_augmentation
                         else None
                     )
                     did_compute_class_counts = True
@@ -644,7 +645,7 @@ class Trainer:
                 if self.is_master:
                     data_iter = tqdm(
                         self.train_loader,
-                        desc=f"Epoch {epoch} [train] {self.current_chunk_idx}/{chunk_total} Chunks",
+                        desc=f"Epoch {epoch} [train] {self.current_chunk_idx+1}/{chunk_total} Chunks",
                         ncols=300,
                         position=1,
                     )
@@ -669,7 +670,7 @@ class Trainer:
                     # Print M matrix every 10 iterations
                     if (
                         self.is_master
-                        and index % self.args.log_m_matrix_every == 0
+                        and index % self.args.logging.log_m_matrix_every == 0
                         and y is not None
                     ):
                         M = compute_M_from_y(y)
@@ -732,7 +733,7 @@ class Trainer:
                                     "train/total_acc": average_total_acc,
                                     "train/ce_loss": average_ce_loss,
                                     "train/l0_loss": average_l0_loss,
-                                    "TrainLossWeight/ce_loss_weight": self.args.ce_loss_weight,
+                                    "TrainLossWeight/ce_loss_weight": self.args.loss.ce_loss_weight,
                                     "TrainLossWeight/mse_loss_weight": self.mse_loss_weight,
                                     "epoch": epoch,
                                     "iteration": index,
@@ -755,9 +756,8 @@ class Trainer:
                     # MoE collapse detection
                     if (
                         index != 0
-                        and self.args.enable_moe_collapse_detection
-                        and hasattr(self.args, "log_moe_collapse_every")
-                        and index % self.args.log_moe_collapse_every == 0
+                        and self.args.logging.enable_moe_collapse_detection
+                        and index % self.args.logging.log_moe_collapse_every == 0
                         and self.is_master
                     ):
                         check_moe_collapse(self.model, epoch, index)
@@ -769,7 +769,7 @@ class Trainer:
                             self.optimizer,
                             self.scheduler,
                             self.args.model_name,
-                            self.args.ckpt_dir,
+                            self.args.system.ckpt_dir,
                             self.fabric,
                             iteration=index + 1,
                             chunk_idx=self.current_chunk_idx,
@@ -782,9 +782,9 @@ class Trainer:
                     epoch,
                     self.model,
                     self.optimizer,
-                    getattr(self, "scheduler", None),
+                    self.scheduler,
                     self.args.model_name,
-                    self.args.ckpt_dir,
+                    self.args.system.ckpt_dir,
                     self.fabric,
                     iteration=0,
                     chunk_idx=self.current_chunk_idx + 1,
@@ -801,7 +801,7 @@ class Trainer:
                 self.optimizer,
                 self.scheduler,
                 self.args.model_name,
-                self.args.ckpt_dir,
+                self.args.system.ckpt_dir,
                 self.fabric,
                 iteration=0,  # Reset iteration counter
                 chunk_idx=0,  # 重置chunk索引
@@ -819,7 +819,7 @@ class Trainer:
         return pred_dist_str
 
     def checkpoint_reload(self) -> bool:
-        ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.ckpt")
+        ckpt_file = os.path.join(self.args.system.ckpt_dir, "latest_checkpoint.ckpt")
 
         # Load checkpoint using the new utils function
         checkpoint_info = load_checkpoint(
@@ -897,10 +897,10 @@ class Trainer:
         Initialize wandb run with consistent configuration
         """
         wandb.init(
-            entity=self.args.get("wandb_team", "rwth_lfb"),
-            project=self.args.get("wandb_project", "DeepSC"),
-            name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
-            tags=self.args.tags,
+            entity=self.args.logging.wandb_team,
+            project=self.args.logging.wandb_project,
+            name=f"{self.args.logging.run_name}, lr: {self.args.learning_rate}",
+            tags=self.args.logging.tags,
             config=dict(self.args),
         )
         logging.info(
@@ -913,8 +913,10 @@ class Trainer:
         valid_labels = discrete_expr_label[non_padded_mask]
         valid_preds = final[non_padded_mask]
         num_classes = self.args.model.num_bins + 1
-        macro_f1, average_recall, average_precision = compute_classification_metrics(
-            valid_preds, valid_labels, num_classes, discrete_expr_label.device
+        _, _, _, macro_f1, average_recall, average_precision = (
+            compute_classification_metrics(
+                valid_preds, valid_labels, num_classes, discrete_expr_label.device
+            )
         )
         if not hasattr(self, "acc_recall"):
             self.acc_recall = []
@@ -925,7 +927,7 @@ class Trainer:
         self.acc_recall.append(average_recall)
         self.acc_precision.append(average_precision)
         self.acc_macro_f1.append(macro_f1)
-        if self.iteration % self.args.log_on_wandb_every == 0:
+        if self.iteration % self.args.logging.log_on_wandb_every == 0:
             if self.is_master:
                 average_acc_recall = sum(self.acc_recall) / len(self.acc_recall)
                 average_acc_precision = sum(self.acc_precision) / len(

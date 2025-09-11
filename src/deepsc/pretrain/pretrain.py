@@ -45,8 +45,8 @@ def pretrain(cfg: DictConfig) -> None:
     # Initialize PyTorch Lightning Fabric for distributed training
     fabric = Fabric(
         accelerator="cuda",  # Use CUDA for GPU acceleration
-        devices=cfg.num_device,  # Number of devices per node
-        num_nodes=cfg.num_nodes,  # Number of nodes for distributed training
+        devices=cfg.system.num_device,  # Number of devices per node
+        num_nodes=cfg.system.num_nodes,  # Number of nodes for distributed training
         strategy=DDPStrategy(find_unused_parameters=False),  # Distributed data parallel
         precision="bf16-mixed",  # Mixed precision training for efficiency
     )
