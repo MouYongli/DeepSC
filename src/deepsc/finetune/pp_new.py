@@ -47,10 +47,6 @@ class PPNEW:
         self.name2col = {g: i for i, g in enumerate(self.original_genes)}
         self.valid_gene_mask = self.gene_ids != 0
         self.perts_to_plot = ["KCTD16+ctrl"]
-
-        # 核心修复：建立固定的基因子集用于训练和评估，避免动态选择带来的不一致
-        # self.setup_fixed_gene_subset()
-
         # 比较self.name2col和self.node_map是不是内容一样的字典
         if hasattr(self, "node_map"):
             name2col_equal = self.name2col == self.node_map
@@ -59,33 +55,10 @@ class PPNEW:
         else:
             if self.is_master:
                 print("self does not have attribute 'node_map'")
-
-    def setup_fixed_gene_subset(self):
-        print("setup_fixed_gene_subset")
-        """建立固定的基因子集，用于所有训练和评估批次"""
-        # 选择所有在vocab中的有效基因
-        valid_gene_indices = torch.nonzero(self.valid_gene_mask, as_tuple=True)[0]
-
-        # 如果基因数量超过限制，随机采样到指定数量
-        max_genes = getattr(self.args, "data_length", 1500)
-        if len(valid_gene_indices) > max_genes:
-            # 使用固定种子确保可重复性
-            generator = torch.Generator()
-            generator.manual_seed(self.args.seed)
-            perm = torch.randperm(len(valid_gene_indices), generator=generator)[
-                :max_genes
-            ]
-            self.fixed_gene_subset = valid_gene_indices[perm].sort()[
-                0
-            ]  # 排序保持一致性
-        else:
-            self.fixed_gene_subset = valid_gene_indices.sort()[0]
-
-        if self.is_master:
-            print(f"Fixed gene subset established: {len(self.fixed_gene_subset)} genes")
-            print(
-                f"Gene indices range: [{self.fixed_gene_subset.min()}, {self.fixed_gene_subset.max()}]"
-            )
+        # print(torch.unique(self.gene_ids, return_counts=True))
+        # unique_vals, counts = np.unique(self.gene_ids, return_counts=True)
+        # print("unique_vals:",unique_vals)
+        # print("counts:",counts)
 
     def init_loss_fn(self):
         self.criterion_mse = nn.MSELoss()
@@ -271,6 +244,10 @@ class PPNEW:
                         input_gene_ids = (
                             ori_gene_values.nonzero()[:, 1].flatten().unique().sort()[0]
                         )  # 得到整个batch里面没有0表达的基因原始索引
+                    if len(input_gene_ids) > self.args.data_length:
+                        input_gene_ids = torch.randperm(
+                            len(input_gene_ids), device=device
+                        )[: self.args.data_length]
                     input_values = ori_gene_values[:, input_gene_ids]
                     target_values = target_gene_values[:, input_gene_ids]
                     input_pert_flags = pert_flags[:, input_gene_ids]
@@ -307,16 +284,12 @@ class PPNEW:
                             avg_loss=total_loss / (batch + 1),
                         )
             res = self.eval_new()
-            # 只在主进程计算和打印metrics，因为所有GPU都有完整的聚合结果
-            if self.is_master:
-                val_metrics = compute_perturbation_metrics(
-                    res,
-                    self.pert_data.adata[
-                        self.pert_data.adata.obs["condition"] == "ctrl"
-                    ],
-                )
-                print("val_metrics at epoch 1: ")
-                print(val_metrics)
+            val_metrics = compute_perturbation_metrics(
+                res,
+                self.pert_data.adata[self.pert_data.adata.obs["condition"] == "ctrl"],
+            )
+            print("val_metrics at epoch 1: ")
+            print(val_metrics)
 
     def eval_new(self):
         self.model.eval()
@@ -340,15 +313,6 @@ class PPNEW:
                 pert_cat.extend(batch_data.pert)
                 t = batch_data.y
                 device = batch_data.x.device
-
-                # 确保 gene_ids 在正确的设备上
-                if not isinstance(self.gene_ids, torch.Tensor):
-                    self.gene_ids = torch.as_tensor(
-                        self.gene_ids, dtype=torch.long, device=device
-                    )
-                else:
-                    self.gene_ids = self.gene_ids.to(device=device, dtype=torch.long)
-
                 all_pert_flags = self._construct_pert_flags(
                     batch_data, batch_size, device
                 )
@@ -363,6 +327,10 @@ class PPNEW:
                         input_gene_ids = (
                             ori_gene_values.nonzero()[:, 1].flatten().unique().sort()[0]
                         )  # 得到整个batch里面没有0表达的基因原始索引
+                    if len(input_gene_ids) > self.args.data_length:
+                        input_gene_ids = torch.randperm(
+                            len(input_gene_ids), device=device
+                        )[: self.args.data_length]
                     input_values = ori_gene_values[:, input_gene_ids]
                     input_pert_flags = all_pert_flags[:, input_gene_ids]
                     discrete_input_bins = self._discretize_expression(input_values)
@@ -388,91 +356,18 @@ class PPNEW:
                     for itr, de_idx in enumerate(batch_data.de_idx):
                         pred_de.append(pred_gene_values[itr, de_idx])
                         truth_de.append(t[itr, de_idx])
-        # 收集和对齐多GPU结果
-        results = self._gather_multiprocess_results(
-            pred, truth, pred_de, truth_de, pert_cat
+        results["pert_cat"] = np.array(pert_cat)
+        pred = torch.stack(pred)
+        truth = torch.stack(truth)
+        results["pred"] = pred.detach().cpu().numpy().astype(np.float64)
+        results["truth"] = truth.detach().cpu().numpy().astype(np.float64)
+        results["pred_de"] = (
+            torch.stack(pred_de).detach().cpu().numpy().astype(np.float64)
         )
-
-        return results
-
-    def _gather_multiprocess_results(self, pred, truth, pred_de, truth_de, pert_cat):
-        """收集和对齐多GPU的评估结果"""
-        results = {}
-
-        # 步骤1: 处理本地结果，转换为tensor
-        if len(pred) > 0:
-            pred = torch.stack(pred)
-            truth = torch.stack(truth)
-            pred_de = (
-                torch.stack(pred_de) if pred_de else torch.empty(0, device=pred.device)
-            )
-            truth_de = (
-                torch.stack(truth_de)
-                if truth_de
-                else torch.empty(0, device=pred.device)
-            )
-        else:
-            # 处理某些GPU没有数据的情况
-            device = next(self.model.parameters()).device
-            pred = torch.empty(0, self.num_genes, device=device)
-            truth = torch.empty(0, self.num_genes, device=device)
-            pred_de = torch.empty(0, device=device)
-            truth_de = torch.empty(0, device=device)
-
-        # 步骤2: 使用fabric收集所有GPU的结果
-        all_pred = self.fabric.all_gather(pred)
-        all_truth = self.fabric.all_gather(truth)
-        all_pred_de = self.fabric.all_gather(pred_de)
-        all_truth_de = self.fabric.all_gather(truth_de)
-
-        # 步骤3: 展平聚合的结果
-        all_pred = all_pred.view(-1, self.num_genes)
-        all_truth = all_truth.view(-1, self.num_genes)
-        all_pred_de = all_pred_de.view(-1) if all_pred_de.numel() > 0 else all_pred_de
-        all_truth_de = (
-            all_truth_de.view(-1) if all_truth_de.numel() > 0 else all_truth_de
+        results["truth_de"] = (
+            torch.stack(truth_de).detach().cpu().numpy().astype(np.float64)
         )
-
-        # 步骤4: 重新收集完整的pert_cat
-        all_pert_cat = self._collect_complete_pert_cat()
-
-        # 步骤5: 确保数据长度对齐
-        all_pert_cat = self._align_pert_cat_length(all_pert_cat, len(all_pred))
-
-        # 步骤6: 转换为numpy并返回
-        results["pert_cat"] = np.array(all_pert_cat)
-        results["pred"] = all_pred.detach().cpu().numpy().astype(np.float64)
-        results["truth"] = all_truth.detach().cpu().numpy().astype(np.float64)
-        results["pred_de"] = all_pred_de.detach().cpu().numpy().astype(np.float64)
-        results["truth_de"] = all_truth_de.detach().cpu().numpy().astype(np.float64)
-
         return results
-
-    def _collect_complete_pert_cat(self):
-        """重新收集完整的pert_cat列表"""
-        all_pert_cat = []
-        with torch.no_grad():
-            for batch_data in self.valid_loader:
-                all_pert_cat.extend(batch_data.pert)
-        return all_pert_cat
-
-    def _align_pert_cat_length(self, all_pert_cat, target_length):
-        """确保pert_cat长度与预测结果长度匹配"""
-        if len(all_pert_cat) != target_length:
-            if self.is_master:
-                print(
-                    f"Warning: pert_cat length {len(all_pert_cat)} != pred length {target_length}"
-                )
-
-            # 截断或填充以匹配
-            if len(all_pert_cat) > target_length:
-                all_pert_cat = all_pert_cat[:target_length]
-            else:
-                # 用最后一个条件填充
-                last_pert = all_pert_cat[-1] if all_pert_cat else "unknown"
-                all_pert_cat.extend([last_pert] * (target_length - len(all_pert_cat)))
-
-        return all_pert_cat
 
     def load_pretrained_model(self):
         ckpt_path = self.args.pretrained_model_path
