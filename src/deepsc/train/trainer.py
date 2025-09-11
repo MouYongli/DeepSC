@@ -137,10 +137,6 @@ class Trainer:
                 all_files.append(os.path.join(self.args.data_path, fn))
         if not all_files:
             raise ValueError(f"No .npz files found in directory: {self.args.data_path}")
-
-        # -- Key: stable deterministic order -- #
-        # To avoid order differences between different platforms/file systems,
-        # use 'natural sorting' here to ensure file_2 comes before file_10
         import re
 
         def _nat_key(s: str):

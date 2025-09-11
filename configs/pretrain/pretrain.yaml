@@ -27,7 +27,7 @@ use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简
 use_M_matrix: False
 use_moe_ffn: True
 expert_parallelism: False
-use_compile: True
+use_compile: False
 
 # L0 loss warmup parameters
 l0_warmup_start_epoch: 2  # 从第几个epoch开始加入l0 loss,并在一个epoch内线性增加到l0_lambda
