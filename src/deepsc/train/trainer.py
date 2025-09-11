@@ -410,6 +410,16 @@ class Trainer:
                 accm_ce_loss.append(ce_loss.item())
                 accm_l0_loss.append(l0_loss.item())
                 accm_mse_loss.append(mse_loss.item())
+                if self.is_master:
+                    data_iter.set_postfix(
+                        loss=sum(accm_loss) / len(accm_loss),
+                        mse_loss=sum(accm_mse_loss) / len(accm_mse_loss),
+                        ce_loss=sum(accm_ce_loss) / len(accm_ce_loss),
+                        l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
+                        per_bin_recall=sum(accm_per_bin_recall)
+                        / len(accm_per_bin_recall),
+                        total_acc=sum(accm_total_acc) / len(accm_total_acc),
+                    )
                 if final is not None:
                     predictions.append(final)
                     truths.append(discrete_expr_label)
@@ -425,16 +435,6 @@ class Trainer:
                     truths.append(torch.tensor([]))
                     accm_per_bin_recall.append(0.0)
                     accm_total_acc.append(0.0)
-                if self.is_master:
-                    data_iter.set_postfix(
-                        loss=sum(accm_loss) / len(accm_loss),
-                        mse_loss=sum(accm_mse_loss) / len(accm_mse_loss),
-                        ce_loss=sum(accm_ce_loss) / len(accm_ce_loss),
-                        l0_loss=sum(accm_l0_loss) / len(accm_l0_loss),
-                        per_bin_recall=sum(accm_per_bin_recall)
-                        / len(accm_per_bin_recall),
-                        total_acc=sum(accm_total_acc) / len(accm_total_acc),
-                    )
                 if self.args.enable_mse and mse_loss is not None:
                     all_masked_preds.append(masked_preds)
                     all_masked_labels.append(masked_labels)
@@ -583,17 +583,7 @@ class Trainer:
                 if not checkpoint_loaded:
                     # No checkpoint or loading failed, create new wandb run
                     logging.info("No checkpoint found, initializing new wandb run...")
-                    wandb.init(
-                        entity=self.args.get("wandb_team", "rwth_lfb"),
-                        project=self.args.get("wandb_project", "DeepSC"),
-                        name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
-                        tags=self.args.tags,
-                        config=dict(self.args),
-                    )
-                    logging.info(
-                        f"✅ Wandb initialized! Project: {wandb.run.project}, Entity: {wandb.run.entity}"
-                    )
-                    logging.info(f"🔗 Wandb URL: {wandb.run.url}")
+                    self.init_wandb()
             else:
                 # 非master进程只需要尝试加载checkpoint
                 self.checkpoint_reload()
@@ -603,17 +593,7 @@ class Trainer:
                 logging.info(
                     "resume_last_training=False, initializing new wandb run..."
                 )
-                wandb.init(
-                    entity=self.args.get("wandb_team", "rwth_lfb"),
-                    project=self.args.get("wandb_project", "DeepSC"),
-                    name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
-                    tags=self.args.tags,
-                    config=dict(self.args),
-                )
-                logging.info(
-                    f"✅ Wandb initialized! Project: {wandb.run.project}, Entity: {wandb.run.entity}"
-                )
-                logging.info(f"🔗 Wandb URL: {wandb.run.url}")
+                self.init_wandb()
         self.log_each = False
         # if self.args.model_name == "DeepSC":
         # self.model = torch.compile(self.model)
@@ -923,6 +903,22 @@ class Trainer:
         ).sum(dim=-1)
         batch_acc = torch.true_divide(correct_num, pred_num).mean().item()
         return batch_acc
+
+    def init_wandb(self):
+        """
+        Initialize wandb run with consistent configuration
+        """
+        wandb.init(
+            entity=self.args.get("wandb_team", "rwth_lfb"),
+            project=self.args.get("wandb_project", "DeepSC"),
+            name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
+            tags=self.args.tags,
+            config=dict(self.args),
+        )
+        logging.info(
+            f"✅ Wandb initialized! Project: {wandb.run.project}, Entity: {wandb.run.entity}"
+        )
+        logging.info(f"🔗 Wandb URL: {wandb.run.url}")
 
     def accumulate_or_log_classification_metrics(self, final, discrete_expr_label):
         non_padded_mask = discrete_expr_label != -100
