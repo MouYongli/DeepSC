@@ -4,6 +4,7 @@ import os
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
 from sklearn.model_selection import train_test_split
 from torch import nn
 from torch.optim import Adam
@@ -17,10 +18,15 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+import scipy.sparse
+
 import wandb
-from src.deepsc.data import DataCollator
-from src.deepsc.train.losses import LegacyLossCalculator
-from src.deepsc.utils import (
+
+from deepsc.data.dataset import GeneExpressionDatasetNew
+
+from deepsc.data import DataCollator
+from deepsc.train.losses import LegacyLossCalculator
+from deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     CosineAnnealingWarmupRestarts,
     check_moe_collapse,
@@ -41,7 +47,7 @@ from src.deepsc.utils import (
 
 
 class Trainer:
-    def __init__(self, args, fabric, model):
+    def __init__(self, args: DictConfig, fabric, model):
         self.number_of_files = len(
             [
                 f
@@ -81,8 +87,6 @@ class Trainer:
         self.loss_calculator = None
 
     def _load_all_csr_from_files(self, files):
-        import scipy.sparse
-
         matrices = []
         for file in files:
             m = scipy.sparse.load_npz(file)
@@ -93,10 +97,6 @@ class Trainer:
         return scipy.sparse.vstack(matrices)
 
     def _build_datasets_from_files(self, files_subset):
-        import scipy.sparse
-
-        from deepsc.data.dataset import GeneExpressionDatasetNew
-
         if isinstance(files_subset, (str, os.PathLike)):
             files_subset = [str(files_subset)]
         files_subset = list(files_subset)

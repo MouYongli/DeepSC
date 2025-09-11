@@ -127,4 +127,8 @@ torchrun \
   --model deepsc
 ```
 
-- [ ] `configs/pretrain/pretrain.yaml`文件中的`defaults`中的dataset是不是有必要？
+
+- [ ] `src/deepsc/train/trainer.py`文件中的`__init__`函数中的`epoch_lengh`参数类型是不是有必要? `num_epochs`, `num_files`命名规范注意一下，有时间就修改好，没时间先留着。
+
+- [ ] `src/deepsc/train/trainer.py`文件中使用了`deepsc.data.dataset.GeneExpressionDatasetNew`类，类的命名规范注意一下。
+- [ ] `src/deepsc/train/trainer.py`文件中Line 924，没有使用到recall和precision。
