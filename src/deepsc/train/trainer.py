@@ -31,8 +31,10 @@ from src.deepsc.utils import (
     draw_continuous_pred_label_scatter,
     draw_expr_emb_analysis,
     get_reduced_with_fabric,
+    load_checkpoint,
     log_stats,
     print_m_matrix,
+    restore_wandb_session,
     save_ckpt_fabric,
     seed_all,
 )
@@ -582,12 +584,16 @@ class Trainer:
                     # No checkpoint or loading failed, create new wandb run
                     logging.info("No checkpoint found, initializing new wandb run...")
                     wandb.init(
-                        # entity=self.args.get("wandb_team", "rwth_lfb"),
-                        project=self.args.get("wandb_project", "DeepSCNewProj"),
+                        entity=self.args.get("wandb_team", "rwth_lfb"),
+                        project=self.args.get("wandb_project", "DeepSC"),
                         name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
                         tags=self.args.tags,
                         config=dict(self.args),
                     )
+                    logging.info(
+                        f"✅ Wandb initialized! Project: {wandb.run.project}, Entity: {wandb.run.entity}"
+                    )
+                    logging.info(f"🔗 Wandb URL: {wandb.run.url}")
             else:
                 # 非master进程只需要尝试加载checkpoint
                 self.checkpoint_reload()
@@ -599,11 +605,15 @@ class Trainer:
                 )
                 wandb.init(
                     entity=self.args.get("wandb_team", "rwth_lfb"),
-                    project=self.args.get("wandb_project", "DeepSCNewProj"),
+                    project=self.args.get("wandb_project", "DeepSC"),
                     name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
                     tags=self.args.tags,
                     config=dict(self.args),
                 )
+                logging.info(
+                    f"✅ Wandb initialized! Project: {wandb.run.project}, Entity: {wandb.run.entity}"
+                )
+                logging.info(f"🔗 Wandb URL: {wandb.run.url}")
         self.log_each = False
         # if self.args.model_name == "DeepSC":
         # self.model = torch.compile(self.model)
@@ -842,84 +852,44 @@ class Trainer:
 
     def checkpoint_reload(self) -> bool:
         ckpt_file = os.path.join(self.args.ckpt_dir, "latest_checkpoint.ckpt")
-        if not os.path.exists(ckpt_file):
-            if self.is_master:
-                logging.warning(f"[WARN] Checkpoint not found: {ckpt_file}")
+
+        # Load checkpoint using the new utils function
+        checkpoint_info = load_checkpoint(
+            ckpt_file_path=ckpt_file,
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            fabric=self.fabric,
+            is_master=self.is_master,
+            resume_training=self.args.resume_last_training,
+        )
+
+        if not checkpoint_info["loaded"]:
+            print("No checkpoint found, initializing new wandb run...")
             return False
 
-        # Directly read state dict
-        remainder = self.fabric.load(ckpt_file)
+        # Set training state based on checkpoint
+        self.last_iteration = checkpoint_info["iteration"]
+        self.last_epoch = checkpoint_info["epoch"]
+        self.last_chunk_idx = checkpoint_info["chunk_idx"]
 
-        # Restore model, optimizer, scheduler parameters
-        if "model" in remainder:
-            self.model.load_state_dict(remainder["model"])
-        if "optimizer" in remainder and self.optimizer is not None:
-            self.optimizer.load_state_dict(remainder["optimizer"])
-        if (
-            "scheduler" in remainder
-            and self.scheduler is not None
-            and remainder["scheduler"] is not None
-        ):
-            self.scheduler.load_state_dict(remainder["scheduler"])
-
-        # Restore counters
-        if self.args.resume_last_training:
-            self.last_iteration = remainder.get("iteration", 0)
-            self.last_epoch = remainder.get("epoch", 1)
-            self.last_chunk_idx = remainder.get("chunk_idx", 0)
-        else:
-            self.last_iteration = 0
-            self.last_epoch = 1
-            self.last_chunk_idx = 0
-
-        # Restore wandb session
-        if self.is_master:
-            saved_run_id = remainder.get("wandb_run_id", None)
-            saved_wandb_config = remainder.get("wandb_config", None)
-
-            if saved_run_id:
-                logging.info(f"[INFO] Found saved wandb run_id: {saved_run_id}")
-                logging.info("[INFO] Using original run_id to restore wandb session...")
-                if saved_wandb_config:
-                    wandb.init(
-                        id=saved_run_id,
-                        resume="allow",
-                        project=saved_wandb_config.get(
-                            "project", self.args.get("wandb_project", "DeepSC")
-                        ),
-                        entity=saved_wandb_config.get(
-                            "entity", self.args.get("wandb_team", "rwth_lfb")
-                        ),
-                        name=saved_wandb_config.get(
-                            "name",
-                            f"{self.args.run_name}, lr: {self.args.learning_rate}",
-                        ),
-                        tags=saved_wandb_config.get("tags", self.args.tags),
-                        config=saved_wandb_config.get("config", dict(self.args)),
-                    )
-                else:
-                    wandb.init(
-                        id=saved_run_id,
-                        resume="allow",
-                        project=self.args.get("wandb_project", "DeepSC"),
-                        entity=self.args.get("wandb_team", "rwth_lfb"),
-                        name=f"{self.args.run_name}, lr: {self.args.learning_rate}",
-                        tags=self.args.tags,
-                        config=dict(self.args),
-                    )
-                logging.info(f"[INFO] Restored wandb session, run_id: {wandb.run.id}")
-                logging.info(
-                    f"[INFO] Project: {wandb.run.project}, Name: {wandb.run.name}"
-                )
-            else:
-                logging.info(
-                    "[INFO] wandb run_id not found in checkpoint, will create new wandb run"
-                )
-
-        if self.is_master:
-            logging.info(
-                f"[INFO] reload epoch={self.last_epoch}, chunk={self.last_chunk_idx}, iter={self.last_iteration}"
+        # Restore wandb session if this is the master process
+        if self.is_master and checkpoint_info["wandb_run_id"]:
+            wandb_restored = restore_wandb_session(
+                checkpoint_info["wandb_run_id"],
+                checkpoint_info["wandb_config"],
+                self.args,
+                self.is_master,
             )
+            if not wandb_restored:
+                logging.info(
+                    "[INFO] wandb run_id not found or restore failed, will create new wandb run"
+                )
+        elif self.is_master:
+            logging.info(
+                "[INFO] wandb run_id not found in checkpoint, will create new wandb run"
+            )
+
         return True
 
     def _calculate_per_bin_recall(self, final, discrete_expr_label, num_bins):

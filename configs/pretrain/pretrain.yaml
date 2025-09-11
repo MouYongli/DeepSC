@@ -3,6 +3,7 @@ defaults:
   - model: deepsc
 
 wandb_project: "DeepSC"
+wandb_team: "rwth_lfb"
 tags: ["256hd", "big dataset", "mean ce", "adaptive mse and no adaptiv0 l0", "medium learning rate"]
 run_name: "mogaide scheduler, mean ce, adaptive mse, 5bin ,hd256, alpha0.3"
 
@@ -64,14 +65,14 @@ seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
 num_device: 2
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
-valid_every: 200
+valid_every: 2000
 model_name: "DeepSC_heart9_blood_others_blood"
 grad_acc: 20
 learning_rate: 3e-4
 epoch: 10
 batch_size: 8
 num_bin: 5
-save_ckpt_every: 200
+save_ckpt_every: 2000
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000

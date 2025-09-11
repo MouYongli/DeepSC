@@ -1663,6 +1663,159 @@ def draw_continuous_pred_label_scatter(
         plt.close()
 
 
+def load_checkpoint(
+    ckpt_file_path,
+    model,
+    optimizer=None,
+    scheduler=None,
+    fabric=None,
+    is_master=True,
+    resume_training=True,
+):
+    """
+    Load checkpoint from file and restore model, optimizer, scheduler states.
+
+    Args:
+        ckpt_file_path: Path to the checkpoint file
+        model: Model to restore
+        optimizer: Optimizer to restore (optional)
+        scheduler: Scheduler to restore (optional)
+        fabric: Fabric instance for distributed training (optional)
+        is_master: Whether this is the master process
+        resume_training: Whether to resume training state (epoch, iteration, etc.)
+
+    Returns:
+        dict: Dictionary containing checkpoint information:
+            - 'loaded': bool, whether checkpoint was loaded successfully
+            - 'epoch': int, last epoch (if resume_training=True)
+            - 'iteration': int, last iteration (if resume_training=True)
+            - 'chunk_idx': int, last chunk index (if resume_training=True)
+            - 'wandb_run_id': str, wandb run id (if available)
+            - 'wandb_config': dict, wandb config (if available)
+    """
+    if not os.path.exists(ckpt_file_path):
+        if is_master:
+            logging.warning(f"[WARN] Checkpoint not found: {ckpt_file_path}")
+        return {
+            "loaded": False,
+            "epoch": 1,
+            "iteration": 0,
+            "chunk_idx": 0,
+            "wandb_run_id": None,
+            "wandb_config": None,
+        }
+
+    try:
+        # Load state dict
+        if fabric is not None:
+            remainder = fabric.load(ckpt_file_path)
+        else:
+            remainder = torch.load(ckpt_file_path, map_location="cpu")
+
+        # Restore model, optimizer, scheduler parameters
+        if "model" in remainder:
+            model.load_state_dict(remainder["model"])
+        if "optimizer" in remainder and optimizer is not None:
+            optimizer.load_state_dict(remainder["optimizer"])
+        if (
+            "scheduler" in remainder
+            and scheduler is not None
+            and remainder["scheduler"] is not None
+        ):
+            scheduler.load_state_dict(remainder["scheduler"])
+
+        # Prepare return values
+        result = {
+            "loaded": True,
+            "epoch": remainder.get("epoch", 1) if resume_training else 1,
+            "iteration": remainder.get("iteration", 0) if resume_training else 0,
+            "chunk_idx": remainder.get("chunk_idx", 0) if resume_training else 0,
+            "wandb_run_id": remainder.get("wandb_run_id", None),
+            "wandb_config": remainder.get("wandb_config", None),
+        }
+
+        if is_master:
+            logging.info(f"[INFO] Checkpoint loaded successfully from {ckpt_file_path}")
+            if resume_training:
+                logging.info(
+                    f"[INFO] Resume training from epoch={result['epoch']}, "
+                    f"chunk={result['chunk_idx']}, iter={result['iteration']}"
+                )
+
+        return result
+
+    except Exception as e:
+        if is_master:
+            logging.error(
+                f"[ERROR] Failed to load checkpoint from {ckpt_file_path}: {e}"
+            )
+        return {
+            "loaded": False,
+            "epoch": 1,
+            "iteration": 0,
+            "chunk_idx": 0,
+            "wandb_run_id": None,
+            "wandb_config": None,
+        }
+
+
+def restore_wandb_session(wandb_run_id, wandb_config, args, is_master=True):
+    """
+    Restore wandb session from checkpoint information.
+
+    Args:
+        wandb_run_id: Saved wandb run ID
+        wandb_config: Saved wandb configuration
+        args: Training arguments
+        is_master: Whether this is the master process
+
+    Returns:
+        bool: Whether wandb session was restored successfully
+    """
+    if not is_master or wandb_run_id is None:
+        return False
+
+    try:
+        logging.info(f"[INFO] Found saved wandb run_id: {wandb_run_id}")
+        logging.info("[INFO] Using original run_id to restore wandb session...")
+
+        if wandb_config:
+            wandb.init(
+                id=wandb_run_id,
+                resume="allow",
+                project=wandb_config.get(
+                    "project", args.get("wandb_project", "DeepSC")
+                ),
+                entity=wandb_config.get("entity", args.get("wandb_team", "rwth_lfb")),
+                name=wandb_config.get(
+                    "name",
+                    f"{args.run_name}, lr: {args.learning_rate}",
+                ),
+                tags=wandb_config.get("tags", args.tags),
+                config=wandb_config.get("config", dict(args)),
+            )
+        else:
+            wandb.init(
+                id=wandb_run_id,
+                resume="allow",
+                project=args.get("wandb_project", "DeepSC"),
+                entity=args.get("wandb_team", "rwth_lfb"),
+                name=f"{args.run_name}, lr: {args.learning_rate}",
+                tags=args.tags,
+                config=dict(args),
+            )
+
+        logging.info(
+            f"✅ Wandb restored! Project: {wandb.run.project}, Entity: {wandb.run.entity}, Run ID: {wandb.run.id}"
+        )
+        logging.info(f"🔗 Wandb URL: {wandb.run.url}")
+        return True
+
+    except Exception as e:
+        logging.error(f"[ERROR] Failed to restore wandb session: {e}")
+        return False
+
+
 def check_moe_collapse(model, epoch, iteration):
     """
     检查MoE塌缩情况并记录到日志
