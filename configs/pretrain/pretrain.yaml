@@ -7,6 +7,7 @@ defaults:
   - system: default
   - experiment: default
   - scheduler: default
+  - fabric: default
   - override hydra/job_logging: colorlog
 
 seed: 42
@@ -25,12 +26,6 @@ sequence_length: 1024
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用
 
 chunk_size: ${data.chunk_size}
-enable_l0: ${loss.enable_l0}
-enable_mse: ${loss.enable_mse}
-enable_ce: ${loss.enable_ce}
-use_moe_regressor: ${experiment.use_moe_regressor}
-use_M_matrix: ${experiment.use_M_matrix}
-use_moe_ffn: ${experiment.use_moe_ffn}
 
 
 

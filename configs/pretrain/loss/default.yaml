@@ -1,4 +1,5 @@
-# Loss weights
+_target_: src.deepsc.losses.losses.LossCalculator
+
 enable_l0: False
 enable_mse: True
 enable_ce: True

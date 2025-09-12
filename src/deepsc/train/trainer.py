@@ -2,6 +2,7 @@ import logging
 import math
 import os
 
+import hydra
 import numpy as np
 import scipy.sparse
 import torch
@@ -22,7 +23,7 @@ from tqdm import tqdm
 import wandb
 from deepsc.data import DataCollator
 from deepsc.data.dataset import GeneExpressionDataset
-from deepsc.train.losses import LossCalculator
+from deepsc.losses.losses import LossCalculator
 from deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     CosineAnnealingWarmupRestarts,
@@ -73,7 +74,6 @@ class Trainer:
         )
         self.class_counts = None
         self.dynamic_mask_probabilities = None
-        self.mse_loss_weight = self.args.loss.target_mse_loss_weight
         self.prepare_model()
         self.scheduler = self.create_scheduler(self.optimizer, self.args)
 
@@ -299,7 +299,7 @@ class Trainer:
                 masked_continuous_expr,
                 return_mask_prob=True,
             )
-        elif self.args.enable_ce:
+        elif self.args.loss.enable_ce:
             logits, y, _, expr_emb = self.model(
                 gene,
                 masked_discrete_expr,
@@ -314,17 +314,12 @@ class Trainer:
                 return_mask_prob=True,
             )
         loss, ce_loss, mse_loss, l0_loss = self.loss_calculator.calculate_loss(
-            self.args.loss.enable_ce,
-            self.args.loss.enable_mse,
             logits=logits,
             discrete_expr_label=discrete_expr_label,
             regression_output=regression_output,
             continuous_expr_label=continuous_expr_label,
             mask=mask,
             y=y,
-            ce_loss_weight=self.args.loss.ce_loss_weight,
-            mse_loss_weight=self.args.loss.target_mse_loss_weight,
-            l0_lambda=self.args.loss.l0_lambda,
             is_val=is_val,
         )
         if logits is not None:
@@ -505,7 +500,7 @@ class Trainer:
             val_mse_loss = get_reduced_with_fabric(
                 sum(accm_mse_loss) / len(accm_mse_loss), self.fabric
             )
-            if self.args.enable_ce:
+            if self.args.loss.enable_ce:
                 val_per_bin_recall = get_reduced_with_fabric(
                     100 * sum(accm_per_bin_recall) / len(accm_per_bin_recall),
                     self.fabric,
@@ -733,8 +728,6 @@ class Trainer:
                                     "train/total_acc": average_total_acc,
                                     "train/ce_loss": average_ce_loss,
                                     "train/l0_loss": average_l0_loss,
-                                    "TrainLossWeight/ce_loss_weight": self.args.loss.ce_loss_weight,
-                                    "TrainLossWeight/mse_loss_weight": self.mse_loss_weight,
                                     "epoch": epoch,
                                     "iteration": index,
                                     "learning_rate": self.optimizer.param_groups[0][
@@ -1058,10 +1051,11 @@ class Trainer:
 
     def init_loss_fn(self):
         """Initialize the loss calculator with current class counts and configuration"""
-        self.loss_calculator = LossCalculator(
-            args=self.args,
+        self.loss_calculator: LossCalculator = hydra.utils.instantiate(
+            self.args.loss,
             num_bins=self.args.model.num_bins,
             ignore_index=-100,
             class_counts=self.class_counts,
+            show_mse_loss_details=self.args.logging.show_mse_loss_details,
         )
         self.loss_calculator.init_loss_fn()

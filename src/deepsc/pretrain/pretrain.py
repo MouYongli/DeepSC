@@ -13,7 +13,6 @@ Author: DeepSC Team
 import hydra
 import torch.nn as nn
 from lightning.fabric import Fabric
-from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
 from deepsc.train.trainer import Trainer
@@ -43,15 +42,8 @@ def pretrain(cfg: DictConfig) -> None:
         and supports CUDA acceleration with mixed precision (bf16) training.
     """
     # Initialize PyTorch Lightning Fabric for distributed training
-    fabric = Fabric(
-        accelerator="cuda",  # Use CUDA for GPU acceleration
-        devices=cfg.system.num_device,  # Number of devices per node
-        num_nodes=cfg.system.num_nodes,  # Number of nodes for distributed training
-        strategy=DDPStrategy(find_unused_parameters=False),  # Distributed data parallel
-        precision="bf16-mixed",  # Mixed precision training for efficiency
-    )
+    fabric: Fabric = hydra.utils.instantiate(cfg.fabric)
     fabric.launch()
-
     # Initialize logging system with fabric's global rank
     setup_logging(rank=fabric.global_rank, log_path="./logs")
 
