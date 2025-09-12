@@ -283,7 +283,7 @@ class PPNEW:
                             loss=loss.item(),
                             avg_loss=total_loss / (batch + 1),
                         )
-            res = self.eval_new()
+            res = self.evaluate()
             val_metrics = compute_perturbation_metrics(
                 res,
                 self.pert_data.adata[self.pert_data.adata.obs["condition"] == "ctrl"],
@@ -291,7 +291,7 @@ class PPNEW:
             print("val_metrics at epoch 1: ")
             print(val_metrics)
 
-    def eval_new(self):
+    def evaluate(self):
         self.model.eval()
         pert_cat = []
         pred = []
@@ -340,7 +340,7 @@ class PPNEW:
                     )
                     mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
 
-                    regression_output, y, gene_emb, expr_emb = self.model(
+                    regression_output, _, _, _ = self.model(
                         gene_ids=mapped_input_gene_ids,
                         expression_bin=discrete_input_bins,
                         normalized_expr=input_values,

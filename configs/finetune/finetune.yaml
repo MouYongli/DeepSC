@@ -66,7 +66,7 @@ var_name_in_h5ad: "feature_name"
 obs_celltype_col: "cell_type"
 cell_type_count: 0
 use_moe_ffn: True
-data_length: 1500
+data_length: 3000
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
 num_device: 1
