@@ -56,7 +56,6 @@ class LossCalculator:
         self.ignore_index = ignore_index
         self.class_counts = class_counts
         self.epoch = 1
-        self.iteration = 0
         self.show_mse_loss_details = show_mse_loss_details
 
         # Initialize loss functions

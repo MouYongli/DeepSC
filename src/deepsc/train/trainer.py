@@ -53,25 +53,18 @@ class Trainer:
                 if os.path.isfile(os.path.join(args.data.data_path, f))
             ]
         )
-        self.log_each = False
         self.args = args
         self.fabric = fabric
         self.model = model
-        self.epoch = 1  # Add epoch class variable
-        self.iteration = 0
         self.last_iteration = 0
         self.last_chunk_idx = 0  # Used to record last processed chunk index
         seed_all(args.seed + self.fabric.global_rank)
         self.world_size = self.fabric.world_size
-        # self.device = torch.device("cuda", args.local_rank)
         self.is_master = self.fabric.global_rank == 0
         self.data_is_directory = os.path.isdir(self.args.data.data_path)
         self.all_files = None  # List of all .npz files in directory
         self.file_chunks = None  # List of file subsets split by chunk_size
         self.chunk_size = self.args.data.chunk_size
-        self.shuffle_files_each_epoch = getattr(
-            self.args, "shuffle_files_each_epoch", True
-        )
         self.class_counts = None
         self.dynamic_mask_probabilities = None
         self.prepare_model()
@@ -210,7 +203,6 @@ class Trainer:
         )
         warmup_ratio = self.args.scheduler.warmup_ratio
         warmup_steps = math.ceil(total_steps * warmup_ratio)
-        main_steps = total_steps - warmup_steps
         if self.args.scheduler.use_scbert_scheduler:
             scheduler = CosineAnnealingWarmupRestarts(
                 optimizer,
@@ -343,7 +335,6 @@ class Trainer:
             self.args.model.num_bins + 1, device=self.fabric.device
         )
         self.softmax_total_count = 0
-        self.log_each = True
         self.model.eval()
         predictions, truths = [], []
         all_expr_embs = []
@@ -566,12 +557,10 @@ class Trainer:
                     "resume_last_training=False, initializing new wandb run..."
                 )
                 self.init_wandb()
-        self.log_each = False
         # if self.args.model_name == "DeepSC":
         # self.model = torch.compile(self.model)
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         for epoch in range(start_epoch, self.args.epoch + 1):
-            self.epoch = epoch  # Update class variable epoch
             self._prepare_file_plan()
             # 确定本epoch从哪个chunk开始（仅当从checkpoint恢复且仍在同一epoch时跳过已完成的chunk）
             start_chunk_idx = (
@@ -637,11 +626,9 @@ class Trainer:
                 for index, data in enumerate(data_iter):
                     if index < self.last_iteration:
                         continue
-                    self.iteration = index
                     # Update loss calculator progress
                     if self.loss_calculator is not None:
-                        self.loss_calculator.epoch = self.epoch
-                        self.loss_calculator.iteration = self.iteration
+                        self.loss_calculator.epoch = epoch
 
                     loss, final, mse_loss, ce_loss, l0_loss, y = self._process_batch(
                         data
@@ -661,7 +648,7 @@ class Trainer:
                         final, discrete_expr_label, self.args.model.num_bins
                     )
                     self.accumulate_or_log_classification_metrics(
-                        final, discrete_expr_label
+                        final, discrete_expr_label, index
                     )
                     total_acc = self._calculate_accuracy(final, discrete_expr_label)
                     accm_loss.append(loss.item())
@@ -767,12 +754,9 @@ class Trainer:
                     iteration=0,
                     chunk_idx=self.current_chunk_idx + 1,
                 )
-                # at the end of each epoch, reset the iteration
-                self.iteration = 0
             chunk_bar.close()
             self.last_chunk_idx = 0
             self.validate(epoch)
-            self.log_each = False
             save_ckpt_fabric(
                 epoch + 1,
                 self.model,
@@ -886,7 +870,9 @@ class Trainer:
         )
         logging.info(f"🔗 Wandb URL: {wandb.run.url}")
 
-    def accumulate_or_log_classification_metrics(self, final, discrete_expr_label):
+    def accumulate_or_log_classification_metrics(
+        self, final, discrete_expr_label, index
+    ):
         non_padded_mask = discrete_expr_label != -100
         valid_labels = discrete_expr_label[non_padded_mask]
         valid_preds = final[non_padded_mask]
@@ -905,7 +891,7 @@ class Trainer:
         self.acc_recall.append(average_recall)
         self.acc_precision.append(average_precision)
         self.acc_macro_f1.append(macro_f1)
-        if self.iteration % self.args.logging.log_on_wandb_every == 0:
+        if index % self.args.logging.log_on_wandb_every == 0:
             if self.is_master:
                 average_acc_recall = sum(self.acc_recall) / len(self.acc_recall)
                 average_acc_precision = sum(self.acc_precision) / len(
