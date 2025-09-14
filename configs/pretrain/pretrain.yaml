@@ -11,7 +11,6 @@ defaults:
   - override hydra/job_logging: colorlog
 
 seed: 42
-valid_every: 2000
 model_name: "DeepSC"
 grad_acc: 20
 learning_rate: 3e-4
@@ -22,10 +21,8 @@ num_bin: 5
 resume_last_training: True
 save_ckpt: True
 save_ckpt_every: 2000
-sequence_length: 1024
+valid_every: 2000
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用
-
-chunk_size: ${data.chunk_size}
 
 
 

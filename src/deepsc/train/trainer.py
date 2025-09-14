@@ -149,42 +149,27 @@ class Trainer:
         self.file_chunks = chunks
 
     def load_data(self):
-        dynamic_mask_probabilities = self.dynamic_mask_probabilities
+        self.args.data.DataCollator.dynamic_mask_probabilities = (
+            self.dynamic_mask_probabilities
+        )
         logging.info("Dynamic mask probabilities in train:")
-        logging.info(dynamic_mask_probabilities)
+        logging.info(self.args.data.DataCollator.dynamic_mask_probabilities)
+        data_collator: DataCollator = hydra.utils.instantiate(
+            self.args.data.DataCollator,
+        )
         train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
             sampler=self.train_sampler,
             num_workers=8,
-            collate_fn=DataCollator(
-                do_padding=True,
-                pad_token_id=0,
-                pad_value=0,
-                do_mlm=True,
-                do_binning=True,
-                max_length=self.args.sequence_length,
-                num_genes=self.args.model.num_genes,
-                num_bins=self.args.model.num_bins,
-                dynamic_mask_probabilities=dynamic_mask_probabilities,
-            ),
+            collate_fn=data_collator,
         )
         val_loader = DataLoader(
             self.val_dataset,
             batch_size=self.args.batch_size,
             sampler=self.val_sampler,
             num_workers=4,
-            collate_fn=DataCollator(
-                do_padding=True,
-                pad_token_id=0,
-                pad_value=0,
-                do_mlm=True,
-                do_binning=True,
-                max_length=self.args.sequence_length,
-                num_genes=self.args.model.num_genes,
-                num_bins=self.args.model.num_bins,
-                dynamic_mask_probabilities=dynamic_mask_probabilities,
-            ),
+            collate_fn=data_collator,
         )
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
             train_loader, val_loader
@@ -944,7 +929,9 @@ class Trainer:
         Returns: torch.Tensor, shape is (num_bins+1,), contains sample count for each bin
         """
         logging.info("Calculating class counts")
-
+        data_collator: DataCollator = hydra.utils.instantiate(
+            self.args.data.DataCollator,
+        )
         # Initialize counter
         class_counts = torch.zeros(self.args.model.num_bins + 1, dtype=torch.long)
 
@@ -954,17 +941,7 @@ class Trainer:
             batch_size=32,  # Use smaller batch size to save memory
             shuffle=False,
             num_workers=4,
-            collate_fn=DataCollator(
-                do_padding=True,
-                pad_token_id=0,
-                pad_value=0,
-                do_mlm=False,  # Don't use masking, get original data
-                do_binning=True,
-                max_length=self.args.sequence_length,
-                num_genes=self.args.model.num_genes,
-                num_bins=self.args.model.num_bins,
-                # dynamic_mask_probabilities not needed here, as we're just counting distribution
-            ),
+            collate_fn=data_collator,
         )
 
         total_samples = 0
