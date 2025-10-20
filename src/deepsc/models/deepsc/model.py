@@ -1046,7 +1046,7 @@ class DeepSC(nn.Module):
         num_layers_expr = num_layers - gene_embedding_participate_til_layer
         self.num_heads = num_heads
         self.layers = nn.ModuleList()
-        for i in range(num_layers):
+        for i in range(gene_embedding_participate_til_layer):
             self.layers.append(
                 FlashDeepSCTransformerBlock(
                     embedding_dim,
