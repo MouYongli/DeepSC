@@ -1,0 +1,22 @@
+chunk_size: 1
+enable_data_augmentation: False  # 是否启用数据增强（动态掩码概率）
+data_path: "/home/angli/baseline/DeepSC/data/processed/small_example"
+dataset_size: 200000
+
+DataCollator:
+  _target_: deepsc.data.data_collator.DataCollator
+  num_bins: ${num_bin}
+  pad_token_id: 0
+  pad_value: 0
+  num_genes: 34683
+  do_padding: True
+  do_mlm: True
+  do_binning: True
+  mlm_probability: 0.15
+  max_length: 1024
+  sampling: True
+  keep_first_n_tokens: 1
+  gene_from_zero: True
+  dynamic_mask_probabilities: None
+  use_max_cell_length: True
+  cell_type: False

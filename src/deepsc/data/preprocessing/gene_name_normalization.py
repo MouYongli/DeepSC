@@ -1,32 +1,51 @@
 import csv
 import logging
+import os
 
+import argparse
+from deepsc.data.preprocessing.get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 from deepsc.utils import setup_logging
-from .config import GENE_MAP_PATH, HGNC_DATABASE
-from .get_feature_name_3ca_cxg import get_feature_name_3ca_cxg
 
 
 def map_genes_to_hgnc(input_gene_file, hgnc_database_file, output_file):
+    """Map genes from input file to HGNC database entries.
+
+    Reads the HGNC database to build a case-insensitive mapping of gene symbols
+    to their Ensembl IDs and approved names. Then matches genes from the input
+    file against this database and writes the results to a CSV output file.
+
+    Args:
+        input_gene_file (str): Path to the input file containing gene names,
+            one per line.
+        hgnc_database_file (str): Path to the HGNC database file in TSV format.
+        output_file (str): Path to the output CSV file where matched gene
+            mappings will be written.
+
+    Returns:
+        None: Results are written to the output file.
+    """
     # read HGNC database and build a case-insensitive mapping
     symbol_to_info = {}
     with open(hgnc_database_file, "r") as f:
         reader = csv.DictReader(f, delimiter="\t")
         for row in reader:
-            eid = row["Ensembl gene ID"].strip()
-            approved = row["Approved symbol"].strip()
-            aliases = (
-                row["Alias symbol"].strip().split(",")
-                if row["Alias symbol"].strip()
-                else []
-            )
-            previous = (
-                row["Previous symbol"].strip().split(",")
-                if row["Previous symbol"].strip()
-                else []
-            )
-            all_names = [approved] + aliases + previous
-            for name in all_names:
-                symbol_to_info[name.upper()] = (eid, approved)
+            # Handle potential None values by using empty string as fallback
+            eid = (row["Ensembl gene ID"] or "").strip()
+            approved = (row["Approved symbol"] or "").strip()
+
+            # Handle alias symbols with None check
+            alias_value = (row["Alias symbol"] or "").strip()
+            aliases = alias_value.split(",") if alias_value else []
+
+            # Handle previous symbols with None check
+            previous_value = (row["Previous symbol"] or "").strip()
+            previous = previous_value.split(",") if previous_value else []
+            # Only process if we have a valid approved symbol
+            if approved:
+                all_names = [approved] + aliases + previous
+                for name in all_names:
+                    if name.strip():  # Only add non-empty names
+                        symbol_to_info[name.strip().upper()] = (eid, approved)
 
     # match genes from input file against the HGNC database
     matched_rows = []
@@ -57,6 +76,21 @@ def map_genes_to_hgnc(input_gene_file, hgnc_database_file, output_file):
 
 # function to read gene files and merge them based on Approved Name
 def read_gene_file(file_path, source):
+    """Read gene mapping file and create entries with source information.
+
+    Reads a CSV file containing gene mappings (feature_name, Ensembl id,
+    Approved Name) and creates entries with additional metadata indicating
+    which dataset the genes occur in.
+
+    Args:
+        file_path (str): Path to the CSV file containing gene mappings.
+        source (str): Source identifier, either "cxg" for CellxGene or
+            "3ca" for 3CA dataset.
+
+    Returns:
+        list: List of dictionaries containing gene mapping information
+            with occurrence flags for each dataset.
+    """
     entries = []
     with open(file_path, "r") as f:
         reader = csv.DictReader(f)
@@ -73,6 +107,21 @@ def read_gene_file(file_path, source):
 
 
 def merge_gene_mappings(cxg_file, ca3_file, merged_output):
+    """Merge gene mappings from CellxGene and 3CA datasets.
+
+    Combines gene mapping files from two sources (CellxGene and 3CA),
+    ensuring that only genes with approved names present in both datasets
+    are included in the final output. Assigns unique IDs to each approved
+    gene name and writes the merged results to a CSV file.
+
+    Args:
+        cxg_file (str): Path to the CellxGene gene mapping CSV file.
+        ca3_file (str): Path to the 3CA gene mapping CSV file.
+        merged_output (str): Path to the output CSV file for merged results.
+
+    Returns:
+        None: Results are written to the merged output file.
+    """
 
     entries_cxg = read_gene_file(cxg_file, "cxg")
     entries_3ca = read_gene_file(ca3_file, "3ca")
@@ -110,7 +159,7 @@ def merge_gene_mappings(cxg_file, ca3_file, merged_output):
         key=lambda x: (x["Approved Name"].upper(), x["feature_name"].upper())
     )
 
-    # 为每个唯一的 Approved Name 分配 ID
+    # Assign unique IDs to each unique Approved Name
     approved_to_id = {
         name: idx
         for idx, name in enumerate(sorted({e["Approved Name"] for e in final_entries}))
@@ -136,36 +185,89 @@ def merge_gene_mappings(cxg_file, ca3_file, merged_output):
 def process_gene_names(
     cxg_input_path: str,
     ca3_input_path: str,
+    gene_map_path: str,
     hgnc_database_path: str,
+    output_path: str,
 ):
-    cxg_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/cxg_matched_genes.csv"
-    ca3_mapped_output = "/home/angli/DeepSC/scripts/normalization_0527/result_0527/3ca_matched_genes.csv"
+    """Process and normalize gene names from both CellxGene and 3CA datasets.
+
+    Orchestrates the complete gene name normalization pipeline by mapping
+    genes from both datasets to HGNC database entries and then merging
+    the results into a unified gene mapping file.
+
+    Args:
+        cxg_input_path (str): Path to the CellxGene input gene names file.
+        ca3_input_path (str): Path to the 3CA input gene names file.
+        gene_map_path (str): Path to the final merged gene mapping output file.
+        hgnc_database_path (str): Path to the HGNC database file.
+        output_path (str): Directory path for storing intermediate output files.
+
+    Returns:
+        None: Results are written to the specified output files.
+    """
+    cxg_mapped_output = os.path.join(output_path, "cxg_matched_genes.csv")
+    ca3_mapped_output = os.path.join(output_path, "3ca_matched_genes.csv")
     main_log_file = setup_logging("preprocessing", "./logs")
     map_genes_to_hgnc(cxg_input_path, hgnc_database_path, cxg_mapped_output)
     map_genes_to_hgnc(ca3_input_path, hgnc_database_path, ca3_mapped_output)
-    merge_gene_mappings(cxg_mapped_output, ca3_mapped_output, GENE_MAP_PATH)
+    merge_gene_mappings(cxg_mapped_output, ca3_mapped_output, gene_map_path)
 
 
 def gene_name_normalization(
-    hgnc_database_path: str = HGNC_DATABASE,
+    hgnc_database_path: str,
+    output_path: str,
+    gene_map_path: str,
 ):
+    """Normalize gene names from CellxGene and 3CA datasets using HGNC database.
+
+    Main entry point for the gene name normalization pipeline. This function
+    coordinates the extraction of gene names from both CellxGene and 3CA
+    datasets, maps them to standardized HGNC symbols, and produces a unified
+    gene mapping file for downstream analysis.
+
+    Args:
+        hgnc_database_path (str, optional): Path to the HGNC database file.
+        output_path (str, optional): Directory path for intermediate output files.
+        gene_map_path (str, optional): Path to the final gene mapping output file.
+
+    Returns:
+        None: Results are written to the gene mapping file.
     """
-    Main function to normalize gene names from CXG and 3CA datasets.
-    """
-    # cxg_input_path, ca3_input_path = get_feature_name_3ca_cxg()
-    cxg_input_path = "/home/angli/DeepSC/scripts/preprocessing/cxg_gene_names.txt"
-    ca3_input_path = "/home/angli/DeepSC/scripts/preprocessing/3ca_gene_names.txt"
+    # use the old cellxgene feature names to generate old gene map
+    # cxg_input_path = "/home/angli/DeepSC/scripts/preprocessing/cxg_gene_names.txt"
+    cxg_input_path = os.path.join(output_path, "cxg_gene_names.txt")
+    ca3_input_path = os.path.join(output_path, "3ca_gene_names.txt")
     process_gene_names(
         cxg_input_path=cxg_input_path,
         ca3_input_path=ca3_input_path,
         hgnc_database_path=hgnc_database_path,
+        output_path=output_path,
+        gene_map_path=gene_map_path,
     )
 
 
 if __name__ == "__main__":
-    cxg_feature_names, ca3_feature_names = get_feature_name_3ca_cxg()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hgnc_database_path", type=str, required=True)
+    parser.add_argument("--output_path", type=str, required=True)
+    parser.add_argument("--gene_map_path", type=str, required=True)
+    parser.add_argument("--tripleca_path", type=str, required=True)
+    parser.add_argument("--cellxgene_path", type=str, required=True)
+    args = parser.parse_args()
+
+    cxg_feature_names, ca3_feature_names = get_feature_name_3ca_cxg(
+        output_path=args.output_path,
+        tripleca_path=args.tripleca_path,
+        cellxgene_path=args.cellxgene_path,
+    )
+
     print(f"CXG feature names saved to: {cxg_feature_names}")
     print(f"3CA feature names saved to: {ca3_feature_names}")
     logging.info(f"CXG feature names saved to: {cxg_feature_names}")
     logging.info(f"3CA feature names saved to: {ca3_feature_names}")
-    gene_name_normalization()
+    # gene_name_normalization()
+    gene_name_normalization(
+        hgnc_database_path=args.hgnc_database_path,
+        output_path=args.output_path,
+        gene_map_path=args.gene_map_path,
+    )

@@ -2,7 +2,6 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.txt
 *.tsv
 *.idx
 # C extensions
@@ -199,4 +198,4 @@ tests/test_dummy.py
 .logs/
 logs/
 test_checkpoints/
-data/
+/data/

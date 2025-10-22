@@ -1,7 +1,11 @@
 import math
+import os
 
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import scanpy as sc
+import seaborn as sns
 import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
@@ -14,10 +18,15 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from deepsc.data.dataset import GeneExpressionDatasetMapped
+from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
+    GeneExpressionDatasetMappedWithGlobalCelltype,
+)
 from src.deepsc.data import DataCollator
 from src.deepsc.utils import (
     CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
+    extract_state_dict_with_encoder_prefix,
+    report_loading_result,
+    sample_weight_norms,
     seed_all,
 )
 
@@ -30,6 +39,13 @@ class CellTypeAnnotation:
         self.world_size = self.fabric.world_size
         seed_all(args.seed + self.fabric.global_rank)
         self.is_master = self.fabric.global_rank == 0
+        self.epoch = 0  # 初始化epoch变量用于绘图
+
+        # 首先构建数据集以确定正确的celltype数量
+        self.build_dataset_sampler_from_h5ad()
+
+        if self.args.pretrained_model_path and self.args.load_pretrained_model:
+            self.load_pretrained_model()
         self.optimizer = Adam(self.model.parameters(), lr=self.args.learning_rate)
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.init_loss_fn()
@@ -48,7 +64,7 @@ class CellTypeAnnotation:
         返回: (num_bins,) 每个bin的平均交叉熵损失
         计算平均时不包括bin0
         """
-        num_bins = self.args.cell_type_count
+        num_bins = self.cell_type_count
         ce_losses = []
         logits_flat = logits.reshape(-1, num_bins)
         labels_flat = discrete_expr_label.reshape(-1)
@@ -103,30 +119,119 @@ class CellTypeAnnotation:
 
     def build_dataset_sampler_from_h5ad(self):
         print("Building dataset sampler from h5ad file...")
-        adata = sc.read_h5ad(self.args.data_path)
 
-        # 根据样本索引划分
-        train_idx, test_idx = train_test_split(
-            range(adata.n_obs),
-            test_size=0.1,  # 20% 测试集
-            random_state=42,  # 固定随机种子
+        # 检查是否使用分开的数据集
+        use_separated_datasets = getattr(
+            self.args, "seperated_train_eval_dataset", True
         )
 
-        # 划分数据集
-        adata_train = adata[train_idx].copy()
-        adata_test = adata[test_idx].copy()
+        if use_separated_datasets:
+            # 使用两个分开的数据集
+            print("Using separated train/eval datasets...")
+            adata_train = sc.read_h5ad(self.args.data_path)
+            adata_test = sc.read_h5ad(self.args.data_path_eval)
+        else:
+            # 使用单个数据集进行分层采样分割
+            print("Using single dataset with stratified split...")
+            adata = sc.read_h5ad(self.args.data_path)
 
-        self.train_dataset = GeneExpressionDatasetMapped(
-            h5ad=adata_train,
+            # 获取细胞类型标签
+            cell_types = adata.obs[self.args.obs_celltype_col].astype(str)
+
+            # 进行分层采样，确保每个细胞类型在训练集和测试集中的比例相同
+            test_size = getattr(self.args, "test_size", 0.2)  # 默认20%测试集
+            train_idx, test_idx = train_test_split(
+                range(adata.n_obs),
+                test_size=test_size,
+                random_state=42,
+                stratify=cell_types,  # 按细胞类型分层采样
+            )
+
+            # 分割数据集
+            adata_train = adata[train_idx].copy()
+            adata_test = adata[test_idx].copy()
+
+            print(
+                f"分层采样结果：训练集 {len(train_idx)} 个细胞，测试集 {len(test_idx)} 个细胞"
+            )
+
+            # 验证分层采样效果
+            train_type_counts = adata_train.obs[
+                self.args.obs_celltype_col
+            ].value_counts()
+            test_type_counts = adata_test.obs[self.args.obs_celltype_col].value_counts()
+            print("分层采样验证（训练集 vs 测试集比例）:")
+            for celltype in train_type_counts.index:
+                if celltype in test_type_counts.index:
+                    train_ratio = train_type_counts[celltype] / len(train_idx)
+                    test_ratio = test_type_counts[celltype] / len(test_idx)
+                    print(f"  {celltype}: {train_ratio:.3f} vs {test_ratio:.3f}")
+
+        print(f"训练数据集大小: {adata_train.n_obs}")
+        print(f"测试数据集大小: {adata_test.n_obs}")
+
+        # 获取训练集和测试集的细胞类型交集（只训练和评估共同拥有的类型）
+        train_celltypes = set(
+            adata_train.obs[self.args.obs_celltype_col].astype(str).unique()
+        )
+        test_celltypes = set(
+            adata_test.obs[self.args.obs_celltype_col].astype(str).unique()
+        )
+
+        # 计算交集 - 这是我们真正关心的细胞类型
+        common_celltypes = train_celltypes & test_celltypes
+        print(f"训练集细胞类型数量: {len(train_celltypes)}")
+        print(f"测试集细胞类型数量: {len(test_celltypes)}")
+        print(f"共同细胞类型数量: {len(common_celltypes)}")
+        print(f"共同细胞类型: {sorted(common_celltypes)}")
+
+        # 基于交集创建映射表（只包含交集中的类型）
+        self.common_celltypes = sorted(common_celltypes)
+        self.type2id = {
+            celltype: idx for idx, celltype in enumerate(self.common_celltypes)
+        }
+        self.id2type = {
+            idx: celltype for idx, celltype in enumerate(self.common_celltypes)
+        }
+
+        # 细胞类型数量就是交集大小
+        self.cell_type_count = len(common_celltypes)
+        print(f"使用细胞类型数量（交集）: {self.cell_type_count}")
+
+        # 过滤训练和测试数据，只保留交集中的细胞类型
+        print("Filtering datasets to keep only common cell types...")
+        train_mask = (
+            adata_train.obs[self.args.obs_celltype_col]
+            .astype(str)
+            .isin(common_celltypes)
+        )
+        test_mask = (
+            adata_test.obs[self.args.obs_celltype_col]
+            .astype(str)
+            .isin(common_celltypes)
+        )
+
+        adata_train_filtered = adata_train[train_mask].copy()
+        adata_test_filtered = adata_test[test_mask].copy()
+
+        print(f"训练数据：{adata_train.n_obs} -> {adata_train_filtered.n_obs} 个细胞")
+        print(f"测试数据：{adata_test.n_obs} -> {adata_test_filtered.n_obs} 个细胞")
+
+        self.train_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
+            h5ad=adata_train_filtered,
             csv_path=self.args.csv_path,
             var_name_col=self.args.var_name_in_h5ad,
             obs_celltype_col=self.args.obs_celltype_col,
+            global_type2id=self.type2id,
+            global_id2type=self.id2type,
         )
-        self.eval_dataset = GeneExpressionDatasetMapped(
-            h5ad=adata_test,
+        self.eval_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
+            h5ad=adata_test_filtered,
             csv_path=self.args.csv_path,
             var_name_col=self.args.var_name_in_h5ad,
             obs_celltype_col=self.args.obs_celltype_col,
+            global_type2id=self.type2id,
+            global_id2type=self.id2type,
         )
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
         self.eval_sampler = DistributedSampler(self.eval_dataset, shuffle=True)
@@ -274,12 +379,19 @@ class CellTypeAnnotation:
 
             y_true = torch.cat(cell_type_ids, dim=0).numpy()
             y_pred = torch.cat(predictions, dim=0).numpy()
+
+            # 现在所有类型都是交集，直接计算即可
+            eval_labels = np.arange(self.cell_type_count)
             accuracy = accuracy_score(y_true, y_pred)
-            precision = precision_score(y_true, y_pred, average="macro")
-            recall = recall_score(y_true, y_pred, average="macro")
-            macro_f1 = f1_score(y_true, y_pred, average="macro")
-            print("唯一的真实 cell_type_ids:", np.unique(y_true))
-            print("唯一的预测 predictions:", np.unique(y_pred))
+            precision = precision_score(
+                y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+            )
+            recall = recall_score(
+                y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+            )
+            macro_f1 = f1_score(
+                y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+            )
 
         if self.is_master:
             print(
@@ -291,12 +403,238 @@ class CellTypeAnnotation:
                 f"Macro F1: {macro_f1:.4f}"
             )
 
+            # 绘制评估图表
+            self.plot_evaluation_charts(y_true, y_pred)
+
         return total_loss / total_num, total_error / total_num
 
+    def process_evaluation_data(self, y_true, y_pred):
+        """
+        处理评估数据，计算指标并准备绘图所需的数据
+
+        Returns:
+            dict: 包含处理后的数据和指标，如果没有有效类别则返回None
+        """
+        from sklearn.metrics import classification_report
+
+        # 现在所有类型都是交集，直接使用即可
+        eval_labels = np.arange(self.cell_type_count)  # 0 到 cell_type_count-1
+        target_names = [self.id2type[i] for i in eval_labels]
+
+        # 计算分类指标
+        report = classification_report(
+            y_true,
+            y_pred,
+            labels=eval_labels,
+            target_names=target_names,
+            output_dict=True,
+            zero_division=0,
+        )
+
+        # 提取指标数据
+        metrics_data = {
+            "categories": target_names,
+            "recalls": [report[name]["recall"] for name in target_names],
+            "precisions": [report[name]["precision"] for name in target_names],
+            "f1_scores": [report[name]["f1-score"] for name in target_names],
+            "supports": [report[name]["support"] for name in target_names],
+        }
+
+        # 计算类别占比
+        total_samples = sum(metrics_data["supports"])
+        metrics_data["proportions"] = [
+            s / total_samples for s in metrics_data["supports"]
+        ]
+        metrics_data["unique_labels"] = eval_labels
+        metrics_data["y_true"] = y_true
+        metrics_data["y_pred"] = y_pred
+
+        return metrics_data
+
+    def plot_evaluation_charts(self, y_true, y_pred):
+        """
+        绘制评估图表：分类指标详情和混淆矩阵
+        """
+        from sklearn.metrics import confusion_matrix
+
+        # 处理评估数据
+        processed_data = self.process_evaluation_data(y_true, y_pred)
+        if processed_data is None:
+            print("Warning: No valid categories found for plotting")
+            return
+
+        # 解包处理后的数据
+        categories = processed_data["categories"]
+        recalls = processed_data["recalls"]
+        precisions = processed_data["precisions"]
+        f1_scores = processed_data["f1_scores"]
+        supports = processed_data["supports"]
+        proportions = processed_data["proportions"]
+        unique_labels = processed_data["unique_labels"]
+        y_true = processed_data["y_true"]
+        y_pred = processed_data["y_pred"]
+
+        # 创建保存图表的目录
+        save_dir = (
+            self.args.save_dir
+            if hasattr(self.args, "save_dir") and self.args.save_dir
+            else "./evaluation_plots"
+        )
+        os.makedirs(save_dir, exist_ok=True)
+
+        # 绘制图1：分类指标详情（4个子图）
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(
+            f"Classification Metrics by Cell Type - Epoch {self.epoch}",
+            fontsize=16,
+            fontweight="bold",
+        )
+
+        # 子图1: Recall
+        bars1 = ax1.bar(range(len(categories)), recalls, color="skyblue", alpha=0.8)
+        ax1.set_title("Recall by Cell Type")
+        ax1.set_ylabel("Recall")
+        ax1.set_xticks(range(len(categories)))
+        ax1.set_xticklabels(categories, rotation=45, ha="right")
+        ax1.set_ylim(0, 1)
+        ax1.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars1):
+            height = bar.get_height()
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        # 子图2: Precision
+        bars2 = ax2.bar(
+            range(len(categories)), precisions, color="lightcoral", alpha=0.8
+        )
+        ax2.set_title("Precision by Cell Type")
+        ax2.set_ylabel("Precision")
+        ax2.set_xticks(range(len(categories)))
+        ax2.set_xticklabels(categories, rotation=45, ha="right")
+        ax2.set_ylim(0, 1)
+        ax2.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars2):
+            height = bar.get_height()
+            ax2.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        # 子图3: F1 Score
+        bars3 = ax3.bar(
+            range(len(categories)), f1_scores, color="lightgreen", alpha=0.8
+        )
+        ax3.set_title("F1 Score by Cell Type")
+        ax3.set_ylabel("F1 Score")
+        ax3.set_xticks(range(len(categories)))
+        ax3.set_xticklabels(categories, rotation=45, ha="right")
+        ax3.set_ylim(0, 1)
+        ax3.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars3):
+            height = bar.get_height()
+            ax3.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        # 子图4: 类别占比
+        bars4 = ax4.bar(range(len(categories)), proportions, color="gold", alpha=0.8)
+        ax4.set_title("Class Proportion")
+        ax4.set_ylabel("Proportion")
+        ax4.set_xticks(range(len(categories)))
+        ax4.set_xticklabels(categories, rotation=45, ha="right")
+        ax4.set_ylim(0, max(proportions) * 1.1 if proportions else 1)
+        ax4.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars4):
+            height = bar.get_height()
+            ax4.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + height * 0.05,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+
+        plt.tight_layout()
+        metrics_file = os.path.join(
+            save_dir, f"classification_metrics_epoch_{self.epoch}.png"
+        )
+        plt.savefig(metrics_file, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 绘制图2：混淆矩阵（只包含真实标签中的类别）
+        cm = confusion_matrix(y_true, y_pred, labels=unique_labels)
+        cm_normalized = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
+        cm_df = pd.DataFrame(
+            cm_normalized,
+            index=categories[: cm.shape[0]],
+            columns=categories[: cm.shape[1]],
+        )
+
+        plt.figure(figsize=(10, 10))
+        sns.heatmap(
+            cm_df, annot=True, fmt=".2f", cmap="Blues", cbar_kws={"shrink": 0.8}
+        )
+        plt.title(
+            f"Confusion Matrix (Normalized) - Epoch {self.epoch}",
+            fontsize=14,
+            fontweight="bold",
+        )
+        plt.ylabel("True Label", fontsize=12)
+        plt.xlabel("Predicted Label", fontsize=12)
+
+        confusion_file = os.path.join(
+            save_dir, f"confusion_matrix_epoch_{self.epoch}.png"
+        )
+        plt.savefig(confusion_file, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # 创建并保存指标表格
+        metrics_df = pd.DataFrame(
+            {
+                "Cell Type": categories,
+                "Recall": recalls,
+                "Precision": precisions,
+                "F1 Score": f1_scores,
+                "Support": supports,
+                "Proportion": proportions,
+            }
+        )
+        csv_file = os.path.join(
+            save_dir, f"classification_metrics_epoch_{self.epoch}.csv"
+        )
+        # 将数值列格式化为保留2位小数
+        metrics_df["Recall"] = metrics_df["Recall"].round(2)
+        metrics_df["Precision"] = metrics_df["Precision"].round(2)
+        metrics_df["F1 Score"] = metrics_df["F1 Score"].round(2)
+        metrics_df["Proportion"] = metrics_df["Proportion"].round(2)
+        metrics_df.to_csv(csv_file, index=False)
+
+        print("Evaluation plots saved to:")
+        print(f"  - Metrics: {metrics_file}")
+        print(f"  - Confusion Matrix: {confusion_file}")
+        print(f"  - CSV Report: {csv_file}")
+
     def train(self):
-        # 首先构建dataloader（如果还没有构建）
-        if not hasattr(self, "train_loader"):
-            self.build_dataset_sampler_from_h5ad()
         print("train_loader: ", len(self.train_loader.dataset))
         print("eval_loader: ", len(self.eval_loader.dataset))
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
@@ -325,3 +663,25 @@ class CellTypeAnnotation:
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
             self.evaluate(self.model, self.eval_loader)
+
+    def load_pretrained_model(self):
+        ckpt_path = self.args.pretrained_model_path
+        assert os.path.exists(ckpt_path), f"找不到 ckpt: {ckpt_path}"
+
+        # 2) 只在 rank0 读取到 CPU，减少压力；再广播（可选）
+        if self.fabric.global_rank == 0:
+            print(f"[LOAD] 读取 checkpoint: {ckpt_path}")
+            raw = torch.load(ckpt_path, map_location="cpu")
+            state_dict = extract_state_dict_with_encoder_prefix(raw)
+        else:
+            raw = None
+            state_dict = None
+
+        # 3) 广播到所有进程
+        state_dict = self.fabric.broadcast(state_dict, src=0)
+        # 4) 打印抽样对比（可选，但很直观）
+        sample_weight_norms(self.model, state_dict, k=5)
+
+        # 5) 真正加载（strict=False：允许你新增的 embedding 层留空）
+        load_info = self.model.load_state_dict(state_dict, strict=False)
+        report_loading_result(load_info)

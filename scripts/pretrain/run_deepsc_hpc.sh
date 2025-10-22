@@ -35,3 +35,13 @@ mkdir -p logs
 
 # 启动分布式训练
 srun python -m deepsc.pretrain.pretrain
+
+
+# Use the following command to overwrite the parameters
+# srun python -m deepsc.pretrain.pretrain \
+#     model=deepsc \
+#     enable_mse_loss=False \
+#     enable_huber_loss=True \
+#     seed=44 \
+#     num_device=4
+#     num_nodes=4

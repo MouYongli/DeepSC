@@ -15,7 +15,7 @@ except ImportError:
         "Warning: Flash Attention not available, falling back to standard attention"
     )
 
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+# from torch.nn import TransformerEncoder, TransformerEncoderLayer
 
 
 # TODO：embedding 的行数不只是num_genes，而是num_genes+1，因为还有<cls> token
@@ -1152,14 +1152,14 @@ class DeepSC(nn.Module):
                 nn.init.zeros_(m.bias)
         self.fused_emb_proj = nn.Linear(2 * embedding_dim, embedding_dim)
 
-        encoder_layers = TransformerEncoderLayer(
-            embedding_dim,
-            num_heads,
-            dim_feedforward=embedding_dim * 4,
-            dropout=ffn_dropout,
-            batch_first=True,
-        )
-        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers)
+        # encoder_layers = TransformerEncoderLayer(
+        #     embedding_dim,
+        #     num_heads,
+        #     dim_feedforward=embedding_dim * 4,
+        #     dropout=ffn_dropout,
+        #     batch_first=True,
+        # )
+        # self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers)
 
     def forward(
         self,
