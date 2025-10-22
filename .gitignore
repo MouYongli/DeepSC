@@ -200,3 +200,4 @@ logs/
 test_checkpoints/
 /data/
 issues/
+/pull_request
