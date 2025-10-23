@@ -12,6 +12,12 @@ shuffel_files_each_epoch: False
 
 pretrained_model_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint.ckpt"
 load_pretrained_model: True
+
+# Fine-tuning mode selection
+# Options:
+#   - "full": Full parameter fine-tuning (all model parameters)
+#   - "head_only": Only fine-tune the classification head
+finetune_mode: "full"
 # Loss weights
 enable_l0: False
 enable_mse: False

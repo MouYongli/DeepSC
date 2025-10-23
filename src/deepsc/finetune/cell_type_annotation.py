@@ -46,10 +46,80 @@ class CellTypeAnnotation:
 
         if self.args.pretrained_model_path and self.args.load_pretrained_model:
             self.load_pretrained_model()
-        self.optimizer = Adam(self.model.parameters(), lr=self.args.learning_rate)
+
+        # Configure fine-tuning mode
+        self.setup_finetune_mode()
+
+        self.optimizer = Adam(
+            self.get_trainable_parameters(), lr=self.args.learning_rate
+        )
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.init_loss_fn()
         self.scheduler = self.create_scheduler(self.optimizer, self.args)
+
+    def setup_finetune_mode(self):
+        """
+        Configure the fine-tuning mode based on the configuration.
+        Supports two modes:
+        - full: Full parameter fine-tuning
+        - head_only: Only fine-tune the classification head
+        """
+        finetune_mode = getattr(self.args, "finetune_mode", "full")
+
+        if finetune_mode == "full":
+            # Full fine-tuning: train all parameters
+            if self.is_master:
+                print("=" * 80)
+                print("Fine-tuning Mode: FULL PARAMETER FINE-TUNING")
+                print("All model parameters will be trained.")
+                print("=" * 80)
+            # All parameters are trainable by default, no need to change
+
+        elif finetune_mode == "head_only":
+            # Head-only fine-tuning: freeze encoder, only train classification head
+            if self.is_master:
+                print("=" * 80)
+                print("Fine-tuning Mode: CLASSIFICATION HEAD ONLY")
+                print("Only the classification head will be trained.")
+                print("=" * 80)
+
+            # Freeze all encoder parameters
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+
+            # Ensure cls_decoder parameters are trainable
+            for param in self.model.cls_decoder.parameters():
+                param.requires_grad = True
+        else:
+            raise ValueError(
+                f"Unknown finetune_mode: {finetune_mode}. "
+                f"Must be one of: 'full', 'head_only'"
+            )
+
+    def get_trainable_parameters(self):
+        """
+        Get the list of trainable parameters based on the fine-tuning mode.
+        """
+        finetune_mode = getattr(self.args, "finetune_mode", "full")
+
+        if finetune_mode == "head_only":
+            # Only return cls_decoder parameters
+            trainable_params = self.model.cls_decoder.parameters()
+        else:
+            trainable_params = self.model.parameters()
+
+        # Count and print trainable parameters
+        if self.is_master:
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params_list = list(trainable_params)
+            trainable_count = sum(p.numel() for p in trainable_params_list)
+            print(f"Total parameters: {total_params:,}")
+            print(f"Trainable parameters: {trainable_count:,}")
+            print(f"Trainable ratio: {trainable_count / total_params * 100:.2f}%")
+            print("=" * 80)
+            return iter(trainable_params_list)
+
+        return trainable_params
 
     def init_loss_fn(self):
         if self.args.cls_loss_type == "standard":
