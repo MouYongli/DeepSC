@@ -248,17 +248,145 @@ model.visualize(results)
 
 More detailed tutorials can be found in our [documentation](https://your-project-website.com/docs).
 
+## Quick Start - Pipeline Execution Guide
+
+### 1. Data Download Pipeline
+
+#### Prerequisites
+Configure your environment variables in `.env` file (see `.env.example`):
+```bash
+# Data paths
+DATA_PATH_CELLXGENE="/path/to/cellxgene/data"
+DATA_PATH_3CA="/path/to/3ca/data"
+LOG_PATH="/path/to/logs"
+```
+
+#### Download 3CA Dataset
+```bash
+# Create necessary directories
+mkdir -p /path/to/3ca/data /path/to/logs
+
+# Run 3CA data download
+python -m src.deepsc.data.download.tripleca.download_3ca \
+    --output_path "/path/to/3ca/data" \
+    --log_path "/path/to/logs" \
+    --num_files 131 \
+    --num_processes 8
+```
+
+#### Download CellxGene Dataset  
+```bash
+python -m src.deepsc.data.download.cellxgene.download_partition \
+    --output_path "/path/to/cellxgene/data"
+```
+
+### 2. Data Preprocessing Pipeline
+
+Process downloaded data for training:
+```bash
+# Preprocess 3CA datasets
+python -m src.deepsc.data.preprocessing.preprocess_datasets_3ca \
+    --input_path "/path/to/3ca/data" \
+    --output_path "/path/to/processed/3ca"
+
+# Preprocess CellxGene datasets  
+python -m src.deepsc.data.preprocessing.preprocess_datasets_cellxgene \
+    --input_path "/path/to/cellxgene/data" \
+    --output_path "/path/to/processed/cellxgene"
+```
+
+### 3. Pretraining Pipeline
+
+#### Single GPU Training
+```bash
+python -m src.deepsc.pretrain.pretrain \
+    model=scbert \
+    dataset=tripleca \
+    batch_size=32 \
+    learning_rate=1e-4 \
+    epoch=10
+```
+
+#### Multi-GPU Training  
+```bash
+torchrun \
+    --nproc_per_node=4 \
+    --master_port=12355 \
+    -m src.deepsc.pretrain.pretrain \
+    model=scbert \
+    dataset=tripleca \
+    batch_size=32 \
+    learning_rate=1e-4 \
+    epoch=10
+```
+
+#### Key Configuration Options
+- `model={scbert,deepsc,scgpt}`: Choose model architecture
+- `dataset={tripleca,cellxgene}`: Choose dataset
+- `batch_size=32`: Batch size for training  
+- `epoch=10`: Number of training epochs
+- `data_path="/path/to/data"`: Override default data path
+
+### 4. Pipeline Verification
+
+Run integration tests to verify everything works:
+```bash
+# Test all pipelines
+pytest tests/integration/ -v
+
+# Test specific pipeline
+pytest tests/integration/test_pretrain_pipeline.py -v
+```
+
+### 5. Monitoring and Logging
+
+The pipeline uses Weights & Biases for experiment tracking:
+1. Set up wandb: `wandb login <your-token>`
+2. Configure wandb settings in config files
+3. Monitor training at [wandb.ai](https://wandb.ai)
+
+Logs are automatically saved to `./logs/` directory with timestamped files.
+
 ## Project Structure
 
 ```
-📦 DeepSC
-├── 📁 data         # Sample datasets and preprocessing scripts
-├── 📁 models           # Pre-trained models and training scripts
-├── 📁 notebooks        # Jupyter notebooks with tutorials
-├── 📁 docs             # Documentation and API references
-├── 📁 src              # Core implementation of foundation models
-└── README.md           # Project description
+📦 DeepSC/
+├── 📁 configs/             # Hydra configuration files
+│   ├── 📁 pretrain/       # Pretraining configurations
+│   │   ├── pretrain.yaml  # Main pretraining config
+│   │   ├── 📁 model/      # Model architecture configs
+│   │   └── 📁 dataset/    # Dataset loading configs
+│   └── 📁 finetune/       # Finetuning configurations
+├── 📁 data/               # Sample datasets (empty by default)
+├── 📁 src/deepsc/         # Core implementation
+│   ├── 📁 data/          # Data loading and preprocessing
+│   │   ├── 📁 download/   # Data download scripts
+│   │   └── 📁 preprocessing/ # Data preprocessing utilities
+│   ├── 📁 models/        # Model architectures
+│   │   ├── 📁 scbert/    # ScBERT model implementation
+│   │   ├── 📁 deepsc/    # DeepSC model implementation
+│   │   └── 📁 scgpt/     # Other model implementations
+│   ├── 📁 train/         # Training infrastructure
+│   ├── 📁 pretrain/      # Pretraining entry points
+│   ├── 📁 finetune/      # Finetuning entry points
+│   └── 📁 utils/         # Utility functions
+├── 📁 tests/              # Test suite
+│   ├── 📁 unit/          # Unit tests
+│   ├── 📁 integration/   # Integration tests
+│   └── conftest.py       # Shared test fixtures
+├── 📁 scripts/            # Utility scripts
+│   └── 📁 debug/         # Debugging and analysis scripts
+├── 📁 notebooks/          # Jupyter notebooks with tutorials
+└── README.md              # Project documentation
 ```
+
+### Key Directories
+
+- **`configs/`**: All Hydra configuration files for models, datasets, and training
+- **`src/deepsc/`**: Core source code organized by functionality
+- **`tests/`**: Comprehensive test suite with unit and integration tests
+- **`scripts/debug/`**: Development and debugging utilities
+- **`data/`**: Placeholder for datasets (configure paths in configs)
 
 ## Benchmark Results
 
