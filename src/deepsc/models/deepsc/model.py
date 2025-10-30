@@ -54,7 +54,7 @@ class ExpressionEmbedding(nn.Module):
     """
 
     # num_bins 是bin数量，包括<cls>和<pad>以及<mask>
-    def __init__(self, embedding_dim: int, num_bins: int = 50, alpha: float = 0.1):
+    def __init__(self, embedding_dim: int, num_bins: int = 50, alpha: float = 0.3):
         """
         Args:
             embedding_dim: 嵌入维度 d
@@ -71,11 +71,12 @@ class ExpressionEmbedding(nn.Module):
             num_embeddings=num_bins + 3, embedding_dim=embedding_dim, padding_idx=0
         )
         # 连续值的投影向量 v_cont ∈ R^d
-        self.continuous_projection = nn.Parameter(torch.randn(embedding_dim))
+        self.continuous_projection = nn.Linear(1, embedding_dim, bias=True)
 
         # 初始化权重
         nn.init.xavier_uniform_(self.bin_embedding.weight)
-        nn.init.xavier_uniform_(self.continuous_projection.unsqueeze(0))
+        nn.init.xavier_uniform_(self.continuous_projection.weight)
+        nn.init.zeros_(self.continuous_projection.bias)
 
     def forward(
         self, discrete_expression: torch.Tensor, normalized_expr: torch.Tensor
@@ -91,11 +92,7 @@ class ExpressionEmbedding(nn.Module):
         """
 
         discrete_embeddings = self.bin_embedding(discrete_expression)
-        continuous_component = (
-            self.alpha
-            * normalized_expr.unsqueeze(-1)
-            * self.continuous_projection.unsqueeze(0).unsqueeze(0)
-        )
+        continuous_component = self.continuous_projection(normalized_expr.unsqueeze(-1))
 
         expr_embeddings = discrete_embeddings + continuous_component
 
@@ -290,7 +287,7 @@ class FlashExpressionAttentionLayer(nn.Module):
     使用融合的基因和表达嵌入作为Q和K，表达嵌入作为V
     """
 
-    def __init__(self, d, num_heads, attn_dropout=0.1, fused: bool = True):
+    def __init__(self, d, num_heads, attn_dropout=0.1, fused: bool = False):
         """
         Args:
             d: 嵌入维度
