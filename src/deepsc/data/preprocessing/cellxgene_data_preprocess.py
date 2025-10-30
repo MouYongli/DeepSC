@@ -12,7 +12,7 @@ from functools import partial
 import anndata as ad
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix, issparse, save_npz
+from scipy.sparse import csr_matrix, diags, issparse, save_npz
 from tqdm import tqdm
 
 import argparse
@@ -28,11 +28,15 @@ def process_h5ad_to_sparse_tensor(
     output_path: str,
     gene_map_path: str,
     normalize: bool = True,
+    scale_factor: float = 1e4,
+    min_genes: int = 200,
+    apply_log1p: bool = True,
 ) -> dict:
-    """Process h5ad file to sparse tensor with optional normalization.
+    """Process h5ad file to sparse tensor with optional TP10K normalization.
 
     Reads an h5ad file, converts it to a sparse matrix format, maps genes
-    according to the provided gene mapping, and optionally applies normalization.
+    according to the provided gene mapping, and optionally applies TP10K/CPM
+    normalization with log1p transformation.
     The resulting sparse matrix is saved as an npz file.
 
     Args:
@@ -40,6 +44,9 @@ def process_h5ad_to_sparse_tensor(
         output_path: Path where the processed npz file will be saved.
         gene_map_path: Path to the CSV file containing gene mapping information.
         normalize: Whether to apply normalization to the data.
+        scale_factor: Scaling factor for normalization (1e4 for TP10K, 1e6 for CPM).
+        min_genes: Minimum number of genes per cell for filtering.
+        apply_log1p: Whether to apply log1p transformation.
 
     Returns:
         dict: Processing status information including save path and matrix shape.
@@ -83,8 +90,13 @@ def process_h5ad_to_sparse_tensor(
     print(f"Final matrix shape: {X_final.shape}")
 
     if normalize:
-        print("Performing normalization...")
-        X_final = normalize_tensor(X_final)
+        print("Performing TP10K normalization...")
+        X_final = normalize_tensor(
+            X_final,
+            min_genes=min_genes,
+            scale_factor=scale_factor,
+            apply_log1p=apply_log1p,
+        )
 
     save_npz(output_path, X_final)
     print(f"Saved processed data to: {output_path}")
@@ -92,27 +104,57 @@ def process_h5ad_to_sparse_tensor(
     return {"status": "saved", "path": output_path, "shape": X_final.shape}
 
 
-def normalize_tensor(csr_matrix, min_genes: int = 200):
-    """Apply normalization to sparse matrix using CPU processing.
+def normalize_tensor(
+    csr_matrix,
+    min_genes: int = 200,
+    scale_factor: float = 1e4,
+    apply_log1p: bool = True,
+):
+    """Apply TP10K/CPM normalization to sparse matrix using CPU processing.
 
-    Performs log2(1 + x) normalization on the sparse matrix data after filtering
-    cells based on minimum gene count threshold.
+    单细胞测序数据归一化流程：
+    1. 过滤低质量细胞（少于 min_genes 个基因表达）
+    2. 对每个细胞进行归一化：x_ij_norm = (x_ij / sum(x_i)) * scale_factor
+       - 消除测序深度（library size）差异
+       - 使得细胞间表达量可比
+    3. 可选的 log1p 变换，稳定方差
+
+    使用对角稀疏矩阵左乘实现按行缩放，避免广播成稠密矩阵，保持内存高效。
 
     Args:
-        csr_matrix: Input CSR sparse matrix containing gene expression data.
+        csr_matrix: Input CSR sparse matrix containing gene expression data (cells × genes).
         min_genes: Minimum number of genes per cell threshold for filtering.
+        scale_factor: Scaling factor. 1e4 for TP10K, 1e6 for CPM (counts per million).
+        apply_log1p: Whether to apply log1p transformation after normalization.
 
     Returns:
-        csr_matrix: Normalized sparse matrix.
+        csr_matrix: Normalized sparse matrix with TP10K/CPM + optional log1p.
     """
-    # Filter out cells with gene count below threshold
+    # 1) 过滤低质量细胞（表达基因数 < min_genes）
     valid_cells = np.diff(csr_matrix.indptr) >= min_genes
-    csr_filtered = csr_matrix
-    print(f"Valid cells after filtering: {valid_cells.sum()}")
+    csr_filtered = csr_matrix[valid_cells]
+    print(f"Valid cells after filtering (>= {min_genes} genes): {valid_cells.sum()}")
 
     print("Using CPU for normalization...")
-    # Apply log2(1 + x) normalization to expression values
-    csr_filtered.data = np.log2(1 + csr_filtered.data)
+
+    # 2) 计算每个细胞的 library size（总 UMI counts）
+    library_sizes = np.array(csr_filtered.sum(axis=1)).flatten()
+
+    # 避免除以 0
+    library_sizes[library_sizes == 0] = 1
+
+    # 3) 用对角稀疏矩阵左乘实现按行缩放（内存高效，保持稀疏性）
+    scale_factors = scale_factor / library_sizes
+    D = diags(scale_factors, format="csr")
+    csr_filtered = D @ csr_filtered
+
+    print(f"Applied TP{int(scale_factor)} normalization")
+
+    # 4) 可选的 log1p 变换
+    if apply_log1p:
+        csr_filtered.data = np.log1p(csr_filtered.data)
+        print("Applied log1p transformation")
+
     print("CPU normalization completed")
     return csr_filtered
 
@@ -141,6 +183,9 @@ def process_one_file(
     output_dir: str,
     gene_map_path: str,
     normalize: bool = True,
+    scale_factor: float = 1e4,
+    min_genes: int = 200,
+    apply_log1p: bool = True,
 ):
     """Process a single h5ad file to sparse tensor format.
 
@@ -149,6 +194,9 @@ def process_one_file(
         output_dir: Directory where the processed file will be saved.
         gene_map_path: Path to the gene mapping CSV file.
         normalize: Whether to apply normalization.
+        scale_factor: Scaling factor for normalization.
+        min_genes: Minimum number of genes per cell.
+        apply_log1p: Whether to apply log1p transformation.
 
     Returns:
         str: Processing status message.
@@ -163,7 +211,13 @@ def process_one_file(
 
     try:
         res = process_h5ad_to_sparse_tensor(
-            h5ad_path, output_path, gene_map_path, normalize
+            h5ad_path,
+            output_path,
+            gene_map_path,
+            normalize,
+            scale_factor,
+            min_genes,
+            apply_log1p,
         )
         logging.info(f"Successfully processed: {h5ad_path}, result: {res}")
         return f"Done: {h5ad_path} -> {res['shape']}"
@@ -178,6 +232,9 @@ def preprocess_cellxgene_folder(
     gene_map_path: str,
     num_processes: int = None,
     normalize: bool = True,
+    scale_factor: float = 1e4,
+    min_genes: int = 200,
+    apply_log1p: bool = True,
 ):
     """Batch process all h5ad files in a folder using multiprocessing.
 
@@ -187,14 +244,24 @@ def preprocess_cellxgene_folder(
         gene_map_path: Path to the gene mapping CSV file.
         num_processes: Number of parallel processes (defaults to min(4, cpu_count)).
         normalize: Whether to apply normalization to the data.
+        scale_factor: Scaling factor for normalization (1e4 for TP10K, 1e6 for CPM).
+        min_genes: Minimum number of genes per cell for filtering.
+        apply_log1p: Whether to apply log1p transformation.
     """
     os.makedirs(output_dir, exist_ok=True)
     logfile = setup_logging("integrated_preprocessing", "./logs")
     logging.info("Start integrated preprocessing...")
 
+    print("=" * 60)
     print(f"Processing {input_dir} to {output_dir}")
     print("Using CPU for processing")
     print(f"Normalize: {normalize}")
+    if normalize:
+        print(f"  Method:        TP{int(scale_factor)} normalization")
+        print(f"  Scale factor:  {scale_factor}")
+        print(f"  Min genes:     {min_genes}")
+        print(f"  Log1p:         {apply_log1p}")
+    print("=" * 60)
 
     h5ad_files = find_all_h5ad_files(input_dir)
     print(f"Found {len(h5ad_files)} h5ad files")
@@ -212,6 +279,9 @@ def preprocess_cellxgene_folder(
             output_dir=output_dir,
             gene_map_path=gene_map_path,
             normalize=normalize,
+            scale_factor=scale_factor,
+            min_genes=min_genes,
+            apply_log1p=apply_log1p,
         )
         results = list(
             tqdm(pool.imap_unordered(worker, h5ad_files), total=len(h5ad_files))
@@ -227,7 +297,7 @@ def preprocess_cellxgene_folder(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Integrated preprocessing of h5ad files with optional GPU acceleration and normalization."
+        description="Integrated preprocessing of h5ad files with TP10K normalization and log1p transformation."
     )
     parser.add_argument(
         "--input_dir",
@@ -253,11 +323,16 @@ def main():
         default=min(4, cpu_count()),
         help="Number of parallel processes to use (default: min(4, cpu cores)).",
     )
-
     parser.add_argument(
         "--no_normalize",
         action="store_true",
         help="Skip normalization step.",
+    )
+    parser.add_argument(
+        "--scale_factor",
+        type=float,
+        default=1e4,
+        help="Scaling factor: 1e4 for TP10K (default), 1e6 for CPM",
     )
     parser.add_argument(
         "--min_genes",
@@ -265,10 +340,13 @@ def main():
         default=200,
         help="Minimum number of genes per cell for filtering (default: 200).",
     )
+    parser.add_argument(
+        "--no_log1p",
+        action="store_true",
+        help="Disable log1p transformation after normalization",
+    )
 
     args = parser.parse_args()
-
-    # Configure for CPU-only processing
 
     preprocess_cellxgene_folder(
         input_dir=args.input_dir,
@@ -276,6 +354,9 @@ def main():
         gene_map_path=args.gene_map_path,
         num_processes=args.num_processes,
         normalize=not args.no_normalize,
+        scale_factor=args.scale_factor,
+        min_genes=args.min_genes,
+        apply_log1p=not args.no_log1p,
     )
 
 
