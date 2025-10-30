@@ -516,45 +516,29 @@ class MoERegressor(nn.Module):
     所有expert使用相同的网络结构，通过gate网络学习专门化
     """
 
-    def __init__(self, embedding_dim, dropout=0.1, number_of_experts=3):
+    def __init__(
+        self, embedding_dim, dropout=0.1, number_of_experts=3, gate_temperature=1.0
+    ):
         super().__init__()
         self.embedding_dim = embedding_dim
         self.num_experts = number_of_experts
+        self.gate_temperature = gate_temperature
 
         # Gate网络：决定每个expert的权重
         self.gate = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim // 2),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim // 2),
+            nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(embedding_dim // 2, self.num_experts),
-            nn.Softmax(dim=-1),
         )
 
         # 创建三个相同结构的expert网络
         self.experts = nn.ModuleList(
-            [
-                self._create_expert(embedding_dim, dropout)
-                for _ in range(self.num_experts)
-            ]
+            [RegressorExpert(embedding_dim, dropout) for _ in range(self.num_experts)]
         )
 
         # 初始化权重
         self._initialize_weights()
-
-    def _create_expert(self, embedding_dim, dropout):
-        """创建单个expert网络"""
-        return nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim * 2),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim * 2),
-            nn.Dropout(dropout),
-            nn.Linear(embedding_dim * 2, embedding_dim),
-            nn.ReLU(),
-            nn.LayerNorm(embedding_dim),
-            nn.Dropout(dropout),
-            nn.Linear(embedding_dim, 1),
-        )
 
     def _initialize_weights(self):
         """初始化所有网络的权重"""
@@ -566,45 +550,64 @@ class MoERegressor(nn.Module):
 
         # 初始化所有expert网络
         for expert in self.experts:
-            for m in expert:
+            for m in expert.modules():
                 if isinstance(m, nn.Linear):
                     nn.init.xavier_uniform_(m.weight)
                     nn.init.zeros_(m.bias)
 
     def forward(self, x):
         """
-        前向传播
-
         Args:
-            x: 输入特征, shape: (batch_size, seq_len, embedding_dim)
-
+            x: (batch_size, seq_len, embedding_dim)
         Returns:
-            output: 回归输出, shape: (batch_size, seq_len)
-            gate_weights: Gate权重, shape: (batch_size, seq_len, num_experts)
+            output: (batch_size, seq_len)
+            gate_weights: (batch_size, seq_len, num_experts)
         """
-        # 计算gate权重
-        gate_weights = self.gate(x)  # (batch_size, seq_len, num_experts)
+        # 1) gate logits -> softmax 权重
+        gate_logits = self.gate(x)  # (B, L, E)
+        gate_weights = F.softmax(gate_logits / self.gate_temperature, dim=-1)
 
-        # 计算每个expert的输出
+        # 2) 逐个 expert 前向
         expert_outputs = []
         for expert in self.experts:
-            expert_output = expert(x)  # (batch_size, seq_len, 1)
-            expert_outputs.append(expert_output)
+            y = expert(x)  # (B, L, 1)
+            expert_outputs.append(y)
 
-        # 将expert输出堆叠
-        expert_outputs = torch.stack(
-            expert_outputs, dim=-1
-        )  # (batch_size, seq_len, 1, num_experts)
-        expert_outputs = expert_outputs.squeeze(
-            -2
-        )  # (batch_size, seq_len, num_experts)
+        # 3) 堆叠 -> (B, L, E)
+        expert_outputs = torch.cat(expert_outputs, dim=-1)  # (B, L, E)
 
-        # 加权平均
-        output = torch.sum(
-            gate_weights * expert_outputs, dim=-1
-        )  # (batch_size, seq_len)
+        # 4) 加权求和 -> (B, L)
+        output = torch.sum(gate_weights * expert_outputs, dim=-1)
 
         return output, gate_weights
+
+
+class RegressorExpert(nn.Module):
+    def __init__(self, embedding_dim, dropout):
+        super().__init__()
+        self.fc1 = nn.Linear(embedding_dim, embedding_dim * 2)
+        self.fc2 = nn.Linear(embedding_dim * 2, embedding_dim)
+        self.fc3 = nn.Linear(embedding_dim, 1)
+        self.dropout = nn.Dropout(dropout)
+        self.gelu = nn.GELU()
+        self.norm1 = nn.LayerNorm(embedding_dim)
+
+    def forward(self, x):
+        # ---- 第一子层 ----
+        residual = x
+        x = self.fc1(x)
+        x = self.gelu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        x = x + residual  # 残差连接
+        x = self.norm1(x)  # Post-Norm
+
+        # ---- 第二子层 ----
+        # 输出回归值，维度从 embedding_dim -> 1
+        x = self.fc3(x)  # (B, L, 1)
+
+        return x
 
 
 import torch
@@ -773,7 +776,6 @@ class Expert(nn.Module):
         self.w2 = nn.Linear(moe_cfg.moe_inter_dim, moe_cfg.dim, bias=use_bias)
         self.dropout = nn.Dropout(p_dropout)
 
-        # 可选：与你其他模块一致的初始化
         nn.init.xavier_uniform_(self.w1.weight)
         nn.init.zeros_(self.w1.bias)
         nn.init.xavier_uniform_(self.w3.weight)
@@ -1096,6 +1098,7 @@ class DeepSC(nn.Module):
                 embedding_dim=embedding_dim,
                 dropout=ffn_dropout,
                 number_of_experts=number_of_experts,
+                gate_temperature=1.0,
             )
         else:
             # 原来的simple regressor
