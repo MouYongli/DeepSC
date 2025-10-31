@@ -14,6 +14,6 @@ set +a
 
 python -m deepsc.data.preprocessing.batch_normalize \
   --input_dir $MERGED_DATA_PATH_3CA \
-  --output_dir $DATASET_BEFORE_SHUFFEL/3ca \
+  --output_dir $DATASET_BEFORE_SHUFFEL/3ca_new \
   --scale_factor 10000 \
   --min_genes 200
