@@ -6,6 +6,13 @@ wandb_project: "DeepSC"
 tags: ["256hd"]
 run_name: "finetune_cell_type_annotation_256hd"
 
+# Task type selection
+# Options:
+#   - "cell_type_annotation": Cell type annotation task
+#   - "perturbation_prediction": Perturbation prediction task
+#   - "grn_inference": Gene regulatory network inference task
+task_type: "cell_type_annotation"
+
 #文件加载相关
 chunksize: 4
 shuffel_files_each_epoch: False
