@@ -2,7 +2,7 @@ import hydra
 import torch.nn as nn
 from lightning.fabric import Fabric
 from lightning.fabric.strategies import DDPStrategy
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from deepsc.finetune.cell_type_annotation import CellTypeAnnotation
 from deepsc.models.deepsc_new.model import DeepSCClassifier
@@ -17,6 +17,20 @@ from src.deepsc.utils import (
     version_base=None, config_path="../../../configs/finetune", config_name="finetune"
 )
 def finetune(cfg: DictConfig):
+    # Merge task-specific configs to top level for backward compatibility
+    # This allows cell_type_annotation.py to access configs via cfg.data_path
+    # instead of cfg.tasks.data_path
+    if "tasks" in cfg:
+        # Disable struct mode to allow merging new keys
+        OmegaConf.set_struct(cfg, False)
+        task_cfg = OmegaConf.to_container(cfg.tasks, resolve=True)
+        cfg = OmegaConf.merge(cfg, task_cfg)
+        # Remove the tasks key to avoid confusion
+        if "tasks" in cfg:
+            del cfg["tasks"]
+        # Re-enable struct mode to prevent accidental key additions
+        OmegaConf.set_struct(cfg, True)
+
     # initialize fabric
     fabric = Fabric(
         accelerator="cuda",
