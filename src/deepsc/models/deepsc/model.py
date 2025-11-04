@@ -356,7 +356,7 @@ class FlashExpressionAttentionLayer(nn.Module):
             attention_Q_emb = self.fused_emb_proj(fused_emb)
             attention_K_emb = attention_Q_emb
         else:
-            # 不计算gene，且之前用的不是fused
+            # 计算gene，且之前用的不是fused
             attention_Q_emb = gene_emb
             attention_K_emb = expr_emb
 
