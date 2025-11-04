@@ -3,19 +3,12 @@ defaults:
   - model: deepsc
   - tasks: cell_type_annotation
 
-# WandB settings
-wandb_project: "DeepSC"
-
 # Task type selection
 # Options:
 #   - "cell_type_annotation": Cell type annotation task
 #   - "perturbation_prediction": Perturbation prediction task
 #   - "grn_inference": Gene regulatory network inference task
 task_type: "cell_type_annotation"
-
-# File loading settings
-chunksize: 4
-shuffel_files_each_epoch: False
 
 # Pretrained model settings
 pretrained_model_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint.ckpt"
@@ -27,10 +20,8 @@ load_pretrained_model: True
 #   - "head_only": Only fine-tune the classification head
 finetune_mode: "full"
 
-# Output and path settings
-output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
+# Path settings
 csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
-ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
 
 # Model architecture settings
 use_moe_ffn: True
@@ -48,21 +39,8 @@ grad_acc: 20
 num_device: 3
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 
-# Checkpoint and logging settings
-valid_every: 200
-save_ckpt_every: 200
-log_on_wandb_every: 20
-resume_last_training: True
-
 # Learning rate scheduler settings
-use_warmup: False
 warmup_ratio: 0.03
-use_warmup_with_decay: False
-use_scbert_scheduler: True
-use_mogaide_scheduler: False
-
-# Debug settings
-check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用
 
 # Hydra configuration
 hydra:
@@ -77,3 +55,38 @@ hydra:
       file:
         filename:
           ${hydra.runtime.output_dir}/${hydra.job.name}_${oc.select:hydra.job.num, 0}.log
+
+# ==============================================================================
+# UNUSED CONFIGURATIONS (Commented out - not currently used in the code)
+# ==============================================================================
+# The following configurations are defined but not actively used in:
+#   - src/deepsc/finetune/finetune.py
+#   - src/deepsc/finetune/cell_type_annotation.py
+# They are kept here for reference and potential future use.
+# ==============================================================================
+
+# # WandB settings
+# wandb_project: "DeepSC"
+
+# # File loading settings
+# chunksize: 4
+# shuffel_files_each_epoch: False
+
+# # Output and path settings
+# output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
+# ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
+
+# # Checkpoint and logging settings
+# valid_every: 200
+# save_ckpt_every: 200
+# log_on_wandb_every: 20
+# resume_last_training: True
+
+# # Learning rate scheduler settings (not used)
+# use_warmup: False
+# use_warmup_with_decay: False
+# use_scbert_scheduler: True
+# use_mogaide_scheduler: False
+
+# # Debug settings
+# check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用
