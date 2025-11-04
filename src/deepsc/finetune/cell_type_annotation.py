@@ -1,33 +1,29 @@
-import math
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import scanpy as sc
-import seaborn as sns
 import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from torch.optim import Adam
-from torch.optim.lr_scheduler import (
-    LinearLR,
-    SequentialLR,
-)
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
+from deepsc.data import DataCollator
+from deepsc.data.dataset import (
     GeneExpressionDatasetMappedWithGlobalCelltype,
 )
-from src.deepsc.data import DataCollator
-from src.deepsc.utils import (
-    CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
+from deepsc.utils import (
+    calculate_mean_ce_loss,
+    create_scheduler_from_args,
     extract_state_dict_with_encoder_prefix,
+    get_trainable_parameters,
+    plot_classification_metrics,
     report_loading_result,
     sample_weight_norms,
     seed_all,
+    setup_finetune_mode,
 )
 
 
@@ -48,144 +44,31 @@ class CellTypeAnnotation:
             self.load_pretrained_model()
 
         # Configure fine-tuning mode
-        self.setup_finetune_mode()
+        finetune_mode = getattr(self.args, "finetune_mode", "full")
+        setup_finetune_mode(self.model, finetune_mode, self.is_master)
 
         self.optimizer = Adam(
-            self.get_trainable_parameters(), lr=self.args.learning_rate
+            get_trainable_parameters(self.model, finetune_mode, self.is_master),
+            lr=self.args.learning_rate,
         )
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.init_loss_fn()
-        self.scheduler = self.create_scheduler(self.optimizer, self.args)
-
-    def setup_finetune_mode(self):
-        """
-        Configure the fine-tuning mode based on the configuration.
-        Supports two modes:
-        - full: Full parameter fine-tuning
-        - head_only: Only fine-tune the classification head
-        """
-        finetune_mode = getattr(self.args, "finetune_mode", "full")
-
-        if finetune_mode == "full":
-            # Full fine-tuning: train all parameters
-            if self.is_master:
-                print("=" * 80)
-                print("Fine-tuning Mode: FULL PARAMETER FINE-TUNING")
-                print("All model parameters will be trained.")
-                print("=" * 80)
-            # All parameters are trainable by default, no need to change
-
-        elif finetune_mode == "head_only":
-            # Head-only fine-tuning: freeze encoder, only train classification head
-            if self.is_master:
-                print("=" * 80)
-                print("Fine-tuning Mode: CLASSIFICATION HEAD ONLY")
-                print("Only the classification head will be trained.")
-                print("=" * 80)
-
-            # Freeze all encoder parameters
-            for param in self.model.encoder.parameters():
-                param.requires_grad = False
-
-            # Ensure cls_decoder parameters are trainable
-            for param in self.model.cls_decoder.parameters():
-                param.requires_grad = True
-        else:
-            raise ValueError(
-                f"Unknown finetune_mode: {finetune_mode}. "
-                f"Must be one of: 'full', 'head_only'"
-            )
-
-    def get_trainable_parameters(self):
-        """
-        Get the list of trainable parameters based on the fine-tuning mode.
-        """
-        finetune_mode = getattr(self.args, "finetune_mode", "full")
-
-        if finetune_mode == "head_only":
-            # Only return cls_decoder parameters
-            trainable_params = self.model.cls_decoder.parameters()
-        else:
-            trainable_params = self.model.parameters()
-
-        # Count and print trainable parameters
-        if self.is_master:
-            total_params = sum(p.numel() for p in self.model.parameters())
-            trainable_params_list = list(trainable_params)
-            trainable_count = sum(p.numel() for p in trainable_params_list)
-            print(f"Total parameters: {total_params:,}")
-            print(f"Trainable parameters: {trainable_count:,}")
-            print(f"Trainable ratio: {trainable_count / total_params * 100:.2f}%")
-            print("=" * 80)
-            return iter(trainable_params_list)
-
-        return trainable_params
+        self.scheduler = create_scheduler_from_args(
+            self.optimizer, self.args, self.world_size
+        )
 
     def init_loss_fn(self):
+        """Initialize loss function based on configuration."""
         if self.args.cls_loss_type == "standard":
             self.criterion_cls = nn.CrossEntropyLoss()
         elif self.args.cls_loss_type == "per_bin":
-            self.criterion_cls = self.calculate_mean_ce_loss
+            # Use per-class CE loss from utils
+            def per_class_loss_wrapper(logits, labels):
+                return calculate_mean_ce_loss(
+                    logits, labels, self.cell_type_count, ignore_index=-100
+                )
 
-    def calculate_per_bin_ce_loss(self, logits, discrete_expr_label, ignore_index=-100):
-        """
-        logits: (batch, seq_len, num_bins)
-        discrete_expr_label: (batch, seq_len)
-        返回: (num_bins,) 每个bin的平均交叉熵损失
-        计算平均时不包括bin0
-        """
-        num_bins = self.cell_type_count
-        ce_losses = []
-        logits_flat = logits.reshape(-1, num_bins)
-        labels_flat = discrete_expr_label.reshape(-1)
-        for i in range(0, num_bins):  # 从bin0开始，到num_bins-1
-            # 只统计label为i且不是ignore_index的样本
-            mask = (labels_flat == i) & (labels_flat != ignore_index)
-            if mask.sum() == 0:
-                ce_losses.append(torch.tensor(0.0, device=logits.device))
-                continue
-            logits_i = logits_flat[mask]
-            labels_i = labels_flat[mask]
-            ce = nn.CrossEntropyLoss(reduction="mean")
-            ce_loss = ce(logits_i, labels_i)
-            ce_losses.append(ce_loss)
-        if len(ce_losses) == 0:
-            return torch.tensor(0.0, device=logits.device)
-        return torch.stack(ce_losses)  # (num_bins,)
-
-    def create_scheduler(self, optimizer, args):
-
-        total_steps = args.epoch * math.ceil(
-            (100000) / (args.batch_size * self.world_size * args.grad_acc)
-        )
-        warmup_ratio = self.args.warmup_ratio
-        warmup_steps = math.ceil(total_steps * warmup_ratio)
-        main_steps = total_steps - warmup_steps
-        linear_warmup = LinearLR(
-            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
-        )
-        cosine_anneal = CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(
-            optimizer,
-            T_0=warmup_steps * 3,
-            T_mult=1,
-            warmup_steps=0,
-            decay=0.9,
-        )
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[linear_warmup, cosine_anneal],
-            milestones=[warmup_steps],
-        )
-        return scheduler
-
-    def calculate_mean_ce_loss(self, logits, discrete_expr_label):
-        per_bin_ce_loss = self.calculate_per_bin_ce_loss(logits, discrete_expr_label)
-        mean_ce_loss = (
-            per_bin_ce_loss.mean()
-            if per_bin_ce_loss is not None
-            else torch.tensor(0.0, device=logits.device)
-        )
-        return mean_ce_loss
+            self.criterion_cls = per_class_loss_wrapper
 
     def build_dataset_sampler_from_h5ad(self):
         print("Building dataset sampler from h5ad file...")
@@ -304,7 +187,7 @@ class CellTypeAnnotation:
             global_id2type=self.id2type,
         )
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
-        self.eval_sampler = DistributedSampler(self.eval_dataset, shuffle=True)
+        self.eval_sampler = DistributedSampler(self.eval_dataset, shuffle=False)
         self.train_loader = DataLoader(
             self.train_dataset,
             batch_size=self.args.batch_size,
@@ -358,7 +241,7 @@ class CellTypeAnnotation:
             return_mask_prob=True,
             return_gate_weights=False,
         )
-        logits, regression_output, y, gene_emb, expr_emb, cls_output = model_outputs
+        logits, _, y, gene_emb, expr_emb, cls_output = model_outputs
         output_dict = {
             "mlm_output": logits,
             "cls_output": cls_output,
@@ -392,7 +275,6 @@ class CellTypeAnnotation:
         model.eval()
         total_loss = 0.0
         total_error = 0.0
-        total_dab = 0.0
         total_num = 0
         predictions = []
         cell_type_ids = []
@@ -474,239 +356,21 @@ class CellTypeAnnotation:
             )
 
             # 绘制评估图表
-            self.plot_evaluation_charts(y_true, y_pred)
+            save_dir = (
+                self.args.save_dir
+                if hasattr(self.args, "save_dir") and self.args.save_dir
+                else "./evaluation_plots"
+            )
+            plot_classification_metrics(
+                y_true, y_pred, self.id2type, save_dir=save_dir, epoch=self.epoch
+            )
 
         return total_loss / total_num, total_error / total_num
-
-    def process_evaluation_data(self, y_true, y_pred):
-        """
-        处理评估数据，计算指标并准备绘图所需的数据
-
-        Returns:
-            dict: 包含处理后的数据和指标，如果没有有效类别则返回None
-        """
-        from sklearn.metrics import classification_report
-
-        # 现在所有类型都是交集，直接使用即可
-        eval_labels = np.arange(self.cell_type_count)  # 0 到 cell_type_count-1
-        target_names = [self.id2type[i] for i in eval_labels]
-
-        # 计算分类指标
-        report = classification_report(
-            y_true,
-            y_pred,
-            labels=eval_labels,
-            target_names=target_names,
-            output_dict=True,
-            zero_division=0,
-        )
-
-        # 提取指标数据
-        metrics_data = {
-            "categories": target_names,
-            "recalls": [report[name]["recall"] for name in target_names],
-            "precisions": [report[name]["precision"] for name in target_names],
-            "f1_scores": [report[name]["f1-score"] for name in target_names],
-            "supports": [report[name]["support"] for name in target_names],
-        }
-
-        # 计算类别占比
-        total_samples = sum(metrics_data["supports"])
-        metrics_data["proportions"] = [
-            s / total_samples for s in metrics_data["supports"]
-        ]
-        metrics_data["unique_labels"] = eval_labels
-        metrics_data["y_true"] = y_true
-        metrics_data["y_pred"] = y_pred
-
-        return metrics_data
-
-    def plot_evaluation_charts(self, y_true, y_pred):
-        """
-        绘制评估图表：分类指标详情和混淆矩阵
-        """
-        from sklearn.metrics import confusion_matrix
-
-        # 处理评估数据
-        processed_data = self.process_evaluation_data(y_true, y_pred)
-        if processed_data is None:
-            print("Warning: No valid categories found for plotting")
-            return
-
-        # 解包处理后的数据
-        categories = processed_data["categories"]
-        recalls = processed_data["recalls"]
-        precisions = processed_data["precisions"]
-        f1_scores = processed_data["f1_scores"]
-        supports = processed_data["supports"]
-        proportions = processed_data["proportions"]
-        unique_labels = processed_data["unique_labels"]
-        y_true = processed_data["y_true"]
-        y_pred = processed_data["y_pred"]
-
-        # 创建保存图表的目录
-        save_dir = (
-            self.args.save_dir
-            if hasattr(self.args, "save_dir") and self.args.save_dir
-            else "./evaluation_plots"
-        )
-        os.makedirs(save_dir, exist_ok=True)
-
-        # 绘制图1：分类指标详情（4个子图）
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle(
-            f"Classification Metrics by Cell Type - Epoch {self.epoch}",
-            fontsize=16,
-            fontweight="bold",
-        )
-
-        # 子图1: Recall
-        bars1 = ax1.bar(range(len(categories)), recalls, color="skyblue", alpha=0.8)
-        ax1.set_title("Recall by Cell Type")
-        ax1.set_ylabel("Recall")
-        ax1.set_xticks(range(len(categories)))
-        ax1.set_xticklabels(categories, rotation=45, ha="right")
-        ax1.set_ylim(0, 1)
-        ax1.grid(axis="y", alpha=0.3)
-        # 添加数值标签
-        for i, bar in enumerate(bars1):
-            height = bar.get_height()
-            ax1.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                height + 0.01,
-                f"{height:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        # 子图2: Precision
-        bars2 = ax2.bar(
-            range(len(categories)), precisions, color="lightcoral", alpha=0.8
-        )
-        ax2.set_title("Precision by Cell Type")
-        ax2.set_ylabel("Precision")
-        ax2.set_xticks(range(len(categories)))
-        ax2.set_xticklabels(categories, rotation=45, ha="right")
-        ax2.set_ylim(0, 1)
-        ax2.grid(axis="y", alpha=0.3)
-        # 添加数值标签
-        for i, bar in enumerate(bars2):
-            height = bar.get_height()
-            ax2.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                height + 0.01,
-                f"{height:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        # 子图3: F1 Score
-        bars3 = ax3.bar(
-            range(len(categories)), f1_scores, color="lightgreen", alpha=0.8
-        )
-        ax3.set_title("F1 Score by Cell Type")
-        ax3.set_ylabel("F1 Score")
-        ax3.set_xticks(range(len(categories)))
-        ax3.set_xticklabels(categories, rotation=45, ha="right")
-        ax3.set_ylim(0, 1)
-        ax3.grid(axis="y", alpha=0.3)
-        # 添加数值标签
-        for i, bar in enumerate(bars3):
-            height = bar.get_height()
-            ax3.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                height + 0.01,
-                f"{height:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        # 子图4: 类别占比
-        bars4 = ax4.bar(range(len(categories)), proportions, color="gold", alpha=0.8)
-        ax4.set_title("Class Proportion")
-        ax4.set_ylabel("Proportion")
-        ax4.set_xticks(range(len(categories)))
-        ax4.set_xticklabels(categories, rotation=45, ha="right")
-        ax4.set_ylim(0, max(proportions) * 1.1 if proportions else 1)
-        ax4.grid(axis="y", alpha=0.3)
-        # 添加数值标签
-        for i, bar in enumerate(bars4):
-            height = bar.get_height()
-            ax4.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                height + height * 0.05,
-                f"{height:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-
-        plt.tight_layout()
-        metrics_file = os.path.join(
-            save_dir, f"classification_metrics_epoch_{self.epoch}.png"
-        )
-        plt.savefig(metrics_file, dpi=300, bbox_inches="tight")
-        plt.close()
-
-        # 绘制图2：混淆矩阵（只包含真实标签中的类别）
-        cm = confusion_matrix(y_true, y_pred, labels=unique_labels)
-        cm_normalized = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
-        cm_df = pd.DataFrame(
-            cm_normalized,
-            index=categories[: cm.shape[0]],
-            columns=categories[: cm.shape[1]],
-        )
-
-        plt.figure(figsize=(10, 10))
-        sns.heatmap(
-            cm_df, annot=True, fmt=".2f", cmap="Blues", cbar_kws={"shrink": 0.8}
-        )
-        plt.title(
-            f"Confusion Matrix (Normalized) - Epoch {self.epoch}",
-            fontsize=14,
-            fontweight="bold",
-        )
-        plt.ylabel("True Label", fontsize=12)
-        plt.xlabel("Predicted Label", fontsize=12)
-
-        confusion_file = os.path.join(
-            save_dir, f"confusion_matrix_epoch_{self.epoch}.png"
-        )
-        plt.savefig(confusion_file, dpi=300, bbox_inches="tight")
-        plt.close()
-
-        # 创建并保存指标表格
-        metrics_df = pd.DataFrame(
-            {
-                "Cell Type": categories,
-                "Recall": recalls,
-                "Precision": precisions,
-                "F1 Score": f1_scores,
-                "Support": supports,
-                "Proportion": proportions,
-            }
-        )
-        csv_file = os.path.join(
-            save_dir, f"classification_metrics_epoch_{self.epoch}.csv"
-        )
-        # 将数值列格式化为保留2位小数
-        metrics_df["Recall"] = metrics_df["Recall"].round(2)
-        metrics_df["Precision"] = metrics_df["Precision"].round(2)
-        metrics_df["F1 Score"] = metrics_df["F1 Score"].round(2)
-        metrics_df["Proportion"] = metrics_df["Proportion"].round(2)
-        metrics_df.to_csv(csv_file, index=False)
-
-        print("Evaluation plots saved to:")
-        print(f"  - Metrics: {metrics_file}")
-        print(f"  - Confusion Matrix: {confusion_file}")
-        print(f"  - CSV Report: {csv_file}")
 
     def train(self):
         print("train_loader: ", len(self.train_loader.dataset))
         print("eval_loader: ", len(self.eval_loader.dataset))
+        best_loss = float("inf")
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         for epoch in range(start_epoch, self.args.epoch + 1):
             self.epoch = epoch  # 更新类变量epoch
@@ -719,9 +383,8 @@ class CellTypeAnnotation:
                     ncols=150,
                     position=1,
                 )
-            # 获取第一个batch并打印其结构
             for i, data in enumerate(data_iter):
-                is_accumulating = (i + 1) % self.args.grad_acc == 0
+                is_accumulating = (i + 1) % self.args.grad_acc != 0
                 loss_cls, error_rate = self.each_training_iteration(
                     data, is_accumulating
                 )
@@ -731,8 +394,18 @@ class CellTypeAnnotation:
                         error_rate=error_rate,
                     )
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
-            self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
-            self.evaluate(self.model, self.eval_loader)
+            eval_loss, eval_error = self.evaluate(self.model, self.eval_loader)
+
+            # Save best model
+            if self.is_master and eval_loss < best_loss:
+                best_loss = eval_loss
+                self.save_checkpoint(epoch, eval_loss, is_best=True)
+                print(f"Saved best model at epoch {epoch} with loss {eval_loss:.4f}")
+
+            # Save checkpoint every N epochs if configured
+            if self.is_master and hasattr(self.args, "save_every_n_epochs"):
+                if epoch % self.args.save_every_n_epochs == 0:
+                    self.save_checkpoint(epoch, eval_loss, is_best=False)
 
     def load_pretrained_model(self):
         ckpt_path = self.args.pretrained_model_path
@@ -755,3 +428,35 @@ class CellTypeAnnotation:
         # 5) 真正加载（strict=False：允许你新增的 embedding 层留空）
         load_info = self.model.load_state_dict(state_dict, strict=False)
         report_loading_result(load_info)
+
+    def save_checkpoint(self, epoch, eval_loss, is_best=False):
+        """Save model checkpoint."""
+        save_dir = (
+            self.args.save_dir
+            if hasattr(self.args, "save_dir") and self.args.save_dir
+            else "./results/cell_type_annotation"
+        )
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Prepare checkpoint data
+        checkpoint = {
+            "epoch": epoch,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": (
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
+            "eval_loss": eval_loss,
+            "cell_type_count": self.cell_type_count,
+            "type2id": self.type2id,
+            "id2type": self.id2type,
+        }
+
+        # Save checkpoint
+        if is_best:
+            checkpoint_path = os.path.join(save_dir, "best_model.pt")
+        else:
+            checkpoint_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch}.pt")
+
+        torch.save(checkpoint, checkpoint_path)
+        print(f"Checkpoint saved to {checkpoint_path}")
