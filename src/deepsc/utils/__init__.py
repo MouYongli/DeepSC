@@ -32,6 +32,7 @@ from .utils import (
     get_reduced,
     get_reduced_with_fabric,
     load_checkpoint,
+    load_checkpoint_cta_test,
     log_stats,
     masked_mse_loss,
     numel,

@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from datetime import datetime
 from deepsc.data import DataCollator
 from deepsc.data.dataset import (
     GeneExpressionDatasetMappedWithGlobalCelltype,
@@ -19,6 +20,7 @@ from deepsc.utils import (
     create_scheduler_from_args,
     extract_state_dict_with_encoder_prefix,
     get_trainable_parameters,
+    load_checkpoint_cta_test,
     plot_classification_metrics,
     report_loading_result,
     sample_weight_norms,
@@ -73,52 +75,8 @@ class CellTypeAnnotation:
     def build_dataset_sampler_from_h5ad(self):
         print("Building dataset sampler from h5ad file...")
 
-        # 检查是否使用分开的数据集
-        use_separated_datasets = getattr(
-            self.args, "seperated_train_eval_dataset", True
-        )
-
-        if use_separated_datasets:
-            # 使用两个分开的数据集
-            print("Using separated train/eval datasets...")
-            adata_train = sc.read_h5ad(self.args.data_path)
-            adata_test = sc.read_h5ad(self.args.data_path_eval)
-        else:
-            # 使用单个数据集进行分层采样分割
-            print("Using single dataset with stratified split...")
-            adata = sc.read_h5ad(self.args.data_path)
-
-            # 获取细胞类型标签
-            cell_types = adata.obs[self.args.obs_celltype_col].astype(str)
-
-            # 进行分层采样，确保每个细胞类型在训练集和测试集中的比例相同
-            test_size = getattr(self.args, "test_size", 0.2)  # 默认20%测试集
-            train_idx, test_idx = train_test_split(
-                range(adata.n_obs),
-                test_size=test_size,
-                random_state=42,
-                stratify=cell_types,  # 按细胞类型分层采样
-            )
-
-            # 分割数据集
-            adata_train = adata[train_idx].copy()
-            adata_test = adata[test_idx].copy()
-
-            print(
-                f"分层采样结果：训练集 {len(train_idx)} 个细胞，测试集 {len(test_idx)} 个细胞"
-            )
-
-            # 验证分层采样效果
-            train_type_counts = adata_train.obs[
-                self.args.obs_celltype_col
-            ].value_counts()
-            test_type_counts = adata_test.obs[self.args.obs_celltype_col].value_counts()
-            print("分层采样验证（训练集 vs 测试集比例）:")
-            for celltype in train_type_counts.index:
-                if celltype in test_type_counts.index:
-                    train_ratio = train_type_counts[celltype] / len(train_idx)
-                    test_ratio = test_type_counts[celltype] / len(test_idx)
-                    print(f"  {celltype}: {train_ratio:.3f} vs {test_ratio:.3f}")
+        # Reuse the data loading and splitting logic
+        adata_train, adata_test = self._load_and_split_data()
 
         print(f"训练数据集大小: {adata_train.n_obs}")
         print(f"测试数据集大小: {adata_test.n_obs}")
@@ -460,3 +418,262 @@ class CellTypeAnnotation:
 
         torch.save(checkpoint, checkpoint_path)
         print(f"Checkpoint saved to {checkpoint_path}")
+
+    def _load_and_split_data(self):
+        """
+        Load h5ad data and perform split if needed.
+        Returns train and test adata objects.
+        This is a helper method to reduce code duplication.
+        """
+        use_separated_datasets = getattr(
+            self.args, "seperated_train_eval_dataset", True
+        )
+
+        if use_separated_datasets:
+            print("Using separated train/eval datasets...")
+            adata_train = sc.read_h5ad(self.args.data_path)
+            adata_test = sc.read_h5ad(self.args.data_path_eval)
+        else:
+            print("Using single dataset with stratified split...")
+            adata = sc.read_h5ad(self.args.data_path)
+            cell_types = adata.obs[self.args.obs_celltype_col].astype(str)
+            test_size = getattr(self.args, "test_size", 0.2)
+            train_idx, test_idx = train_test_split(
+                range(adata.n_obs),
+                test_size=test_size,
+                random_state=42,
+                stratify=cell_types,
+            )
+            adata_train = adata[train_idx].copy()
+            adata_test = adata[test_idx].copy()
+            print(
+                f"Stratified split: {len(train_idx)} train cells, {len(test_idx)} test cells"
+            )
+
+        return adata_train, adata_test
+
+    def build_test_dataset_from_h5ad(self):
+        """
+        Build test dataset from h5ad file.
+        This method reuses data loading logic and only creates test loader.
+
+        Note: This method assumes self.type2id and self.id2type are already loaded
+        from checkpoint, so it doesn't recompute cell type mappings.
+        """
+        print("Building test dataset from h5ad file...")
+
+        # Reuse the data loading and splitting logic
+        _, adata_test = self._load_and_split_data()
+
+        print(f"Test dataset size: {adata_test.n_obs}")
+
+        # Filter test data to keep only cell types that exist in the trained model
+        print("Filtering test dataset to keep only trained cell types...")
+        test_mask = (
+            adata_test.obs[self.args.obs_celltype_col]
+            .astype(str)
+            .isin(self.common_celltypes)
+        )
+        adata_test_filtered = adata_test[test_mask].copy()
+        print(f"Test data: {adata_test.n_obs} -> {adata_test_filtered.n_obs} cells")
+
+        # Build test dataset using checkpoint's type2id/id2type mappings
+        self.test_dataset = GeneExpressionDatasetMappedWithGlobalCelltype(
+            h5ad=adata_test_filtered,
+            csv_path=self.args.csv_path,
+            var_name_col=self.args.var_name_in_h5ad,
+            obs_celltype_col=self.args.obs_celltype_col,
+            global_type2id=self.type2id,
+            global_id2type=self.id2type,
+        )
+        self.test_sampler = DistributedSampler(self.test_dataset, shuffle=False)
+        self.test_loader = DataLoader(
+            self.test_dataset,
+            batch_size=self.args.batch_size,
+            sampler=self.test_sampler,
+            num_workers=8,
+            collate_fn=DataCollator(
+                do_padding=True,
+                pad_token_id=0,
+                pad_value=0,
+                do_mlm=False,
+                do_binning=True,
+                max_length=self.args.sequence_length,
+                num_genes=self.args.model.num_genes,
+                num_bins=self.args.model.num_bins,
+                use_max_cell_length=False,
+                cell_type=True,
+            ),
+        )
+        self.test_loader = self.fabric.setup_dataloaders(self.test_loader)
+
+    def test(self, checkpoint_path=None):
+        """
+        Test the model on test dataset and save results with timestamp.
+
+        Args:
+            checkpoint_path: Path to the checkpoint file to load. If None, uses the path from args.
+        """
+        # Load checkpoint
+        if checkpoint_path is None:
+            checkpoint_path = getattr(self.args, "checkpoint_path", None)
+
+        if checkpoint_path is None:
+            raise ValueError(
+                "checkpoint_path must be provided either as argument or in args"
+            )
+
+        # Load checkpoint using the utility function
+        checkpoint_info = load_checkpoint_cta_test(
+            checkpoint_path, self.model, self.fabric, self.is_master
+        )
+
+        # Set cell type mappings from checkpoint
+        self.cell_type_count = checkpoint_info["cell_type_count"]
+        self.type2id = checkpoint_info["type2id"]
+        self.id2type = checkpoint_info["id2type"]
+        self.common_celltypes = checkpoint_info["common_celltypes"]
+
+        # Build test dataset after loading checkpoint (so we have type2id and id2type)
+        self.build_test_dataset_from_h5ad()
+
+        # Create timestamped save directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_save_dir = getattr(
+            self.args,
+            "test_save_dir",
+            "/home/angli/baseline/DeepSC/results/cell_type_annotation",
+        )
+        save_dir = os.path.join(base_save_dir, f"test_{timestamp}")
+        os.makedirs(save_dir, exist_ok=True)
+
+        if self.is_master:
+            print(f"\nTest results will be saved to: {save_dir}")
+
+        # Run evaluation on test set
+        self.model.eval()
+        total_loss = 0.0
+        total_error = 0.0
+        total_num = 0
+        predictions = []
+        cell_type_ids = []
+
+        data_iter = self.test_loader
+        if self.is_master:
+            data_iter = tqdm(
+                self.test_loader,
+                desc="Testing [Cell Type Annotation]",
+                ncols=150,
+                position=1,
+            )
+
+        with torch.no_grad():
+            for i, data in enumerate(data_iter):
+                gene = data["gene"]
+                discrete_expr = data["masked_discrete_expr"]
+                continuous_expr = data["masked_continuous_expr"]
+                cell_type_id = data["cell_type_id"]
+
+                model_outputs = self.model(
+                    gene_ids=gene,
+                    value_log1p=continuous_expr,
+                    value_binned=discrete_expr,
+                    return_encodings=False,
+                    return_mask_prob=True,
+                    return_gate_weights=False,
+                )
+
+                logits, regression_output, y, gene_emb, expr_emb, cls_output = (
+                    model_outputs
+                )
+
+                output_dict = {
+                    "mlm_output": logits,
+                    "cls_output": cls_output,
+                    "cell_emb": self.model._get_cell_emb_from_layer(
+                        self.model.encoder.fused_emb_proj(
+                            torch.cat([gene_emb, expr_emb], dim=-1)
+                        ),
+                        y.sum(dim=-1).mean(dim=2) if y is not None else None,
+                    ),
+                }
+
+                output_values = output_dict["cls_output"]
+                loss = self.criterion_cls(output_values, cell_type_id)
+
+                total_loss += loss.item() * len(gene)
+                accuracy = (output_values.argmax(1) == cell_type_id).sum().item()
+                total_error += (1 - accuracy / len(gene)) * len(gene)
+                total_num += len(gene)
+
+                preds = output_values.argmax(1).detach().cpu()
+                predictions.append(preds)
+                cell_type_ids.append(cell_type_id.detach().cpu())
+
+        # Calculate metrics
+        from sklearn.metrics import (
+            accuracy_score,
+            f1_score,
+            precision_score,
+            recall_score,
+        )
+
+        y_true = torch.cat(cell_type_ids, dim=0).numpy()
+        y_pred = torch.cat(predictions, dim=0).numpy()
+
+        eval_labels = np.arange(self.cell_type_count)
+        accuracy = accuracy_score(y_true, y_pred)
+        precision = precision_score(
+            y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+        )
+        recall = recall_score(
+            y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+        )
+        macro_f1 = f1_score(
+            y_true, y_pred, average="macro", labels=eval_labels, zero_division=0
+        )
+
+        if self.is_master:
+            print("\n" + "=" * 80)
+            print("TEST RESULTS")
+            print("=" * 80)
+            print(
+                f"Test Loss: {total_loss / total_num:.4f}, "
+                f"Error Rate: {total_error / total_num:.4f}"
+            )
+            print(
+                f"Accuracy: {accuracy:.4f}, "
+                f"Precision: {precision:.4f}, "
+                f"Recall: {recall:.4f}, "
+                f"Macro F1: {macro_f1:.4f}"
+            )
+            print("=" * 80)
+
+            # Plot test results (similar to evaluation)
+            plot_classification_metrics(
+                y_true, y_pred, self.id2type, save_dir=save_dir, epoch=0
+            )
+
+            # Save test summary
+            summary_path = os.path.join(save_dir, "test_summary.txt")
+            with open(summary_path, "w") as f:
+                f.write("Test Summary\n")
+                f.write("=" * 80 + "\n")
+                f.write(f"Checkpoint: {checkpoint_path}\n")
+                f.write(f"Test timestamp: {timestamp}\n")
+                f.write(f"Number of test samples: {total_num}\n")
+                f.write(f"Number of cell types: {self.cell_type_count}\n")
+                f.write("\nMetrics:\n")
+                f.write(f"  Test Loss: {total_loss / total_num:.4f}\n")
+                f.write(f"  Error Rate: {total_error / total_num:.4f}\n")
+                f.write(f"  Accuracy: {accuracy:.4f}\n")
+                f.write(f"  Precision: {precision:.4f}\n")
+                f.write(f"  Recall: {recall:.4f}\n")
+                f.write(f"  Macro F1: {macro_f1:.4f}\n")
+                f.write("\nCell types tested:\n")
+                for celltype in self.common_celltypes:
+                    f.write(f"  - {celltype}\n")
+
+            print(f"\nTest summary saved to: {summary_path}")
+
+        return total_loss / total_num, total_error / total_num
