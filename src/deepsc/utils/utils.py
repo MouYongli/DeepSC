@@ -1738,6 +1738,66 @@ def load_checkpoint(
         }
 
 
+def load_checkpoint_cta_test(checkpoint_path, model, fabric, is_master=True):
+    """
+    Load model checkpoint for Cell Type Annotation testing.
+
+    This function loads only the model weights and cell type mappings,
+    without loading optimizer/scheduler states (unlike load_checkpoint).
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model: Model to load weights into
+        fabric: Fabric instance for distributed loading
+        is_master: Whether this is the master process
+
+    Returns:
+        dict: Dictionary containing:
+            - cell_type_count: Number of cell types
+            - type2id: Mapping from cell type name to ID
+            - id2type: Mapping from ID to cell type name
+            - common_celltypes: Sorted list of cell type names
+            - epoch: Training epoch when checkpoint was saved
+            - eval_loss: Evaluation loss when checkpoint was saved
+    """
+    assert os.path.exists(checkpoint_path), f"Checkpoint not found: {checkpoint_path}"
+
+    if fabric.global_rank == 0:
+        print(f"[LOAD] Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    else:
+        checkpoint = None
+
+    # Broadcast checkpoint to all processes
+    checkpoint = fabric.broadcast(checkpoint, src=0)
+
+    # Load model state dict
+    load_info = model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+
+    if is_master:
+        print(f"Checkpoint loaded successfully from epoch {checkpoint['epoch']}")
+        print(f"Checkpoint eval loss: {checkpoint['eval_loss']:.4f}")
+        report_loading_result(load_info)
+
+    # Extract cell type mappings from checkpoint
+    cell_type_count = checkpoint["cell_type_count"]
+    type2id = checkpoint["type2id"]
+    id2type = checkpoint["id2type"]
+    common_celltypes = sorted(type2id.keys())
+
+    print(f"Loaded cell type count: {cell_type_count}")
+    print(f"Loaded cell types: {common_celltypes}")
+
+    return {
+        "cell_type_count": cell_type_count,
+        "type2id": type2id,
+        "id2type": id2type,
+        "common_celltypes": common_celltypes,
+        "epoch": checkpoint["epoch"],
+        "eval_loss": checkpoint["eval_loss"],
+    }
+
+
 def restore_wandb_session(wandb_run_id, wandb_config, args, is_master=True):
     """
     Restore wandb session from checkpoint information.
