@@ -2,8 +2,8 @@
 
 # Dataset settings
 seperated_train_eval_dataset: False
-data_path: "/home/angli/baseline/DeepSC/data/cell_type_annotation/myeloid_merged.h5ad"
-data_path_eval: "/home/angli/baseline/DeepSC/data/cell_type_annotation/human_pancreas/hPancreas_test_adata.h5ad"
+data_path: "${oc.env:DEEPSC_DATA_ROOT}/cell_type_annotation/myeloid_merged.h5ad"
+data_path_eval: "${oc.env:DEEPSC_DATA_ROOT}/cell_type_annotation/human_pancreas/hPancreas_test_adata.h5ad"
 var_name_in_h5ad: "gene_name"
 obs_celltype_col: "MajorCluster"
 test_size: 0.2  # Ratio for train/test split when seperated_train_eval_dataset is False
@@ -22,10 +22,10 @@ cls_loss_type: "per_bin"
 # ==============================================================================
 
 # Checkpoint path for testing - specify the trained model checkpoint to evaluate
-checkpoint_path: "/home/angli/baseline/DeepSC/results/cell_type_annotation/best_model.pt"
+checkpoint_path: "${oc.env:DEEPSC_RESULTS_ROOT}/cell_type_annotation/best_model.pt"
 
 # Test results save directory - results will be saved in timestamped subdirectories
-test_save_dir: "/home/angli/baseline/DeepSC/results/cell_type_annotation"
+test_save_dir: "${oc.env:DEEPSC_RESULTS_ROOT}/cell_type_annotation"
 
 # ==============================================================================
 # UNUSED CONFIGURATIONS (Commented out - not currently used in the code)

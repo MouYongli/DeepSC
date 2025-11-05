@@ -3,6 +3,11 @@
 # Cell Type Annotation Test Script
 # This script runs testing on a trained cell type annotation model
 
+# Load environment variables from .env file
+set -a
+source .env
+set +a
+
 # GPU settings - configure the GPUs you want to use
 export CUDA_VISIBLE_DEVICES=1,2,3
 export OMP_NUM_THREADS=64

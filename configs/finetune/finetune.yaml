@@ -11,7 +11,7 @@ defaults:
 task_type: "cell_type_annotation"
 
 # Pretrained model settings
-pretrained_model_path: "/home/angli/baseline/DeepSC/results/latest_checkpoint.ckpt"
+pretrained_model_path: "${oc.env:DEEPSC_RESULTS_ROOT}/latest_checkpoint.ckpt"
 load_pretrained_model: True
 
 # Fine-tuning mode selection
@@ -21,7 +21,7 @@ load_pretrained_model: True
 finetune_mode: "full"
 
 # Path settings
-csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
+csv_path: "${oc.env:DEEPSC_DATA_ROOT}/gene_map.csv"
 
 # Model architecture settings
 use_moe_ffn: True
@@ -73,8 +73,8 @@ hydra:
 # shuffel_files_each_epoch: False
 
 # # Output and path settings
-# output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
-# ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
+# output_dir: "outputs/deepsc"
+# ckpt_dir: "ckpts"
 
 # # Checkpoint and logging settings
 # valid_every: 200
