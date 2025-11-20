@@ -1,4 +1,9 @@
-#!/usr/bin/zsh
+#!/bin/sh
+
+set -a
+source .env
+set +a
+
 
 # Use GPU/GPUs on one machine
 # Here the example is using GPUs with physical numbers 2 and 3
