@@ -99,62 +99,6 @@ class ExpressionEmbedding(nn.Module):
         return expr_embeddings
 
 
-class CategoricalGumbelSoftmax(nn.Module):
-    """
-    Gumbel Softmax 函数：用于将离散分布转换为连续分布
-    学习基因调控网络当中的关系，包括：抑制、激活、未知
-
-    Args:
-        embedding_dim: 基因嵌入维度
-        num_categories: 类别数 default: 3
-        hard: 是否使用hard模式，即是否使用one-hot编码
-        temperature: Gumbel-Softmax温度参数
-    """
-
-    def __init__(
-        self,
-        embedding_dim: int,
-        num_categories: int = 3,
-        hard: bool = True,
-        temperature: float = 0.3,
-    ):
-        super(CategoricalGumbelSoftmax, self).__init__()
-        self.embedding_dim = embedding_dim
-        self.num_categories = num_categories
-        self.hard = hard
-        self.temperature = temperature
-        # 只保留MLP
-        self.gumbel_softmax_reparametrization = nn.Sequential(
-            nn.Linear(2 * embedding_dim, embedding_dim),
-            nn.ReLU(),
-            nn.Linear(embedding_dim, num_categories),
-        )
-
-    def forward(self, gene_emb: torch.Tensor):
-        """
-        Args:
-            gene_emb: 基因嵌入, shape: (batch, g, d)
-        Returns:
-            M: 门控矩阵，shape: (batch, g, g)
-        """
-        # 构造所有基因对 (i, j)
-        src_exp = gene_emb.unsqueeze(2)  # (batch, g, 1, d)
-        tgt_exp = gene_emb.unsqueeze(1)  # (batch, 1, g, d)
-        pair_emb = torch.cat(
-            [
-                src_exp.expand(-1, -1, gene_emb.size(1), -1),
-                tgt_exp.expand(-1, gene_emb.size(1), -1, -1),
-            ],
-            dim=-1,
-        )  # (batch, g, g, 2d)
-        logits = self.gumbel_softmax_reparametrization(pair_emb)  # (batch, g, g, 3)
-        y = F.gumbel_softmax(
-            logits, tau=self.temperature, hard=self.hard, dim=-1
-        )  # (batch, g, g, 3)
-        M = y[..., 0] * (-1) + y[..., 1] * 0 + y[..., 2] * (+1)  # (batch, g, g)
-        return M, y
-
-
 class FlashGeneAttentionLayer(nn.Module):
     """
     使用 Flash Attention v2 的基因注意力层
@@ -180,12 +124,10 @@ class FlashGeneAttentionLayer(nn.Module):
         # 缩放因子
         self.scale = self.head_dim**-0.5
 
-    def forward(self, x, M=None, eps: float = 1e-8):
+    def forward(self, x):
         """
         Args:
             x: 输入张量, shape: (batch_size, seq_len, d)
-            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
-            eps: 数值稳定性参数
         Returns:
             output: 注意力输出, shape: (batch_size, seq_len, d)
         """
@@ -203,68 +145,24 @@ class FlashGeneAttentionLayer(nn.Module):
 
         # 使用 Flash Attention v2
         if FLASH_ATTENTION_AVAILABLE:
-            # 应用门控矩阵 M（如果提供）
-            if M is not None:
-                if M.dim() == 3:
-                    M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-                # 创建注意力掩码
-                attn_mask = M
-            else:
-                attn_mask = None
 
-            # 如果有门控矩阵，进行稀疏化处理
-            if M is not None:
-                scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-
-                # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
-                # 步骤1：对M=0的位置设置负无穷，其他位置不变
-                zero_mask = torch.where(M == 0, -1e9, 0.0)
-                scores = scores + zero_mask
-
-                # 步骤2：softmax（现在M=0的位置权重接近0）
-                attn_weights = F.softmax(scores, dim=-1)
-                attn_weights = self.dropout(attn_weights)
-
-                # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
-                A_sparse = attn_weights * M
-                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
-                A_bar = A_sparse / norm
-
-                # 重新计算输出
-                output = torch.matmul(A_bar, V)
-            else:
-                output = scaled_dot_product_attention(
-                    Q,
-                    K,
-                    V,
-                    attn_mask=None,
-                    dropout_p=self.dropout.p if self.training else 0.0,
-                    is_causal=False,
-                )
+            output = scaled_dot_product_attention(
+                Q,
+                K,
+                V,
+                attn_mask=None,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=False,
+            )
         else:
             # 回退到标准注意力
             scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-
-            # 应用门控矩阵 M（如果提供）
-            if M is not None:
-                if M.dim() == 3:
-                    M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-
-                # 对M=0的位置设置负无穷mask
-                zero_mask = torch.where(M == 0, -1e9, 0.0)
-                scores = scores + zero_mask
 
             # 应用 softmax
             attn_weights = F.softmax(scores, dim=-1)
             attn_weights = self.dropout(attn_weights)
 
-            # 如果有门控矩阵，进行稀疏化处理
-            if M is not None:
-                A_sparse = attn_weights * M
-                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
-                A_bar = A_sparse / norm
-            else:
-                A_bar = attn_weights
+            A_bar = attn_weights
 
             # 计算输出
             output = torch.matmul(A_bar, V)
@@ -327,16 +225,12 @@ class FlashExpressionAttentionLayer(nn.Module):
         self,
         gene_emb,
         expr_emb,
-        M=None,
-        eps: float = 1e-8,
         self_attention: bool = False,
     ):
         """
         Args:
             gene_emb: 基因嵌入, shape: (batch_size, seq_len, d)
             expr_emb: 表达嵌入, shape: (batch_size, seq_len, d)
-            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
-            eps: 数值稳定性参数
         Returns:
             output: 注意力输出, shape: (batch_size, seq_len, d)
         """
@@ -375,68 +269,22 @@ class FlashExpressionAttentionLayer(nn.Module):
 
         # 使用 Flash Attention v2
         if FLASH_ATTENTION_AVAILABLE:
-            # 应用门控矩阵 M（如果提供）
-            if M is not None:
-                if M.dim() == 3:
-                    M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-                # 创建注意力掩码
-                attn_mask = M
-            else:
-                attn_mask = None
 
-            # 如果有门控矩阵，进行稀疏化处理
-            if M is not None:
-                scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-
-                # 方案：先用mask处理M=0的位置，再用原始M区分激活/抑制
-                # 步骤1：对M=0的位置设置负无穷，其他位置不变
-                zero_mask = torch.where(M == 0, -1e9, 0.0)
-                scores = scores + zero_mask
-
-                # 步骤2：softmax（现在M=0的位置权重接近0）
-                attn_weights = F.softmax(scores, dim=-1)
-                attn_weights = self.dropout(attn_weights)
-                # 步骤3：用原始M区分激活(+1)和抑制(-1)关系
-                A_sparse = attn_weights * M
-
-                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
-                A_bar = A_sparse / norm
-                # 重新计算输出
-                output = torch.matmul(A_bar, V)
-            else:
-                # 使用 Flash Attention
-                output = scaled_dot_product_attention(
-                    Q,
-                    K,
-                    V,
-                    attn_mask=None,
-                    dropout_p=self.dropout.p if self.training else 0.0,
-                    is_causal=False,
-                )
+            output = scaled_dot_product_attention(
+                Q,
+                K,
+                V,
+                attn_mask=None,
+                dropout_p=self.dropout.p if self.training else 0.0,
+                is_causal=False,
+            )
         else:
-            # 回退到标准注意力
             scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-
-            # 应用门控矩阵 M（如果提供）
-            if M is not None:
-                if M.dim() == 3:
-                    M = M.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-
-                # 对M=0的位置设置负无穷mask
-                zero_mask = torch.where(M == 0, -1e9, 0.0)
-                scores = scores + zero_mask
 
             # 应用 softmax
             attn_weights = F.softmax(scores, dim=-1)
             attn_weights = self.dropout(attn_weights)
-
-            # 如果有门控矩阵，进行稀疏化处理
-            if M is not None:
-                A_sparse = attn_weights * M
-                norm = torch.sum(torch.abs(A_sparse), dim=-1, keepdim=True) + eps
-                A_bar = A_sparse / norm
-            else:
-                A_bar = attn_weights
+            A_bar = attn_weights
 
             # 计算输出
             output = torch.matmul(A_bar, V)
@@ -925,25 +773,24 @@ class FlashDeepSCTransformerBlock(nn.Module):
             )
         )
 
-    def forward(self, gene_emb, expr_emb, M=None):
+    def forward(self, gene_emb, expr_emb):
         """
         Args:
             gene_emb: 基因嵌入, shape: (batch_size, seq_len, embedding_dim)
             expr_emb: 表达嵌入, shape: (batch_size, seq_len, embedding_dim)
-            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
         Returns:
             out_gene: 更新后的基因嵌入
             out_expr: 更新后的表达嵌入
         """
         x = self.norm_gene1(gene_emb)
-        attn_gene = self.gene_attn(x, M)
+        attn_gene = self.gene_attn(x)
         x = gene_emb + self.dropout(attn_gene)
         x_ln = self.norm_gene2(x)
         ffn_gene = self.ffn_gene(x_ln)
         out_gene = x + self.dropout(ffn_gene)
 
         y = self.norm_expr1(expr_emb)
-        attn_expr = self.expr_attn(gene_emb, y, M, self_attention=False)
+        attn_expr = self.expr_attn(gene_emb, y, self_attention=False)
         y = expr_emb + self.dropout(attn_expr)
         y_ln = self.norm_expr2(y)
         ffn_expr = self.ffn_expr(y_ln)
@@ -987,19 +834,18 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
         )
         self.dropout = nn.Dropout(ffn_dropout)
 
-    def forward(self, expr_emb, M=None):
+    def forward(self, expr_emb):
         """
         Args:
             gene_emb: 基因嵌入, shape: (batch_size, seq_len, embedding_dim)
             expr_emb: 表达嵌入, shape: (batch_size, seq_len, embedding_dim)
-            M: 门控矩阵, shape: (batch_size, seq_len, seq_len) 或 None
         Returns:
             out_gene: 更新后的基因嵌入
             out_expr: 更新后的表达嵌入
         """
 
         y = self.norm_expr1(expr_emb)
-        attn_expr = self.expr_attn(y, y, M, self_attention=True)
+        attn_expr = self.expr_attn(y, y, self_attention=True)
         y = expr_emb + self.dropout(attn_expr)
         y_ln = self.norm_expr2(y)
         ffn_expr = self.ffn_expr(y_ln)
@@ -1031,12 +877,10 @@ class DeepSC(nn.Module):
         num_layers_ffn=2,
         use_moe_regressor=True,
         number_of_experts=3,
-        use_M_matrix=True,
         gene_embedding_participate_til_layer=3,
         moe=None,
     ):
         super().__init__()
-        self.use_M_matrix = use_M_matrix
         self.gene_embedding_participate_til_layer = gene_embedding_participate_til_layer
         self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
         self.expr_embedding = ExpressionEmbedding(
@@ -1076,8 +920,6 @@ class DeepSC(nn.Module):
         # 如果你用的是 DictConfig
         # moe_cfg = MoECfg(**cfg.moe)
         # self.moe, self.n_local_experts = build_moe_from_cfg(moe_cfg)
-        if self.use_M_matrix:
-            self.gumbel_softmax = CategoricalGumbelSoftmax(embedding_dim)  # 默认参数
         self.mask_layer_start = (
             mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
         )
@@ -1145,42 +987,30 @@ class DeepSC(nn.Module):
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
-        if self.use_M_matrix:
-            M, y = self.gumbel_softmax(gene_emb)  # (batch, g, g), (batch, g, g, 3)
-        else:
-            M = None
-            y = None
-
         for i, layer in enumerate(self.layers):
-            if i >= self.mask_layer_start:
-                gene_emb, expr_emb = layer(gene_emb, expr_emb, M)
-            else:
-                gene_emb, expr_emb = layer(gene_emb, expr_emb, None)
+            gene_emb, expr_emb = layer(gene_emb, expr_emb)
         for i, layer in enumerate(self.expression_layers):
-            if i >= self.mask_layer_start:
-                expr_emb = layer(expr_emb, M)
-            else:
-                expr_emb = layer(expr_emb, None)
+            expr_emb = layer(expr_emb)
         final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
         final_emb = self.fused_emb_proj(final_emb)  # (batch, g, d)
         if self.enable_mse and self.enable_ce:
             logits = self.classifier(final_emb)
             if return_gate_weights and self.use_moe_regressor:
                 regression_output, gate_weights = self.get_regressor_output(final_emb)
-                return logits, regression_output, y, gene_emb, expr_emb, gate_weights
+                return logits, regression_output, gene_emb, expr_emb, gate_weights
             else:
                 regression_output, _ = self.get_regressor_output(final_emb)
-                return logits, regression_output, y, gene_emb, expr_emb
+                return logits, regression_output, gene_emb, expr_emb
         elif self.enable_mse:
             if return_gate_weights and self.use_moe_regressor:
                 regression_output, gate_weights = self.get_regressor_output(final_emb)
-                return regression_output, y, gene_emb, expr_emb, gate_weights
+                return regression_output, gene_emb, expr_emb, gate_weights
             else:
                 regression_output, _ = self.get_regressor_output(final_emb)
-                return regression_output, y, gene_emb, expr_emb
+                return regression_output, gene_emb, expr_emb
         elif self.enable_ce:
             logits = self.classifier(final_emb)
-            return logits, y, gene_emb, expr_emb
+            return logits, gene_emb, expr_emb
 
     def get_regressor_output(self, final_emb):
         """

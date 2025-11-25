@@ -1,4 +1,3 @@
-#ckpt_dir: "${oc.env:DEEPSC_PROJECT_ROOT}/ckpts"
-ckpt_dir: "/hpcwork/p0021245/testdeepsc/DeepSC/ckpt"
-num_device: 4
-num_nodes: 4  # 节点数，与SLURM --nodes配置匹配
+ckpt_dir: "${oc.env:DEEPSC_PRETRAIN_CKPT_DIR}"
+num_device: 1
+num_nodes: 1  # 节点数，与SLURM --nodes配置匹配

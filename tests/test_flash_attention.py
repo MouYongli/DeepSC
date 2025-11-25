@@ -75,7 +75,6 @@ def test_flash_attention():
         enable_mse=True,
         enable_ce=True,
         use_moe_regressor=True,
-        use_M_matrix=True,
         gene_embedding_participate_til_layer=3,
         moe=moe_config,
     ).to(device)
@@ -93,16 +92,13 @@ def test_flash_attention():
             flash_outputs = flash_model(gene_ids, expression_bin, normalized_expr)
             print("Flash Attention model forward pass successful!")
 
-            # 输出格式: (logits, regression_output, y, gene_emb, expr_emb)
-            if len(flash_outputs) == 5:
-                logits, regression_output, y, gene_emb, expr_emb = flash_outputs
+            # 输出格式: (logits, regression_output, gene_emb, expr_emb)
+            if len(flash_outputs) == 4:
+                logits, regression_output, gene_emb, expr_emb = flash_outputs
                 print(f"  Logits shape: {logits.shape}")  # (batch, seq_len, num_bins+1)
                 print(
                     f"  Regression output shape: {regression_output.shape}"
                 )  # (batch, seq_len)
-                print(
-                    f"  Gumbel softmax y shape: {y.shape if y is not None else 'None'}"
-                )  # (batch, seq_len, seq_len, 3) or None
                 print(
                     f"  Gene embedding shape: {gene_emb.shape}"
                 )  # (batch, seq_len, embedding_dim)
@@ -144,8 +140,8 @@ def test_flash_attention():
             flash_outputs_with_gates = flash_model(
                 gene_ids, expression_bin, normalized_expr, return_gate_weights=True
             )
-            if len(flash_outputs_with_gates) == 6:
-                logits, regression_output, y, gene_emb, expr_emb, gate_weights = (
+            if len(flash_outputs_with_gates) == 5:
+                logits, regression_output, gene_emb, expr_emb, gate_weights = (
                     flash_outputs_with_gates
                 )
                 print(

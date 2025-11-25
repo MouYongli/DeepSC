@@ -14,7 +14,6 @@ enable_mse: ${..loss.enable_mse}
 enable_ce: ${..loss.enable_ce}
 num_layers_ffn: 2
 use_moe_regressor: ${..experiment.use_moe_regressor}
-use_M_matrix: ${..experiment.use_M_matrix}
 gene_embedding_participate_til_layer: 3
 
 moe:

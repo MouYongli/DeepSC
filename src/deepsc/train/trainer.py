@@ -270,21 +270,21 @@ class Trainer:
         mask = data["mask"]
         logits = regression_output = y = None
         if self.args.loss.enable_ce and self.args.loss.enable_mse:
-            logits, regression_output, y, _, expr_emb = self.model(
+            logits, regression_output, _, expr_emb = self.model(
                 gene,
                 masked_discrete_expr,
                 masked_continuous_expr,
                 return_mask_prob=True,
             )
         elif self.args.loss.enable_ce:
-            logits, y, _, expr_emb = self.model(
+            logits, _, expr_emb = self.model(
                 gene,
                 masked_discrete_expr,
                 masked_continuous_expr,
                 return_mask_prob=True,
             )
         elif self.args.loss.enable_mse:
-            regression_output, y, _, expr_emb = self.model(
+            regression_output, _, expr_emb = self.model(
                 gene,
                 masked_discrete_expr,
                 masked_continuous_expr,
@@ -296,7 +296,6 @@ class Trainer:
             regression_output=regression_output,
             continuous_expr_label=continuous_expr_label,
             mask=mask,
-            y=y,
             is_val=is_val,
         )
         if logits is not None:
