@@ -1,20 +1,20 @@
-_target_: src.deepsc.models.deepsc.model.DeepSC
+_target_: src.deepsc.models.deepsc_experiment.model.DeepSC
 embedding_dim: 256
-num_genes: 34683
+num_genes: 35210
 num_layers: 10 # remember to check gene_embedding_participate_til_layer and n_moe_layers
 attn_dropout: 0.1
 ffn_dropout: 0.1
-fused: False
 num_bins: ${num_bin}
 alpha: 0.5
 num_heads: 8
-mask_layer_start: 2
 enable_l0: ${..loss.enable_l0}
 enable_mse: ${..loss.enable_mse}
 enable_ce: ${..loss.enable_ce}
 num_layers_ffn: 2
 use_moe_regressor: ${..experiment.use_moe_regressor}
 gene_embedding_participate_til_layer: 3
+attention_stream: 1
+cross_attention_architecture: "A"
 
 moe:
   n_moe_layers: 4
