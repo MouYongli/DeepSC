@@ -700,11 +700,11 @@ class FlashDeepSCTransformerBlock(nn.Module):
         # Expression cross-attention with gene
         y = self.norm_expr1(expr_emb)
         if self.cross_attention_architecture == "A":
-            attn_expr = self.attn(y, out_gene_ln, out_gene_ln)
+            attn_expr = self.expr_attn(y, out_gene_ln, out_gene_ln)
         elif self.cross_attention_architecture == "B":
-            attn_expr = self.attn(out_gene_ln, out_gene_ln, y)
+            attn_expr = self.expr_attn(out_gene_ln, out_gene_ln, y)
         elif self.cross_attention_architecture == "C":
-            attn_expr = self.attn(out_gene_ln, y, y)
+            attn_expr = self.expr_attn(out_gene_ln, y, y)
         else:
             raise ValueError("Invalid cross_attention_architecture option.")
         y = expr_emb + self.dropout(attn_expr)

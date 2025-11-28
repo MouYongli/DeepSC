@@ -38,7 +38,7 @@ import sys
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.deepsc.models.deepsc.model import DeepSC
+from src.deepsc.models.deepsc_experiment.model import DeepSC
 
 # Extra dependency for similarity search
 try:
@@ -296,9 +296,10 @@ def load_model(
     checkpoint_path: str,
     device: torch.device,
     use_moe_ffn: bool = False,
-    use_M_matrix: bool = False,
     alpha: float = 0.5,
     num_bins: int = 5,
+    attention_stream: int = 1,
+    cross_attention_architecture: str = "A",
 ) -> DeepSC:
     """Load pretrained DeepSC model."""
     from omegaconf import OmegaConf
@@ -319,22 +320,21 @@ def load_model(
 
     model = DeepSC(
         embedding_dim=256,
-        num_genes=34683,
+        num_genes=35210,
         num_layers=10,
         num_heads=8,
         attn_dropout=0.1,
         ffn_dropout=0.1,
-        fused=False,
         num_bins=num_bins,
         alpha=alpha,
-        mask_layer_start=2,
         enable_l0=True,
         enable_mse=True,
         enable_ce=True,
         num_layers_ffn=2,
         use_moe_regressor=True,
-        use_M_matrix=use_M_matrix,
         gene_embedding_participate_til_layer=3,
+        attention_stream=attention_stream,
+        cross_attention_architecture=cross_attention_architecture,
         moe=moe_cfg,
     )
 
@@ -416,8 +416,10 @@ def embed_data(
                 normalized_expr=normalized_expr,
             )
 
-            # outputs: logits, regression_output, y, gene_emb, expr_emb
-            expr_emb = outputs[4]  # (batch, seq_len, embedding_dim)
+            # outputs: logits, regression_output, gene_emb, expr_emb
+            # or: regression_output, gene_emb, expr_emb (3 values when only enable_mse is True)
+            # or: logits, gene_emb, expr_emb (3 values when only enable_ce is True)
+            expr_emb = outputs[-1]  # Last output is always expr_emb
 
             if embedding_type == "cls":
                 # Use CLS token embedding
@@ -471,9 +473,10 @@ def run_customized_reference_mapping(
     max_length: int = 1024,
     k: int = 10,
     use_moe_ffn: bool = False,
-    use_M_matrix: bool = False,
     alpha: float = 0.5,
     num_bins: int = 5,
+    attention_stream: int = 1,
+    cross_attention_architecture: str = "A",
     embedding_type: str = "cls",
     visualize: bool = True,
     output_dir: str = None,
@@ -500,7 +503,7 @@ def run_customized_reference_mapping(
         output_dir: Directory to save outputs
 
     Returns:
-        accuracy: Classification accuracy
+        dict: Dictionary containing accuracy, precision, recall, F1 scores
     """
     print("=" * 60)
     print("Reference mapping using a customized reference dataset")
@@ -515,9 +518,10 @@ def run_customized_reference_mapping(
         checkpoint_path,
         device,
         use_moe_ffn=use_moe_ffn,
-        use_M_matrix=use_M_matrix,
         alpha=alpha,
         num_bins=num_bins,
+        attention_stream=attention_stream,
+        cross_attention_architecture=cross_attention_architecture,
     )
 
     # Load and embed reference data
@@ -579,14 +583,60 @@ def run_customized_reference_mapping(
     accuracy = sklearn.metrics.accuracy_score(gt, preds)
     print(f"Accuracy: {accuracy:.4f}")
 
+    # Calculate overall precision, recall, and F1
+    precision_macro = sklearn.metrics.precision_score(
+        gt, preds, average="macro", zero_division=0
+    )
+    recall_macro = sklearn.metrics.recall_score(
+        gt, preds, average="macro", zero_division=0
+    )
+    f1_macro = sklearn.metrics.f1_score(gt, preds, average="macro", zero_division=0)
+
+    precision_weighted = sklearn.metrics.precision_score(
+        gt, preds, average="weighted", zero_division=0
+    )
+    recall_weighted = sklearn.metrics.recall_score(
+        gt, preds, average="weighted", zero_division=0
+    )
+    f1_weighted = sklearn.metrics.f1_score(
+        gt, preds, average="weighted", zero_division=0
+    )
+
+    print("\nOverall Metrics (Macro):")
+    print(f"  Precision: {precision_macro:.4f}")
+    print(f"  Recall:    {recall_macro:.4f}")
+    print(f"  F1-Score:  {f1_macro:.4f}")
+
+    print("\nOverall Metrics (Weighted):")
+    print(f"  Precision: {precision_weighted:.4f}")
+    print(f"  Recall:    {recall_weighted:.4f}")
+    print(f"  F1-Score:  {f1_weighted:.4f}")
+
     # Calculate per-class metrics
     print("\nPer-class metrics:")
     unique_classes = np.unique(np.concatenate([gt, preds]))
-    for cls in unique_classes:
+
+    # Get per-class precision, recall, f1
+    precision_per_class = sklearn.metrics.precision_score(
+        gt, preds, average=None, labels=unique_classes, zero_division=0
+    )
+    recall_per_class = sklearn.metrics.recall_score(
+        gt, preds, average=None, labels=unique_classes, zero_division=0
+    )
+    f1_per_class = sklearn.metrics.f1_score(
+        gt, preds, average=None, labels=unique_classes, zero_division=0
+    )
+
+    for i, cls in enumerate(unique_classes):
         cls_mask = gt == cls
         if cls_mask.sum() > 0:
             cls_acc = (preds[cls_mask] == cls).sum() / cls_mask.sum()
-            print(f"  {cls}: {cls_acc:.4f} ({cls_mask.sum()} samples)")
+            print(f"  {cls}:")
+            print(f"    Samples:   {cls_mask.sum()}")
+            print(f"    Accuracy:  {cls_acc:.4f}")
+            print(f"    Precision: {precision_per_class[i]:.4f}")
+            print(f"    Recall:    {recall_per_class[i]:.4f}")
+            print(f"    F1-Score:  {f1_per_class[i]:.4f}")
 
     # Visualize if requested
     if visualize and output_dir is not None:
@@ -631,23 +681,50 @@ def run_customized_reference_mapping(
                     alpha=0.6,
                 )
 
-            ax.set_xlabel("UMAP 1")
-            ax.set_ylabel("UMAP 2")
-            ax.set_title(f"DeepSC Reference Mapping UMAP (Accuracy: {accuracy:.4f})")
+            ax.set_xlabel("UMAP 1", fontsize=12)
+            ax.set_ylabel("UMAP 2", fontsize=12)
+            ax.set_title(
+                f"DeepSC Reference Mapping UMAP (Accuracy: {accuracy:.4f})",
+                fontsize=14,
+                fontweight="bold",
+            )
 
-            if len(unique_labels) <= 20:
-                ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", markerscale=3)
+            # Always show legend, but adjust based on number of labels
+            if len(unique_labels) <= 25:
+                ax.legend(
+                    bbox_to_anchor=(1.05, 1),
+                    loc="upper left",
+                    markerscale=2,
+                    fontsize=9,
+                )
+            else:
+                # For many labels, use smaller font and multiple columns
+                ax.legend(
+                    bbox_to_anchor=(1.05, 1),
+                    loc="upper left",
+                    markerscale=1.5,
+                    fontsize=7,
+                    ncol=2,
+                )
 
             plt.tight_layout()
             output_path = os.path.join(output_dir, "reference_mapping_umap.png")
-            plt.savefig(output_path, dpi=150, bbox_inches="tight")
+            plt.savefig(output_path, dpi=200, bbox_inches="tight")
             print(f"UMAP saved to {output_path}")
             plt.close()
 
         except ImportError:
             print("umap-learn not installed, skipping visualization")
 
-    return accuracy
+    return {
+        "accuracy": accuracy,
+        "precision_macro": precision_macro,
+        "recall_macro": recall_macro,
+        "f1_macro": f1_macro,
+        "precision_weighted": precision_weighted,
+        "recall_weighted": recall_weighted,
+        "f1_weighted": f1_weighted,
+    }
 
 
 def run_embed_data_task(
@@ -660,9 +737,10 @@ def run_embed_data_task(
     batch_size: int = 64,
     max_length: int = 1024,
     use_moe_ffn: bool = False,
-    use_M_matrix: bool = False,
     alpha: float = 0.5,
     num_bins: int = 5,
+    attention_stream: int = 1,
+    cross_attention_architecture: str = "A",
     embedding_type: str = "cls",
 ) -> sc.AnnData:
     """
@@ -695,9 +773,10 @@ def run_embed_data_task(
         checkpoint_path,
         device,
         use_moe_ffn=use_moe_ffn,
-        use_M_matrix=use_M_matrix,
         alpha=alpha,
         num_bins=num_bins,
+        attention_stream=attention_stream,
+        cross_attention_architecture=cross_attention_architecture,
     )
 
     # Load dataset
@@ -779,11 +858,6 @@ def main():
         help="Use MoE FFN layers",
     )
     parser.add_argument(
-        "--use_M_matrix",
-        action="store_true",
-        help="Use M matrix (Gumbel-Softmax gate)",
-    )
-    parser.add_argument(
         "--alpha",
         type=float,
         default=0.5,
@@ -794,6 +868,19 @@ def main():
         type=int,
         default=5,
         help="Number of bins for discretization",
+    )
+    parser.add_argument(
+        "--attention_stream",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="Attention stream architecture: 1 for single stream, 2 for dual stream",
+    )
+    parser.add_argument(
+        "--cross_attention_architecture",
+        type=str,
+        default="A",
+        help="Cross attention architecture type",
     )
 
     # Inference configuration
@@ -869,7 +956,7 @@ def main():
                 "--ref_h5ad and --query_h5ad are required for reference_mapping task"
             )
 
-        accuracy = run_customized_reference_mapping(
+        metrics = run_customized_reference_mapping(
             checkpoint_path=args.checkpoint,
             ref_h5ad_path=args.ref_h5ad,
             query_h5ad_path=args.query_h5ad,
@@ -880,14 +967,18 @@ def main():
             max_length=args.max_length,
             k=args.k,
             use_moe_ffn=args.use_moe_ffn,
-            use_M_matrix=args.use_M_matrix,
             alpha=args.alpha,
             num_bins=args.num_bins,
+            attention_stream=args.attention_stream,
+            cross_attention_architecture=args.cross_attention_architecture,
             embedding_type=args.embedding_type,
             visualize=args.visualize,
             output_dir=args.output_dir,
         )
-        print(f"\nReference mapping completed with accuracy: {accuracy:.4f}")
+        print("\nReference mapping completed:")
+        print(f"  Accuracy: {metrics['accuracy']:.4f}")
+        print(f"  Macro F1: {metrics['f1_macro']:.4f}")
+        print(f"  Weighted F1: {metrics['f1_weighted']:.4f}")
 
     elif args.task == "embed_data":
         if args.h5ad is None:
@@ -903,9 +994,10 @@ def main():
             batch_size=args.batch_size,
             max_length=args.max_length,
             use_moe_ffn=args.use_moe_ffn,
-            use_M_matrix=args.use_M_matrix,
             alpha=args.alpha,
             num_bins=args.num_bins,
+            attention_stream=args.attention_stream,
+            cross_attention_architecture=args.cross_attention_architecture,
             embedding_type=args.embedding_type,
         )
         print(f"\nEmbedding completed. Shape: {adata.shape}")
