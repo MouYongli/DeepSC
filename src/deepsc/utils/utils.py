@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn.modules.loss import _WeightedLoss
 from torch.optim.lr_scheduler import _LRScheduler
 
+import sys
 import wandb
 from datetime import datetime
 
@@ -130,6 +131,7 @@ def setup_logging(
     rank: int = -1,
     add_timestamp: bool = True,
     log_level: str = "INFO",
+    use_hydra: bool = True,
 ) -> str:
     """
     Setup unified logging configuration.
@@ -140,6 +142,7 @@ def setup_logging(
         rank: Process rank for distributed training (-1 for single process)
         add_timestamp: Whether to add timestamp to log filename
         log_level: Logging level
+        use_hydra: Whether running under Hydra (will only redirect stdout/stderr)
 
     Returns:
         str: Path to the created log file
@@ -156,23 +159,64 @@ def setup_logging(
 
     log_file = osp.join(log_path, log_filename)
 
-    # Set logging level based on rank
+    # Only setup logging handlers if not using Hydra
+    if not use_hydra:
+        # Set logging level based on rank
+        if rank in [-1, 0]:
+            level = getattr(logging, log_level.upper())
+        else:
+            level = logging.WARN
+
+        # Configure logging with file handler
+        file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+                datefmt="[%X]",
+            )
+        )
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(level)
+        stream_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+                datefmt="[%X]",
+            )
+        )
+
+        logging.basicConfig(
+            level=level,
+            handlers=[file_handler, stream_handler],
+            force=True,  # Reset any existing logging configuration
+        )
+
+        logger = logging.getLogger()
+        logger.info(f"Log file initialized: {log_file}")
+
+    # Redirect stdout and stderr to log file (only for master rank)
     if rank in [-1, 0]:
-        level = getattr(logging, log_level.upper())
-    else:
-        level = logging.WARN
 
-    # Configure logging
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
-        datefmt="[%X]",
-        handlers=[logging.FileHandler(log_file, mode="w"), logging.StreamHandler()],
-        force=True,  # Reset any existing logging configuration
-    )
+        class TeeOutput:
+            """Redirect print output to both console and log file"""
 
-    logger = logging.getLogger()
-    logger.info(f"Log file initialized: {log_file}")
+            def __init__(self, file_path, original_stream):
+                self.file = open(file_path, "a" if use_hydra else "w", buffering=1)
+                self.original = original_stream
+
+            def write(self, message):
+                self.file.write(message)
+                self.file.flush()
+                self.original.write(message)
+                self.original.flush()
+
+            def flush(self):
+                self.file.flush()
+                self.original.flush()
+
+        sys.stdout = TeeOutput(log_file, sys.__stdout__)
+        sys.stderr = TeeOutput(log_file, sys.__stderr__)
 
     return log_file
 
