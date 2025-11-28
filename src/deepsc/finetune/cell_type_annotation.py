@@ -721,7 +721,7 @@ class CellTypeAnnotation:
                 )
             # 获取第一个batch并打印其结构
             for i, data in enumerate(data_iter):
-                is_accumulating = (i + 1) % self.args.grad_acc == 0
+                is_accumulating = (i + 1) % self.args.grad_acc != 0
                 loss_cls, error_rate = self.each_training_iteration(
                     data, is_accumulating
                 )

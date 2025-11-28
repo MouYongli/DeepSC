@@ -1172,3 +1172,121 @@ class DeepSC(nn.Module):
 
         # 返回是否有塌缩
         return len(collapsed_layers) > 0
+
+
+class ClsDecoder(nn.Module):
+    """
+    Decoder for classification task.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        n_cls: int,
+        nlayers: int = 3,
+        activation: callable = nn.ReLU,
+    ):
+        super().__init__()
+        # module list
+        self._decoder = nn.ModuleList()
+        for i in range(nlayers - 1):
+            self._decoder.append(nn.Linear(d_model, d_model))
+            self._decoder.append(activation())
+            self._decoder.append(nn.LayerNorm(d_model))
+        self.out_layer = nn.Linear(d_model, n_cls)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor, shape [batch_size, embsize]
+        """
+        for layer in self._decoder:
+            x = layer(x)
+        return self.out_layer(x)
+
+
+class DeepSCClassifier(nn.Module):
+    """
+    分类模型，使用DeepSC作为encoder
+    """
+
+    def __init__(
+        self,
+        deepsc_encoder: nn.Module,
+        n_cls: int = 1,
+        num_layers_cls: int = 3,
+        cell_emb_style: str = "avg-pool",
+    ):
+        super().__init__()
+        self.encoder = deepsc_encoder
+        self.cell_emb_style = cell_emb_style
+        self.cls_decoder = ClsDecoder(
+            deepsc_encoder.gene_embedding.embedding_dim, n_cls, num_layers_cls
+        )
+
+    def _get_cell_emb_from_layer(self, layer_output, weights=None):
+        """
+        Args:
+            layer_output(:obj:`Tensor`): shape (batch, seq_len, embsize)
+            weights(:obj:`Tensor`): shape (batch, seq_len), optional and only used
+                when :attr:`self.cell_emb_style` is "w-pool".
+
+        Returns:
+            :obj:`Tensor`: shape (batch, embsize)
+        """
+        if self.cell_emb_style == "cls":
+            cell_emb = layer_output[:, 0, :]  # (batch, embsize)
+        elif self.cell_emb_style == "avg-pool":
+            cell_emb = torch.mean(layer_output, dim=1)
+        elif self.cell_emb_style == "w-pool":
+            if weights is None:
+                raise ValueError("weights is required when cell_emb_style is w-pool")
+            if weights.dim() != 2:
+                raise ValueError("weights should be 2D")
+            cell_emb = torch.sum(layer_output * weights.unsqueeze(2), dim=1)
+            cell_emb = F.normalize(cell_emb, p=2, dim=1)  # (batch, embsize)
+
+        return cell_emb
+
+    def forward(self, gene_ids, value_log1p, value_binned, **kwargs):
+        """
+        前向传播
+
+        Args:
+            gene_ids: (batch, g)  # 基因ID序列
+            value_log1p: (batch, g)  # 归一化的表达量
+            value_binned: (batch, g)  # 离散化的表达量
+
+        Returns:
+            cls_output: 分类结果
+        """
+        # 从kwargs中移除可能冲突的参数
+        encoder_kwargs = kwargs.copy()
+        encoder_kwargs.pop("return_encodings", None)
+        encoder_kwargs.pop("return_mask_prob", None)
+        encoder_kwargs.pop("return_gate_weights", None)
+        # 使用encoder获取嵌入，注意DeepSC的参数名
+        logits, regression_output, y, gene_emb, expr_emb = self.encoder(
+            gene_ids=gene_ids,
+            normalized_expr=value_log1p,
+            expression_bin=value_binned,
+            return_encodings=True,
+            return_mask_prob=True,
+            return_gate_weights=False,
+            **encoder_kwargs,
+        )
+        # 融合基因和表达嵌入
+        final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
+        final_emb = self.encoder.fused_emb_proj(final_emb)  # (batch, g, d)
+
+        # 从4D的y (batch, g, g, 3) 中提取2D权重 (batch, g)
+        if y is not None:
+            weights = y.sum(dim=-1).mean(dim=2)  # (batch, g)
+        else:
+            weights = None
+        # print(final_emb)
+        # 获取细胞嵌入
+        cell_emb = self._get_cell_emb_from_layer(final_emb, weights)
+        # 分类
+        cls_output = self.cls_decoder(cell_emb)
+        return logits, regression_output, y, gene_emb, expr_emb, cls_output

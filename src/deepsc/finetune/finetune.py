@@ -5,7 +5,7 @@ from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
 from deepsc.finetune.cell_type_annotation import CellTypeAnnotation
-from deepsc.models.deepsc_new.model import DeepSCClassifier
+from deepsc.models.deepsc.model import DeepSCClassifier
 from deepsc.utils.utils import setup_logging
 from src.deepsc.utils import (
     count_common_cell_types_from_multiple_files,
@@ -29,8 +29,11 @@ def finetune(cfg: DictConfig):
         precision="bf16-mixed",
     )
     fabric.launch()
-    # initialize log
-    setup_logging(rank=fabric.global_rank, log_path="./logs")
+    # initialize log (Hydra auto-manages working directory)
+    # use_hydra=True to only redirect stdout/stderr, not reconfigure logging
+    setup_logging(
+        rank=fabric.global_rank, log_path=".", log_name="finetune", use_hydra=True
+    )
 
     # wandb initialization will be handled in trainer after checkpoint check
     # This way we don't create empty runs if we can resume

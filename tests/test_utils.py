@@ -92,11 +92,15 @@ class TestSetupLogging:
         """Test setup_logging with different ranks."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Test rank 0 (should get INFO level)
-            log_path = setup_logging(log_path=temp_dir, log_name="test_rank0", rank=0)
+            log_path = setup_logging(
+                log_path=temp_dir, log_name="test_rank0", rank=0, use_hydra=False
+            )
             assert os.path.exists(log_path)
 
             # Test rank > 0 (should get WARN level)
-            log_path = setup_logging(log_path=temp_dir, log_name="test_rank1", rank=1)
+            log_path = setup_logging(
+                log_path=temp_dir, log_name="test_rank1", rank=1, use_hydra=False
+            )
             assert os.path.exists(log_path)
 
 
