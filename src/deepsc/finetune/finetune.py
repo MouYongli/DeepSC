@@ -1,3 +1,6 @@
+import os
+import shutil
+
 import hydra
 import torch.nn as nn
 from lightning.fabric import Fabric
@@ -5,7 +8,7 @@ from lightning.fabric.strategies import DDPStrategy
 from omegaconf import DictConfig
 
 from deepsc.finetune.cell_type_annotation import CellTypeAnnotation
-from deepsc.models.deepsc.model import DeepSCClassifier
+from deepsc.models.deepsc_experiment.model import DeepSCClassifier
 from deepsc.utils.utils import setup_logging
 from src.deepsc.utils import (
     count_common_cell_types_from_multiple_files,
@@ -69,7 +72,28 @@ def finetune(cfg: DictConfig):
     model = model.float()
     trainer = CellTypeAnnotation(cfg, fabric=fabric, model=model)
     trainer.train()
-    # test_ckpt = TestCkpt(cfg, fabric=fabric, model=model)
+
+    # 训练完成后,复制hydra日志到训练输出目录
+    if fabric.global_rank == 0 and trainer.output_dir:
+        try:
+            # 获取当前hydra输出目录
+            hydra_output_dir = os.getcwd()
+
+            # 查找finetune_0.log文件
+            log_file = os.path.join(hydra_output_dir, "finetune_0.log")
+            if os.path.exists(log_file):
+                dest_log = os.path.join(trainer.log_dir, "finetune.log")
+                shutil.copy2(log_file, dest_log)
+                print(f"Copied log file to: {dest_log}")
+
+            # 复制hydra配置
+            hydra_config_dir = os.path.join(hydra_output_dir, ".hydra")
+            if os.path.exists(hydra_config_dir):
+                dest_config_dir = os.path.join(trainer.output_dir, "config")
+                shutil.copytree(hydra_config_dir, dest_config_dir, dirs_exist_ok=True)
+                print(f"Copied config to: {dest_config_dir}")
+        except Exception as e:
+            print(f"Warning: Failed to copy logs/config: {e}")
 
 
 if __name__ == "__main__":

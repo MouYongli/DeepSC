@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
+from datetime import datetime
 from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
     GeneExpressionDatasetMappedWithGlobalCelltype,
 )
@@ -41,6 +42,9 @@ class CellTypeAnnotation:
         self.is_master = self.fabric.global_rank == 0
         self.epoch = 0  # 初始化epoch变量用于绘图
 
+        # 创建带时间戳的输出目录
+        self.setup_output_directory()
+
         # 首先构建数据集以确定正确的celltype数量
         self.build_dataset_sampler_from_h5ad()
 
@@ -56,6 +60,45 @@ class CellTypeAnnotation:
         self.model, self.optimizer = self.fabric.setup(self.model, self.optimizer)
         self.init_loss_fn()
         self.scheduler = self.create_scheduler(self.optimizer, self.args)
+
+    def setup_output_directory(self):
+        """
+        创建带时间戳的输出目录用于保存checkpoint和log
+        """
+        if self.is_master:
+            # 创建基础目录
+            base_dir = "/home/angli/DeepSC/results/cell_type_annotation"
+            os.makedirs(base_dir, exist_ok=True)
+
+            # 创建带时间戳的子目录
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.output_dir = os.path.join(base_dir, timestamp)
+            os.makedirs(self.output_dir, exist_ok=True)
+
+            # 创建checkpoints和logs子目录
+            self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
+            self.log_dir = os.path.join(self.output_dir, "logs")
+            self.vis_dir = os.path.join(self.output_dir, "visualizations")
+            os.makedirs(self.ckpt_dir, exist_ok=True)
+            os.makedirs(self.log_dir, exist_ok=True)
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+            print(f"Output directory created: {self.output_dir}")
+            print(f"  - Checkpoints: {self.ckpt_dir}")
+            print(f"  - Logs: {self.log_dir}")
+            print(f"  - Visualizations: {self.vis_dir}")
+        else:
+            # 非master进程设置为None
+            self.output_dir = None
+            self.ckpt_dir = None
+            self.log_dir = None
+            self.vis_dir = None
+
+        # 广播输出目录到所有进程
+        self.output_dir = self.fabric.broadcast(self.output_dir, src=0)
+        self.ckpt_dir = self.fabric.broadcast(self.ckpt_dir, src=0)
+        self.log_dir = self.fabric.broadcast(self.log_dir, src=0)
+        self.vis_dir = self.fabric.broadcast(self.vis_dir, src=0)
 
     def setup_finetune_mode(self):
         """
@@ -350,31 +393,17 @@ class CellTypeAnnotation:
         discrete_expr = data["masked_discrete_expr"]
         continuous_expr = data["masked_continuous_expr"]
         cell_type_id = data["cell_type_id"]
-        model_outputs = self.model(
+        cls_output = self.model(
             gene_ids=gene,
             value_log1p=continuous_expr,
-            value_binned=discrete_expr,  # 使用新映射后的数据
-            return_encodings=False,
-            return_mask_prob=True,
-            return_gate_weights=False,
+            value_binned=discrete_expr,
         )
-        logits, regression_output, y, gene_emb, expr_emb, cls_output = model_outputs
-        output_dict = {
-            "mlm_output": logits,
-            "cls_output": cls_output,
-            "cell_emb": self.model._get_cell_emb_from_layer(
-                self.model.encoder.fused_emb_proj(
-                    torch.cat([gene_emb, expr_emb], dim=-1)
-                ),
-                y.sum(dim=-1).mean(dim=2) if y is not None else None,
-            ),
-        }
         loss = 0.0
-        loss_cls = self.criterion_cls(output_dict["cls_output"], cell_type_id)
+        loss_cls = self.criterion_cls(cls_output, cell_type_id)
         loss = loss + loss_cls
 
         error_rate = 1 - (
-            (output_dict["cls_output"].argmax(1) == cell_type_id).sum().item()
+            (cls_output.argmax(1) == cell_type_id).sum().item()
         ) / cell_type_id.size(0)
         if is_accumulating:
             with self.fabric.no_backward_sync(self.model, enabled=is_accumulating):
@@ -410,34 +439,17 @@ class CellTypeAnnotation:
                 discrete_expr = data["masked_discrete_expr"]
                 continuous_expr = data["masked_continuous_expr"]
                 cell_type_id = data["cell_type_id"]
-                model_outputs = self.model(
+                cls_output = model(
                     gene_ids=gene,
                     value_log1p=continuous_expr,
-                    value_binned=discrete_expr,  # 使用新映射后的数据
-                    return_encodings=False,
-                    return_mask_prob=True,
-                    return_gate_weights=False,
+                    value_binned=discrete_expr,
                 )
-                logits, regression_output, y, gene_emb, expr_emb, cls_output = (
-                    model_outputs
-                )
-                output_dict = {
-                    "mlm_output": logits,
-                    "cls_output": cls_output,
-                    "cell_emb": model._get_cell_emb_from_layer(
-                        model.encoder.fused_emb_proj(
-                            torch.cat([gene_emb, expr_emb], dim=-1)
-                        ),
-                        y.sum(dim=-1).mean(dim=2) if y is not None else None,
-                    ),
-                }
-                output_values = output_dict["cls_output"]
-                loss = self.criterion_cls(output_values, cell_type_id)
+                loss = self.criterion_cls(cls_output, cell_type_id)
                 total_loss += loss.item() * len(gene)
-                accuracy = (output_values.argmax(1) == cell_type_id).sum().item()
+                accuracy = (cls_output.argmax(1) == cell_type_id).sum().item()
                 total_error += (1 - accuracy / len(gene)) * len(gene)
                 total_num += len(gene)
-                preds = output_values.argmax(1).detach().cpu()
+                preds = cls_output.argmax(1).detach().cpu()
                 predictions.append(preds)
                 cell_type_ids.append(cell_type_id.detach().cpu())
             from sklearn.metrics import (
@@ -544,13 +556,8 @@ class CellTypeAnnotation:
         y_true = processed_data["y_true"]
         y_pred = processed_data["y_pred"]
 
-        # 创建保存图表的目录
-        save_dir = (
-            self.args.save_dir
-            if hasattr(self.args, "save_dir") and self.args.save_dir
-            else "./evaluation_plots"
-        )
-        os.makedirs(save_dir, exist_ok=True)
+        # 使用新的可视化目录
+        save_dir = self.vis_dir
 
         # 绘制图1：分类指标详情（4个子图）
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
@@ -732,7 +739,50 @@ class CellTypeAnnotation:
                     )
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
-            self.evaluate(self.model, self.eval_loader)
+            eval_loss, eval_error = self.evaluate(self.model, self.eval_loader)
+
+            # 保存checkpoint
+            self.save_checkpoint(epoch, eval_loss, eval_error)
+
+    def save_checkpoint(self, epoch, eval_loss, eval_error):
+        """
+        保存checkpoint
+
+        Args:
+            epoch: 当前epoch
+            eval_loss: 评估损失
+            eval_error: 评估错误率
+        """
+        if not self.is_master:
+            return
+
+        # 准备checkpoint数据
+        checkpoint = {
+            "epoch": epoch,
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "eval_loss": eval_loss,
+            "eval_error": eval_error,
+            "cell_type_count": self.cell_type_count,
+            "type2id": self.type2id,
+            "id2type": self.id2type,
+        }
+
+        # 保存当前epoch的checkpoint
+        ckpt_path = os.path.join(self.ckpt_dir, f"epoch_{epoch}.ckpt")
+        torch.save(checkpoint, ckpt_path)
+        print(f"Saved checkpoint: {ckpt_path}")
+
+        # 保存为latest checkpoint (覆盖)
+        latest_path = os.path.join(self.ckpt_dir, "latest_checkpoint.ckpt")
+        torch.save(checkpoint, latest_path)
+        print(f"Saved latest checkpoint: {latest_path}")
+
+        # 保存训练日志
+        log_file = os.path.join(self.log_dir, "training_log.txt")
+        with open(log_file, "a") as f:
+            f.write(f"Epoch {epoch}: Loss={eval_loss:.4f}, Error={eval_error:.4f}\n")
 
     def load_pretrained_model(self):
         ckpt_path = self.args.pretrained_model_path

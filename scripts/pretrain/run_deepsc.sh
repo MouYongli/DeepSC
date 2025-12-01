@@ -17,7 +17,7 @@ torchrun \
   --nproc_per_node=$NUM_GPUS \
   --master_port=$MASTER_PORT \
   -m deepsc.pretrain.pretrain \
-
+  model.cross_attention_architecture="B"
 
 # Use the following command to overwrite the parameters
 # torchrun \

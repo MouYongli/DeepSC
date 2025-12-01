@@ -10,7 +10,7 @@ run_name: "finetune_cell_type_annotation_256hd"
 chunksize: 4
 shuffel_files_each_epoch: False
 
-pretrained_model_path: "/home/angli/DeepSC/results/pretraining_1120/DeepSC_10_0.ckpt"
+pretrained_model_path: "/home/angli/DeepSC/results/pretraining_1201/DeepSC_11_0.ckpt"
 load_pretrained_model: True
 
 # Fine-tuning mode selection
@@ -62,7 +62,7 @@ use_exp_regression_loss: False
 #Print details of mse loss in log
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
-csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
+csv_path: "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
 seperated_train_eval_dataset: False
 data_path: "/home/angli/DeepSC/data/processed/baseline/scgpt/myeloid_train.h5ad"
 data_path_eval: "/home/angli/DeepSC/data/processed/baseline/scgpt/myeloid_test.h5ad"
