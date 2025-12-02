@@ -197,29 +197,61 @@ class CellTypeAnnotation:
         return torch.stack(ce_losses)  # (num_bins,)
 
     def create_scheduler(self, optimizer, args):
+        """
+        Create learning rate scheduler based on configuration.
 
-        total_steps = args.epoch * math.ceil(
-            (100000) / (args.batch_size * self.world_size * args.grad_acc)
-        )
-        warmup_ratio = self.args.warmup_ratio
-        warmup_steps = math.ceil(total_steps * warmup_ratio)
-        main_steps = total_steps - warmup_steps
-        linear_warmup = LinearLR(
-            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
-        )
-        cosine_anneal = CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(
-            optimizer,
-            T_0=warmup_steps * 3,
-            T_mult=1,
-            warmup_steps=0,
-            decay=0.9,
-        )
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[linear_warmup, cosine_anneal],
-            milestones=[warmup_steps],
-        )
-        return scheduler
+        Supported scheduler types (controlled by args.lr_scheduler_type):
+        - 'constant': No scheduler, constant learning rate
+        - 'cosine': Cosine annealing with warmup and restarts (default)
+        """
+        scheduler_type = getattr(args, "lr_scheduler_type", "cosine")
+
+        if scheduler_type == "constant":
+            # No scheduler needed for constant learning rate
+            if self.is_master:
+                print("=" * 80)
+                print(f"Using CONSTANT learning rate: {args.learning_rate}")
+                print("No learning rate scheduling will be applied.")
+                print("=" * 80)
+            return None
+
+        elif scheduler_type == "cosine":
+            # Original cosine annealing with warmup
+            total_steps = args.epoch * math.ceil(
+                (100000) / (args.batch_size * self.world_size * args.grad_acc)
+            )
+            warmup_ratio = self.args.warmup_ratio
+            warmup_steps = math.ceil(total_steps * warmup_ratio)
+
+            linear_warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+            )
+            cosine_anneal = CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(
+                optimizer,
+                T_0=warmup_steps * 3,
+                T_mult=1,
+                warmup_steps=0,
+                decay=0.9,
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[linear_warmup, cosine_anneal],
+                milestones=[warmup_steps],
+            )
+            if self.is_master:
+                print("=" * 80)
+                print("Using COSINE ANNEALING with warmup:")
+                print(f"  - Warmup steps: {warmup_steps}")
+                print(f"  - Total steps: {total_steps}")
+                print(f"  - Initial LR: {args.learning_rate}")
+                print("=" * 80)
+            return scheduler
+
+        else:
+            raise ValueError(
+                f"Unknown lr_scheduler_type: {scheduler_type}. "
+                f"Must be one of: 'constant', 'cosine'"
+            )
 
     def calculate_mean_ce_loss(self, logits, discrete_expr_label):
         per_bin_ce_loss = self.calculate_per_bin_ce_loss(logits, discrete_expr_label)
@@ -412,7 +444,8 @@ class CellTypeAnnotation:
             self.fabric.backward(loss / self.args.grad_acc)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
             self.optimizer.step()
-            self.scheduler.step()  # 每次optimizer.step()后更新学习率
+            if self.scheduler is not None:
+                self.scheduler.step()  # 每次optimizer.step()后更新学习率
             self.optimizer.zero_grad()
 
         return loss_cls, error_rate
@@ -761,7 +794,9 @@ class CellTypeAnnotation:
             "epoch": epoch,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
+            "scheduler": (
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
             "eval_loss": eval_loss,
             "eval_error": eval_error,
             "cell_type_count": self.cell_type_count,
