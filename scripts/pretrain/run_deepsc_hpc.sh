@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -A p0021245
 #SBATCH --job-name=scbert_train
-#SBATCH --nodes=2
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:4
@@ -20,7 +20,7 @@ export MASTER_PORT=$((10000 + $SLURM_JOB_ID % 10000))
 #显示出所有主机节点|取第一个
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export WORLD_SIZE=$SLURM_NTASKS
-export PYTHONPATH=/hpcwork/p0021245/pretrain/DeepSC/src
+export PYTHONPATH=/hpcwork/p0021245/testdeepsc/DeepSC/src
 
 
 echo "MASTER_ADDR=$MASTER_ADDR"

@@ -188,6 +188,7 @@ glossary/*bk.md
 **/scBERT_old
 
 ckpts/
+ckpt/
 configs/scbert_pretrain.yaml
 outputs/
 tests/outputs/

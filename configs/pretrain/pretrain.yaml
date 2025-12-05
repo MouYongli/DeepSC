@@ -8,7 +8,7 @@ defaults:
   - experiment: default
   - scheduler: default
   - fabric: default
-  - override hydra/job_logging: colorlog
+  - override hydra/job_logging: default
 
 seed: 42
 model_name: "DeepSC"

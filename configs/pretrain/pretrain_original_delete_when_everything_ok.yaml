@@ -56,12 +56,12 @@ use_exp_regression_loss: False
 
 #Print details of mse loss in log
 show_mse_loss_details: False
-output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
+output_dir: "${oc.env:DEEPSC_PROJECT_ROOT}/outputs/deepsc"
 
-data_path: "/home/angli/baseline/DeepSC/data/processed/npz_data_after_shuffel"
+data_path: "${oc.env:DEEPSC_DATA_ROOT}/processed/npz_data_after_shuffel"
 data_length: 5000
 seed: 42
-ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
+ckpt_dir: "${oc.env:DEEPSC_PROJECT_ROOT}/ckpts"
 num_device: 2
 num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 valid_every: 2000
