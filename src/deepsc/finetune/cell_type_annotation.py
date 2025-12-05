@@ -11,8 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from datetime import datetime
-from deepsc.data import DataCollator
-from deepsc.data.dataset import (
+from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
     GeneExpressionDatasetMappedWithGlobalCelltype,
 )
 from deepsc.utils import (
@@ -39,6 +38,9 @@ class CellTypeAnnotation:
         self.is_master = self.fabric.global_rank == 0
         self.epoch = 0  # 初始化epoch变量用于绘图
 
+        # 创建带时间戳的输出目录
+        self.setup_output_directory()
+
         # 首先构建数据集以确定正确的celltype数量
         self.build_dataset_sampler_from_h5ad()
 
@@ -59,6 +61,109 @@ class CellTypeAnnotation:
             self.optimizer, self.args, self.world_size
         )
 
+    def setup_output_directory(self):
+        """
+        创建带时间戳的输出目录用于保存checkpoint和log
+        """
+        if self.is_master:
+            # 创建基础目录
+            base_dir = "/home/angli/DeepSC/results/cell_type_annotation"
+            os.makedirs(base_dir, exist_ok=True)
+
+            # 创建带时间戳的子目录
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.output_dir = os.path.join(base_dir, timestamp)
+            os.makedirs(self.output_dir, exist_ok=True)
+
+            # 创建checkpoints和logs子目录
+            self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
+            self.log_dir = os.path.join(self.output_dir, "logs")
+            self.vis_dir = os.path.join(self.output_dir, "visualizations")
+            os.makedirs(self.ckpt_dir, exist_ok=True)
+            os.makedirs(self.log_dir, exist_ok=True)
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+            print(f"Output directory created: {self.output_dir}")
+            print(f"  - Checkpoints: {self.ckpt_dir}")
+            print(f"  - Logs: {self.log_dir}")
+            print(f"  - Visualizations: {self.vis_dir}")
+        else:
+            # 非master进程设置为None
+            self.output_dir = None
+            self.ckpt_dir = None
+            self.log_dir = None
+            self.vis_dir = None
+
+        # 广播输出目录到所有进程
+        self.output_dir = self.fabric.broadcast(self.output_dir, src=0)
+        self.ckpt_dir = self.fabric.broadcast(self.ckpt_dir, src=0)
+        self.log_dir = self.fabric.broadcast(self.log_dir, src=0)
+        self.vis_dir = self.fabric.broadcast(self.vis_dir, src=0)
+
+    def setup_finetune_mode(self):
+        """
+        Configure the fine-tuning mode based on the configuration.
+        Supports two modes:
+        - full: Full parameter fine-tuning
+        - head_only: Only fine-tune the classification head
+        """
+        finetune_mode = getattr(self.args, "finetune_mode", "full")
+
+        if finetune_mode == "full":
+            # Full fine-tuning: train all parameters
+            if self.is_master:
+                print("=" * 80)
+                print("Fine-tuning Mode: FULL PARAMETER FINE-TUNING")
+                print("All model parameters will be trained.")
+                print("=" * 80)
+            # All parameters are trainable by default, no need to change
+
+        elif finetune_mode == "head_only":
+            # Head-only fine-tuning: freeze encoder, only train classification head
+            if self.is_master:
+                print("=" * 80)
+                print("Fine-tuning Mode: CLASSIFICATION HEAD ONLY")
+                print("Only the classification head will be trained.")
+                print("=" * 80)
+
+            # Freeze all encoder parameters
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+
+            # Ensure cls_decoder parameters are trainable
+            for param in self.model.cls_decoder.parameters():
+                param.requires_grad = True
+        else:
+            raise ValueError(
+                f"Unknown finetune_mode: {finetune_mode}. "
+                f"Must be one of: 'full', 'head_only'"
+            )
+
+    def get_trainable_parameters(self):
+        """
+        Get the list of trainable parameters based on the fine-tuning mode.
+        """
+        finetune_mode = getattr(self.args, "finetune_mode", "full")
+
+        if finetune_mode == "head_only":
+            # Only return cls_decoder parameters
+            trainable_params = self.model.cls_decoder.parameters()
+        else:
+            trainable_params = self.model.parameters()
+
+        # Count and print trainable parameters
+        if self.is_master:
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params_list = list(trainable_params)
+            trainable_count = sum(p.numel() for p in trainable_params_list)
+            print(f"Total parameters: {total_params:,}")
+            print(f"Trainable parameters: {trainable_count:,}")
+            print(f"Trainable ratio: {trainable_count / total_params * 100:.2f}%")
+            print("=" * 80)
+            return iter(trainable_params_list)
+
+        return trainable_params
+
     def init_loss_fn(self):
         """Initialize loss function based on configuration."""
         if self.args.cls_loss_type == "standard":
@@ -71,6 +176,72 @@ class CellTypeAnnotation:
                 )
 
             self.criterion_cls = per_class_loss_wrapper
+
+    def create_scheduler(self, optimizer, args):
+        """
+        Create learning rate scheduler based on configuration.
+
+        Supported scheduler types (controlled by args.lr_scheduler_type):
+        - 'constant': No scheduler, constant learning rate
+        - 'cosine': Cosine annealing with warmup and restarts (default)
+        """
+        scheduler_type = getattr(args, "lr_scheduler_type", "cosine")
+
+        if scheduler_type == "constant":
+            # No scheduler needed for constant learning rate
+            if self.is_master:
+                print("=" * 80)
+                print(f"Using CONSTANT learning rate: {args.learning_rate}")
+                print("No learning rate scheduling will be applied.")
+                print("=" * 80)
+            return None
+
+        elif scheduler_type == "cosine":
+            # Original cosine annealing with warmup
+            total_steps = args.epoch * math.ceil(
+                (100000) / (args.batch_size * self.world_size * args.grad_acc)
+            )
+            warmup_ratio = self.args.warmup_ratio
+            warmup_steps = math.ceil(total_steps * warmup_ratio)
+
+            linear_warmup = LinearLR(
+                optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps
+            )
+            cosine_anneal = CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(
+                optimizer,
+                T_0=warmup_steps * 3,
+                T_mult=1,
+                warmup_steps=0,
+                decay=0.9,
+            )
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[linear_warmup, cosine_anneal],
+                milestones=[warmup_steps],
+            )
+            if self.is_master:
+                print("=" * 80)
+                print("Using COSINE ANNEALING with warmup:")
+                print(f"  - Warmup steps: {warmup_steps}")
+                print(f"  - Total steps: {total_steps}")
+                print(f"  - Initial LR: {args.learning_rate}")
+                print("=" * 80)
+            return scheduler
+
+        else:
+            raise ValueError(
+                f"Unknown lr_scheduler_type: {scheduler_type}. "
+                f"Must be one of: 'constant', 'cosine'"
+            )
+
+    def calculate_mean_ce_loss(self, logits, discrete_expr_label):
+        per_bin_ce_loss = self.calculate_per_bin_ce_loss(logits, discrete_expr_label)
+        mean_ce_loss = (
+            per_bin_ce_loss.mean()
+            if per_bin_ce_loss is not None
+            else torch.tensor(0.0, device=logits.device)
+        )
+        return mean_ce_loss
 
     def build_dataset_sampler_from_h5ad(self):
         print("Building dataset sampler from h5ad file...")
@@ -191,31 +362,17 @@ class CellTypeAnnotation:
         discrete_expr = data["masked_discrete_expr"]
         continuous_expr = data["masked_continuous_expr"]
         cell_type_id = data["cell_type_id"]
-        model_outputs = self.model(
+        cls_output = self.model(
             gene_ids=gene,
             value_log1p=continuous_expr,
-            value_binned=discrete_expr,  # 使用新映射后的数据
-            return_encodings=False,
-            return_mask_prob=True,
-            return_gate_weights=False,
+            value_binned=discrete_expr,
         )
-        logits, _, y, gene_emb, expr_emb, cls_output = model_outputs
-        output_dict = {
-            "mlm_output": logits,
-            "cls_output": cls_output,
-            "cell_emb": self.model._get_cell_emb_from_layer(
-                self.model.encoder.fused_emb_proj(
-                    torch.cat([gene_emb, expr_emb], dim=-1)
-                ),
-                y.sum(dim=-1).mean(dim=2) if y is not None else None,
-            ),
-        }
         loss = 0.0
-        loss_cls = self.criterion_cls(output_dict["cls_output"], cell_type_id)
+        loss_cls = self.criterion_cls(cls_output, cell_type_id)
         loss = loss + loss_cls
 
         error_rate = 1 - (
-            (output_dict["cls_output"].argmax(1) == cell_type_id).sum().item()
+            (cls_output.argmax(1) == cell_type_id).sum().item()
         ) / cell_type_id.size(0)
         if is_accumulating:
             with self.fabric.no_backward_sync(self.model, enabled=is_accumulating):
@@ -224,7 +381,8 @@ class CellTypeAnnotation:
             self.fabric.backward(loss / self.args.grad_acc)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
             self.optimizer.step()
-            self.scheduler.step()  # 每次optimizer.step()后更新学习率
+            if self.scheduler is not None:
+                self.scheduler.step()  # 每次optimizer.step()后更新学习率
             self.optimizer.zero_grad()
 
         return loss_cls, error_rate
@@ -250,34 +408,17 @@ class CellTypeAnnotation:
                 discrete_expr = data["masked_discrete_expr"]
                 continuous_expr = data["masked_continuous_expr"]
                 cell_type_id = data["cell_type_id"]
-                model_outputs = self.model(
+                cls_output = model(
                     gene_ids=gene,
                     value_log1p=continuous_expr,
-                    value_binned=discrete_expr,  # 使用新映射后的数据
-                    return_encodings=False,
-                    return_mask_prob=True,
-                    return_gate_weights=False,
+                    value_binned=discrete_expr,
                 )
-                logits, regression_output, y, gene_emb, expr_emb, cls_output = (
-                    model_outputs
-                )
-                output_dict = {
-                    "mlm_output": logits,
-                    "cls_output": cls_output,
-                    "cell_emb": model._get_cell_emb_from_layer(
-                        model.encoder.fused_emb_proj(
-                            torch.cat([gene_emb, expr_emb], dim=-1)
-                        ),
-                        y.sum(dim=-1).mean(dim=2) if y is not None else None,
-                    ),
-                }
-                output_values = output_dict["cls_output"]
-                loss = self.criterion_cls(output_values, cell_type_id)
+                loss = self.criterion_cls(cls_output, cell_type_id)
                 total_loss += loss.item() * len(gene)
-                accuracy = (output_values.argmax(1) == cell_type_id).sum().item()
+                accuracy = (cls_output.argmax(1) == cell_type_id).sum().item()
                 total_error += (1 - accuracy / len(gene)) * len(gene)
                 total_num += len(gene)
-                preds = output_values.argmax(1).detach().cpu()
+                preds = cls_output.argmax(1).detach().cpu()
                 predictions.append(preds)
                 cell_type_ids.append(cell_type_id.detach().cpu())
             from sklearn.metrics import (
@@ -314,10 +455,105 @@ class CellTypeAnnotation:
             )
 
             # 绘制评估图表
-            save_dir = (
-                self.args.save_dir
-                if hasattr(self.args, "save_dir") and self.args.save_dir
-                else "./evaluation_plots"
+            self.plot_evaluation_charts(y_true, y_pred)
+
+        return total_loss / total_num, total_error / total_num
+
+    def process_evaluation_data(self, y_true, y_pred):
+        """
+        处理评估数据，计算指标并准备绘图所需的数据
+
+        Returns:
+            dict: 包含处理后的数据和指标，如果没有有效类别则返回None
+        """
+        from sklearn.metrics import classification_report
+
+        # 现在所有类型都是交集，直接使用即可
+        eval_labels = np.arange(self.cell_type_count)  # 0 到 cell_type_count-1
+        target_names = [self.id2type[i] for i in eval_labels]
+
+        # 计算分类指标
+        report = classification_report(
+            y_true,
+            y_pred,
+            labels=eval_labels,
+            target_names=target_names,
+            output_dict=True,
+            zero_division=0,
+        )
+
+        # 提取指标数据
+        metrics_data = {
+            "categories": target_names,
+            "recalls": [report[name]["recall"] for name in target_names],
+            "precisions": [report[name]["precision"] for name in target_names],
+            "f1_scores": [report[name]["f1-score"] for name in target_names],
+            "supports": [report[name]["support"] for name in target_names],
+        }
+
+        # 计算类别占比
+        total_samples = sum(metrics_data["supports"])
+        metrics_data["proportions"] = [
+            s / total_samples for s in metrics_data["supports"]
+        ]
+        metrics_data["unique_labels"] = eval_labels
+        metrics_data["y_true"] = y_true
+        metrics_data["y_pred"] = y_pred
+
+        return metrics_data
+
+    def plot_evaluation_charts(self, y_true, y_pred):
+        """
+        绘制评估图表：分类指标详情和混淆矩阵
+        """
+        from sklearn.metrics import confusion_matrix
+
+        # 处理评估数据
+        processed_data = self.process_evaluation_data(y_true, y_pred)
+        if processed_data is None:
+            print("Warning: No valid categories found for plotting")
+            return
+
+        # 解包处理后的数据
+        categories = processed_data["categories"]
+        recalls = processed_data["recalls"]
+        precisions = processed_data["precisions"]
+        f1_scores = processed_data["f1_scores"]
+        supports = processed_data["supports"]
+        proportions = processed_data["proportions"]
+        unique_labels = processed_data["unique_labels"]
+        y_true = processed_data["y_true"]
+        y_pred = processed_data["y_pred"]
+
+        # 使用新的可视化目录
+        save_dir = self.vis_dir
+
+        # 绘制图1：分类指标详情（4个子图）
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(
+            f"Classification Metrics by Cell Type - Epoch {self.epoch}",
+            fontsize=16,
+            fontweight="bold",
+        )
+
+        # 子图1: Recall
+        bars1 = ax1.bar(range(len(categories)), recalls, color="skyblue", alpha=0.8)
+        ax1.set_title("Recall by Cell Type")
+        ax1.set_ylabel("Recall")
+        ax1.set_xticks(range(len(categories)))
+        ax1.set_xticklabels(categories, rotation=45, ha="right")
+        ax1.set_ylim(0, 1)
+        ax1.grid(axis="y", alpha=0.3)
+        # 添加数值标签
+        for i, bar in enumerate(bars1):
+            height = bar.get_height()
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{height:.2f}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
             )
             plot_classification_metrics(
                 y_true, y_pred, self.id2type, save_dir=save_dir, epoch=self.epoch
@@ -352,18 +588,53 @@ class CellTypeAnnotation:
                         error_rate=error_rate,
                     )
             self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
+            self.fabric.print(f"Epoch {epoch} [Finetune Cell Type Annotation]")
             eval_loss, eval_error = self.evaluate(self.model, self.eval_loader)
 
-            # Save best model
-            if self.is_master and eval_loss < best_loss:
-                best_loss = eval_loss
-                self.save_checkpoint(epoch, eval_loss, is_best=True)
-                print(f"Saved best model at epoch {epoch} with loss {eval_loss:.4f}")
+            # 保存checkpoint
+            self.save_checkpoint(epoch, eval_loss, eval_error)
 
-            # Save checkpoint every N epochs if configured
-            if self.is_master and hasattr(self.args, "save_every_n_epochs"):
-                if epoch % self.args.save_every_n_epochs == 0:
-                    self.save_checkpoint(epoch, eval_loss, is_best=False)
+    def save_checkpoint(self, epoch, eval_loss, eval_error):
+        """
+        保存checkpoint
+
+        Args:
+            epoch: 当前epoch
+            eval_loss: 评估损失
+            eval_error: 评估错误率
+        """
+        if not self.is_master:
+            return
+
+        # 准备checkpoint数据
+        checkpoint = {
+            "epoch": epoch,
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": (
+                self.scheduler.state_dict() if self.scheduler is not None else None
+            ),
+            "eval_loss": eval_loss,
+            "eval_error": eval_error,
+            "cell_type_count": self.cell_type_count,
+            "type2id": self.type2id,
+            "id2type": self.id2type,
+        }
+
+        # 保存当前epoch的checkpoint
+        ckpt_path = os.path.join(self.ckpt_dir, f"epoch_{epoch}.ckpt")
+        torch.save(checkpoint, ckpt_path)
+        print(f"Saved checkpoint: {ckpt_path}")
+
+        # 保存为latest checkpoint (覆盖)
+        latest_path = os.path.join(self.ckpt_dir, "latest_checkpoint.ckpt")
+        torch.save(checkpoint, latest_path)
+        print(f"Saved latest checkpoint: {latest_path}")
+
+        # 保存训练日志
+        log_file = os.path.join(self.log_dir, "training_log.txt")
+        with open(log_file, "a") as f:
+            f.write(f"Epoch {epoch}: Loss={eval_loss:.4f}, Error={eval_error:.4f}\n")
 
     def load_pretrained_model(self):
         ckpt_path = self.args.pretrained_model_path
