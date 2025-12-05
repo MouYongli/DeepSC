@@ -77,7 +77,7 @@ num_nodes: 1  # 节点数，与SLURM --nodes配置匹配
 valid_every: 200
 model_name: "DeepSC_heart9_blood_others_blood"
 grad_acc: 20
-learning_rate: 4e-4
+learning_rate: 3e-4
 epoch: 10
 batch_size: 32
 num_bin: 5

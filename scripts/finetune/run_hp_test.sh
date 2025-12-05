@@ -20,9 +20,9 @@ PYTHONPATH=src torchrun \
   --nproc_per_node=$NUM_GPUS \
   --master_port=12622 \
   -m deepsc.finetune.finetune \
-  data_path="/home/angli/DeepSC/data/processed/baseline/scgpt/myeloid_train.h5ad" \
-  data_path_eval="/home/angli/DeepSC/data/processed/baseline/scgpt/myeloid_test.h5ad" \
-  pretrained_model_path="/home/angli/DeepSC/results/pretraining_1201/DeepSC_11_0.ckpt" \
+  data_path="/home/angli/DeepSC/data/processed/baseline/scgpt/zheng_train_preprocessed.h5ad" \
+  data_path_eval="/home/angli/DeepSC/data/processed/baseline/scgpt/zheng_test_preprocessed.h5ad" \
+  pretrained_model_path="/home/angli/DeepSC/results/cell_type_annotation/20251203_100918/checkpoints/latest_checkpoint.ckpt" \
   load_pretrained_model=true \
   model.attention_stream=2 \
   model.cross_attention_architecture="A"
