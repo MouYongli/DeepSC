@@ -9,19 +9,16 @@ run_name: "finetune_cell_type_annotation_256hd"
 #文件加载相关
 chunksize: 4
 shuffel_files_each_epoch: False
+pretrained_model: True
+pretrained_model_path: "/home/angli/baseline/DeepSC/results/pretraining_1201/DeepSC_11_0.ckpt"
+include_zero_gene: "all" #all or batch-wise
 
-pretrained_model_path: "/home/angli/DeepSC/results/pretraining_1201/DeepSC_11_0.ckpt"
-load_pretrained_model: True
-
-# Fine-tuning mode selection
-# Options:
-#   - "full": Full parameter fine-tuning (all model parameters)
-#   - "head_only": Only fine-tune the classification head
-finetune_mode: "full"
+use_scgpt_loss: True
+use_scgpt_selection: False
 # Loss weights
 enable_l0: False
 enable_mse: True
-enable_ce: True
+enable_ce: False
 ce_loss_weight: 1.0
 target_mse_loss_weight: 3.0
 #control the weight of mse loss
@@ -62,14 +59,9 @@ use_exp_regression_loss: False
 #Print details of mse loss in log
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
-csv_path: "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
-seperated_train_eval_dataset: True
-data_path: "/home/angli/DeepSC/data/processed/baseline/scgpt/myeloid_train.h5ad"
-data_path_eval: "/home/angli/DeepSC/data/processed/baseline/scgpt/myeloid_test.h5ad"
-var_name_in_h5ad: "gene_name"
-obs_celltype_col: "celltype"
+csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
 use_moe_ffn: False
-data_length: 5000
+data_length: 3000
 seed: 42
 ckpt_dir: "/home/angli/baseline/DeepSC/ckpts"
 num_device: 1
@@ -85,15 +77,9 @@ save_ckpt_every: 200
 
 log_on_wandb_every: 20
 log_m_matrix_every: 1000
-sequence_length: 1024
+sequence_length: 10000
 plot_tsne_and_umap: False
 draw_continuous_pred_label_scatter: True
-
-# Learning rate scheduler configuration
-# Options:
-#   - "constant": Constant learning rate (no scheduling)
-#   - "cosine": Cosine annealing with warmup (default)
-lr_scheduler_type: "constant"  # Change to "constant" for constant LR
 
 # 新增warmup相关参数
 use_warmup: False
@@ -104,9 +90,6 @@ use_mogaide_scheduler: False
 
 # 新增checkpoint相关参数
 resume_last_training: True
-
-# 评估策略
-eval_use_all_common_types: true  # true: 显示所有共同类型(即使当前batch中为0), false: 只显示当前batch存在的类型
 
 # 梯度检查相关参数
 check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启用

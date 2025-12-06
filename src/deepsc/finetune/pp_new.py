@@ -259,7 +259,7 @@ class PPNEW:
                     )
                     mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
 
-                    regression_output, y, gene_emb, expr_emb = self.model(
+                    regression_output, gene_emb, expr_emb = self.model(
                         gene_ids=mapped_input_gene_ids,
                         expression_bin=discrete_input_bins,
                         normalized_expr=input_values,
@@ -340,7 +340,7 @@ class PPNEW:
                     )
                     mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
 
-                    regression_output, _, _, _ = self.model(
+                    regression_output, _, _ = self.model(
                         gene_ids=mapped_input_gene_ids,
                         expression_bin=discrete_input_bins,
                         normalized_expr=input_values,
