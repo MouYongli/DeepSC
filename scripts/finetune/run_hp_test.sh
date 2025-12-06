@@ -5,7 +5,9 @@
 # Using physical GPU 1
 export CUDA_VISIBLE_DEVICES=3
 export OMP_NUM_THREADS=64
-
+set -a
+source .env
+set +a
 NUM_GPUS=1
 
 # Experiment 1: epoch3 + stream1
@@ -22,7 +24,6 @@ PYTHONPATH=src torchrun \
   -m deepsc.finetune.finetune \
   data_path="/home/angli/DeepSC/data/processed/baseline/scgpt/zheng_train_preprocessed.h5ad" \
   data_path_eval="/home/angli/DeepSC/data/processed/baseline/scgpt/zheng_test_preprocessed.h5ad" \
-  pretrained_model_path="/home/angli/DeepSC/results/cell_type_annotation/20251203_100918/checkpoints/latest_checkpoint.ckpt" \
   load_pretrained_model=true \
   model.attention_stream=2 \
   model.cross_attention_architecture="A"

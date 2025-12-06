@@ -99,9 +99,16 @@ class ExpressionEmbedding(nn.Module):
         return expr_embeddings
 
 
-class FlashGeneAttentionLayer(nn.Module):
+class FlashAttentionLayer(nn.Module):
     """
-    使用 Flash Attention v2 的基因注意力层
+    统一的 Flash Attention v2 注意力层
+
+    接受 Q, K, V 的输入嵌入,计算多头注意力。
+
+    Args:
+        d: 嵌入维度
+        num_heads: 注意力头数
+        attn_dropout: 注意力dropout率
     """
 
     def __init__(self, d, num_heads, attn_dropout=0.1):
@@ -124,143 +131,42 @@ class FlashGeneAttentionLayer(nn.Module):
         # 缩放因子
         self.scale = self.head_dim**-0.5
 
-    def forward(self, x):
+    def forward(self, Q_emb, K_emb=None, V_emb=None):
         """
+        前向传播
+
         Args:
-            x: 输入张量, shape: (batch_size, seq_len, d)
+            Q_emb: Query嵌入, shape: (batch_size, seq_len, d)
+            K_emb: Key嵌入, shape: (batch_size, seq_len, d)
+                   如果为None,使用Q_emb (self-attention)
+            V_emb: Value嵌入, shape: (batch_size, seq_len, d)
+                   如果为None,使用K_emb
+
         Returns:
             output: 注意力输出, shape: (batch_size, seq_len, d)
+
+        使用示例:
+            # Self-attention: Q = K = V
+            out = layer(x)
+
+            # Cross-attention: Q != K = V
+            out = layer(query, key_value)
+
+            # 完全自定义: Q, K, V 都不同
+            out = layer(q, k, v)
         """
-        batch_size, seq_len, _ = x.shape
+        # 默认值处理
+        if K_emb is None:
+            K_emb = Q_emb
+        if V_emb is None:
+            V_emb = K_emb
 
-        # 计算 Q, K, V
-        Q = self.W_Q(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
-        K = self.W_K(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
-        V = self.W_V(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        batch_size, seq_len, _ = Q_emb.shape
 
-        # 转置以便进行注意力计算
-        Q = Q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-        K = K.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-        V = V.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-
-        # 使用 Flash Attention v2
-        if FLASH_ATTENTION_AVAILABLE:
-
-            output = scaled_dot_product_attention(
-                Q,
-                K,
-                V,
-                attn_mask=None,
-                dropout_p=self.dropout.p if self.training else 0.0,
-                is_causal=False,
-            )
-        else:
-            # 回退到标准注意力
-            scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-
-            # 应用 softmax
-            attn_weights = F.softmax(scores, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-
-            A_bar = attn_weights
-
-            # 计算输出
-            output = torch.matmul(A_bar, V)
-
-        # 转置并重塑
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (batch_size, seq_len, num_heads, head_dim)
-        output = output.view(batch_size, seq_len, self.d)  # (batch_size, seq_len, d)
-
-        # 输出投影
-        output = self.out_proj(output)
-
-        return output
-
-
-class FlashExpressionAttentionLayer(nn.Module):
-    """
-    使用 Flash Attention v2 的表达注意力层
-    使用融合的基因和表达嵌入作为Q和K，表达嵌入作为V
-    """
-
-    def __init__(self, d, num_heads, attn_dropout=0.1, fused: bool = False):
-        """
-        Args:
-            d: 嵌入维度
-            num_heads: 注意力头数
-            attn_dropout: 注意力dropout率
-            fused: 是否使用融合的基因和表达嵌入
-            注意力计算分为三种方式：cross_attention, fused_self_attention, self_attention
-            cross_attention: 基因和表达嵌入之间的注意力计算
-            fused_self_attention: 融合的基因和表达嵌入之间的注意力计算
-            self_attention: 表达嵌入之间的注意力计算
-        """
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = d // num_heads
-        self.d = d
-        self.fused = fused
-
-        # 融合投影（如果启用）
-        if self.fused:
-            self.fused_emb_proj = nn.Linear(2 * d, d)
-
-        # Q, K, V 投影矩阵
-        self.W_Q = nn.Linear(d, d)
-        self.W_K = nn.Linear(d, d)
-        self.W_V = nn.Linear(d, d)
-
-        # 输出投影
-        self.out_proj = nn.Linear(d, d)
-
-        # Dropout
-        self.dropout = nn.Dropout(attn_dropout)
-
-        # 缩放因子
-        self.scale = self.head_dim**-0.5
-
-    def forward(
-        self,
-        gene_emb,
-        expr_emb,
-        self_attention: bool = False,
-    ):
-        """
-        Args:
-            gene_emb: 基因嵌入, shape: (batch_size, seq_len, d)
-            expr_emb: 表达嵌入, shape: (batch_size, seq_len, d)
-        Returns:
-            output: 注意力输出, shape: (batch_size, seq_len, d)
-        """
-        batch_size, seq_len, _ = gene_emb.shape
-
-        if self_attention and self.fused:
-            # 不计算gene，且之前用的是fused
-            attention_Q_emb = expr_emb
-            attention_K_emb = expr_emb
-        elif self_attention and not self.fused:
-            # 不计算gene，且之前用的不是fused
-            attention_Q_emb = expr_emb
-            attention_K_emb = expr_emb
-        elif not self_attention and self.fused:
-            # 计算gene，且之前用的是fused
-            fused_emb = torch.cat([gene_emb, expr_emb], dim=-1)
-            attention_Q_emb = self.fused_emb_proj(fused_emb)
-            attention_K_emb = attention_Q_emb
-        else:
-            # 计算gene，且之前用的不是fused
-            attention_Q_emb = gene_emb
-            attention_K_emb = expr_emb
-
-        Q = self.W_Q(attention_Q_emb).view(
-            batch_size, seq_len, self.num_heads, self.head_dim
-        )
-        K = self.W_K(attention_K_emb).view(
-            batch_size, seq_len, self.num_heads, self.head_dim
-        )
-        V = self.W_V(expr_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        # 计算 Q, K, V 投影
+        Q = self.W_Q(Q_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        K = self.W_K(K_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        V = self.W_V(V_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # 转置以便进行注意力计算
         Q = Q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
@@ -729,24 +635,23 @@ class FlashDeepSCTransformerBlock(nn.Module):
         num_heads,
         attn_dropout,
         ffn_dropout,
-        fused,
         num_layers_ffn=2,
         moe_cfg=None,
         moe_layer=False,
+        cross_attention_architecture="A",
     ):
         super().__init__()
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
         self.use_moe_ffn = bool(moe_layer)
         # 使用 Flash Attention 层
-        self.gene_attn = FlashGeneAttentionLayer(embedding_dim, num_heads, attn_dropout)
-        self.expr_attn = FlashExpressionAttentionLayer(
-            embedding_dim, num_heads, attn_dropout, False
-        )
+        self.gene_attn = FlashAttentionLayer(embedding_dim, num_heads, attn_dropout)
+        self.expr_attn = FlashAttentionLayer(embedding_dim, num_heads, attn_dropout)
 
         # Norm
         self.norm_gene1 = nn.LayerNorm(embedding_dim)
         self.norm_gene2 = nn.LayerNorm(embedding_dim)
+        self.norm_gene3 = nn.LayerNorm(embedding_dim)
         self.norm_expr1 = nn.LayerNorm(embedding_dim)
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
 
@@ -772,6 +677,7 @@ class FlashDeepSCTransformerBlock(nn.Module):
                 embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
             )
         )
+        self.cross_attention_architecture = cross_attention_architecture
 
     def forward(self, gene_emb, expr_emb):
         """
@@ -782,15 +688,25 @@ class FlashDeepSCTransformerBlock(nn.Module):
             out_gene: 更新后的基因嵌入
             out_expr: 更新后的表达嵌入
         """
+        # Gene self-attention
         x = self.norm_gene1(gene_emb)
-        attn_gene = self.gene_attn(x)
+        attn_gene = self.gene_attn(x)  # Self-attention: Q=K=V=x
         x = gene_emb + self.dropout(attn_gene)
         x_ln = self.norm_gene2(x)
         ffn_gene = self.ffn_gene(x_ln)
         out_gene = x + self.dropout(ffn_gene)
 
+        out_gene_ln = self.norm_gene3(out_gene)
+        # Expression cross-attention with gene
         y = self.norm_expr1(expr_emb)
-        attn_expr = self.expr_attn(gene_emb, y, self_attention=False)
+        if self.cross_attention_architecture == "A":
+            attn_expr = self.expr_attn(y, out_gene_ln, out_gene_ln)
+        elif self.cross_attention_architecture == "B":
+            attn_expr = self.expr_attn(out_gene_ln, out_gene_ln, y)
+        elif self.cross_attention_architecture == "C":
+            attn_expr = self.expr_attn(out_gene_ln, y, y)
+        else:
+            raise ValueError("Invalid cross_attention_architecture option.")
         y = expr_emb + self.dropout(attn_expr)
         y_ln = self.norm_expr2(y)
         ffn_expr = self.ffn_expr(y_ln)
@@ -799,7 +715,7 @@ class FlashDeepSCTransformerBlock(nn.Module):
         return out_gene, out_expr
 
 
-class FlashDeepSCTransformerExpressionBlock(nn.Module):
+class FlashDeepSCTransformerCrossAttentionBlock(nn.Module):
     """
     使用 Flash Attention v2 的Transformer块
     """
@@ -810,7 +726,65 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
         num_heads,
         attn_dropout,
         ffn_dropout,
-        fused,
+        num_layers_ffn=2,
+        moe_cfg=None,
+        use_moe_in_layer=False,
+        cross_attention_architecture="A",
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.embedding_dim = embedding_dim
+        self.use_moe_in_layer = use_moe_in_layer
+        self.attn = FlashAttentionLayer(embedding_dim, num_heads, attn_dropout)
+        self.norm1 = nn.LayerNorm(embedding_dim)
+        self.norm2 = nn.LayerNorm(embedding_dim)
+        self.gene_norm = nn.LayerNorm(embedding_dim)
+        self.ffn_expr = (
+            MoE(moe_cfg)
+            if self.use_moe_in_layer
+            else FeedForward(
+                embedding_dim, dropout=ffn_dropout, num_layers=num_layers_ffn
+            )
+        )
+        self.dropout = nn.Dropout(ffn_dropout)
+        self.cross_attention_architecture = cross_attention_architecture
+
+    def forward(self, gene_emb, expr_emb):
+        """
+        Args:
+            embedding: 基因或者表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+        Returns:
+            out_embedding: 更新后的嵌入
+        """
+        gene_emb = self.gene_norm(gene_emb)
+        y = self.norm1(expr_emb)
+        if self.cross_attention_architecture == "A":
+            attn_expr = self.attn(y, gene_emb, gene_emb)  # Self-attention: Q=K=V=y
+        elif self.cross_attention_architecture == "B":
+            attn_expr = self.attn(gene_emb, gene_emb, y)  # Self-attention: Q=K=V=y
+        elif self.cross_attention_architecture == "C":
+            attn_expr = self.attn(gene_emb, y, y)  # Self-attention: Q=K=V=y
+        else:
+            raise ValueError("Invalid cross_attention_architecture option.")
+        y = expr_emb + self.dropout(attn_expr)
+        y_ln = self.norm2(y)
+        ffn_expr = self.ffn_expr(y_ln)
+        out_expr = y + self.dropout(ffn_expr)
+
+        return out_expr
+
+
+class FlashDeepSCTransformerSelfAttentionBlock(nn.Module):
+    """
+    使用 Flash Attention v2 的Transformer块
+    """
+
+    def __init__(
+        self,
+        embedding_dim,
+        num_heads,
+        attn_dropout,
+        ffn_dropout,
         num_layers_ffn=2,
         moe_cfg=None,
         use_moe_in_layer=False,
@@ -819,9 +793,7 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
         self.use_moe_in_layer = use_moe_in_layer
-        self.expr_attn = FlashExpressionAttentionLayer(
-            embedding_dim, num_heads, attn_dropout, fused
-        )
+        self.expr_attn = FlashAttentionLayer(embedding_dim, num_heads, attn_dropout)
         self.norm_expr1 = nn.LayerNorm(embedding_dim)
         self.norm_expr2 = nn.LayerNorm(embedding_dim)
 
@@ -834,19 +806,17 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
         )
         self.dropout = nn.Dropout(ffn_dropout)
 
-    def forward(self, expr_emb):
+    def forward(self, embedding):
         """
         Args:
-            gene_emb: 基因嵌入, shape: (batch_size, seq_len, embedding_dim)
-            expr_emb: 表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+            embedding: 基因或者表达嵌入, shape: (batch_size, seq_len, embedding_dim)
         Returns:
-            out_gene: 更新后的基因嵌入
-            out_expr: 更新后的表达嵌入
+            out_embedding: 更新后的嵌入
         """
 
-        y = self.norm_expr1(expr_emb)
-        attn_expr = self.expr_attn(y, y, self_attention=True)
-        y = expr_emb + self.dropout(attn_expr)
+        y = self.norm_expr1(embedding)
+        attn_expr = self.expr_attn(y)  # Self-attention: Q=K=V=y
+        y = embedding + self.dropout(attn_expr)
         y_ln = self.norm_expr2(y)
         ffn_expr = self.ffn_expr(y_ln)
         out_expr = y + self.dropout(ffn_expr)
@@ -857,6 +827,15 @@ class FlashDeepSCTransformerExpressionBlock(nn.Module):
 class DeepSC(nn.Module):
     """
     使用 Flash Attention v2 的DeepSC模型
+    当前进行四个实验比较：
+    1. ：先对基因嵌入进行N层self-attention，
+            然后用这个得到的嵌入作为Q和K，用表达嵌入作为V进行N层cross attention之后，
+            然后在进行M层expression的self-attention
+    2. 基因嵌入和表达嵌入进行双流的cross attention
+    用以上结果较好的结构作为下面两个实验的基础：
+    3. KV来自基因嵌入，Q来自表达嵌入的单流attention
+    4. Q来自基因嵌入，KV来自表达嵌入的单流attention
+
     """
 
     def __init__(
@@ -867,10 +846,8 @@ class DeepSC(nn.Module):
         num_heads=8,
         attn_dropout=0.1,
         ffn_dropout=0.1,
-        fused=True,
         num_bins=8,
         alpha=0.1,
-        mask_layer_start=None,
         enable_l0=True,
         enable_mse=True,
         enable_ce=True,
@@ -879,6 +856,8 @@ class DeepSC(nn.Module):
         number_of_experts=3,
         gene_embedding_participate_til_layer=3,
         moe=None,
+        attention_stream=1,
+        cross_attention_architecture="A",
     ):
         super().__init__()
         self.gene_embedding_participate_til_layer = gene_embedding_participate_til_layer
@@ -886,43 +865,83 @@ class DeepSC(nn.Module):
         self.expr_embedding = ExpressionEmbedding(
             embedding_dim, num_bins=num_bins, alpha=alpha
         )
+        self.cross_attention_architecture = cross_attention_architecture
+        self.attention_stream = attention_stream
         num_layers_expr = num_layers - gene_embedding_participate_til_layer
         self.num_heads = num_heads
-        self.layers = nn.ModuleList()
-        for i in range(gene_embedding_participate_til_layer):
-            self.layers.append(
-                FlashDeepSCTransformerBlock(
-                    embedding_dim,
-                    num_heads,
-                    attn_dropout,
-                    ffn_dropout,
-                    fused,
-                    num_layers_ffn,
-                    moe,
+        if attention_stream == 2:
+            self.layers = nn.ModuleList()
+            for i in range(gene_embedding_participate_til_layer):
+                self.layers.append(
+                    FlashDeepSCTransformerBlock(
+                        embedding_dim,
+                        num_heads,
+                        attn_dropout,
+                        ffn_dropout,
+                        num_layers_ffn,
+                        moe,
+                        cross_attention_architecture=self.cross_attention_architecture,
+                    )
                 )
-            )
-        self.expression_layers = nn.ModuleList()
-        for i in range(num_layers_expr):
-            moe_layer = i >= (num_layers_expr - moe.n_moe_layers)
-            self.expression_layers.append(
-                FlashDeepSCTransformerExpressionBlock(
-                    embedding_dim,
-                    num_heads,
-                    attn_dropout,
-                    ffn_dropout,
-                    fused,
-                    num_layers_ffn,
-                    moe,
-                    use_moe_in_layer=moe_layer and moe.use_moe_ffn,
+            self.expression_layers = nn.ModuleList()
+            for i in range(num_layers_expr):
+                moe_layer = i >= (num_layers_expr - moe.n_moe_layers)
+                self.expression_layers.append(
+                    FlashDeepSCTransformerSelfAttentionBlock(
+                        embedding_dim,
+                        num_heads,
+                        attn_dropout,
+                        ffn_dropout,
+                        num_layers_ffn,
+                        moe,
+                        use_moe_in_layer=moe_layer and moe.use_moe_ffn,
+                    )
                 )
-            )
+        elif attention_stream == 1:
+            self.gene_self_attention_layers = nn.ModuleList()
+            for i in range(gene_embedding_participate_til_layer):
+                self.gene_self_attention_layers.append(
+                    FlashDeepSCTransformerSelfAttentionBlock(
+                        embedding_dim,
+                        num_heads,
+                        attn_dropout,
+                        ffn_dropout,
+                        num_layers_ffn,
+                        moe,
+                    )
+                )
+            self.cross_attention_layers = nn.ModuleList()
+            for i in range(gene_embedding_participate_til_layer):
+                self.cross_attention_layers.append(
+                    FlashDeepSCTransformerCrossAttentionBlock(
+                        embedding_dim,
+                        num_heads,
+                        attn_dropout,
+                        ffn_dropout,
+                        num_layers_ffn,
+                        moe,
+                        cross_attention_architecture=self.cross_attention_architecture,
+                    )
+                )
+
+            self.expression_layers = nn.ModuleList()
+            for i in range(num_layers_expr):
+                moe_layer = i >= (num_layers_expr - moe.n_moe_layers)
+                self.expression_layers.append(
+                    FlashDeepSCTransformerSelfAttentionBlock(
+                        embedding_dim,
+                        num_heads,
+                        attn_dropout,
+                        ffn_dropout,
+                        num_layers_ffn,
+                        moe,
+                        use_moe_in_layer=moe_layer and moe.use_moe_ffn,
+                    )
+                )
 
         # 如果你用的是 DictConfig
         # moe_cfg = MoECfg(**cfg.moe)
         # self.moe, self.n_local_experts = build_moe_from_cfg(moe_cfg)
-        self.mask_layer_start = (
-            mask_layer_start if mask_layer_start is not None else len(self.layers) - 1
-        )
         self.classifier = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim * 2),  # 升维
             nn.GELU(),
@@ -987,10 +1006,18 @@ class DeepSC(nn.Module):
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
-        for i, layer in enumerate(self.layers):
-            gene_emb, expr_emb = layer(gene_emb, expr_emb)
-        for i, layer in enumerate(self.expression_layers):
-            expr_emb = layer(expr_emb)
+        if self.attention_stream == 2:
+            for i, layer in enumerate(self.layers):
+                gene_emb, expr_emb = layer(gene_emb, expr_emb)
+            for i, layer in enumerate(self.expression_layers):
+                expr_emb = layer(expr_emb)
+        elif self.attention_stream == 1:
+            for i in range(self.gene_embedding_participate_til_layer):
+                gene_emb = self.gene_self_attention_layers[i](gene_emb)
+            for i in range(self.gene_embedding_participate_til_layer):
+                expr_emb = self.cross_attention_layers[i](gene_emb, expr_emb)
+            for i, layer in enumerate(self.expression_layers):
+                expr_emb = layer(expr_emb)
         final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
         final_emb = self.fused_emb_proj(final_emb)  # (batch, g, d)
         if self.enable_mse and self.enable_ce:
@@ -1266,27 +1293,39 @@ class DeepSCClassifier(nn.Module):
         encoder_kwargs.pop("return_mask_prob", None)
         encoder_kwargs.pop("return_gate_weights", None)
         # 使用encoder获取嵌入，注意DeepSC的参数名
-        logits, regression_output, y, gene_emb, expr_emb = self.encoder(
+        encoder_output = self.encoder(
             gene_ids=gene_ids,
             normalized_expr=value_log1p,
             expression_bin=value_binned,
             return_encodings=True,
-            return_mask_prob=True,
+            return_mask_prob=False,
             return_gate_weights=False,
             **encoder_kwargs,
         )
+
+        # 根据encoder的返回值数量解包
+        # enable_mse and enable_ce: 返回 (logits, regression_output, gene_emb, expr_emb)
+        # enable_ce only: 返回 (logits, gene_emb, expr_emb)
+        # enable_mse only: 返回 (regression_output, gene_emb, expr_emb)
+        if len(encoder_output) == 4:
+            logits, regression_output, gene_emb, expr_emb = encoder_output
+        elif len(encoder_output) == 3:
+            # 判断是ce only还是mse only
+            if self.encoder.enable_ce:
+                logits, gene_emb, expr_emb = encoder_output
+                regression_output = None
+            else:
+                regression_output, gene_emb, expr_emb = encoder_output
+                logits = None
+        else:
+            raise ValueError(f"Unexpected encoder output length: {len(encoder_output)}")
+
         # 融合基因和表达嵌入
         final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
         final_emb = self.encoder.fused_emb_proj(final_emb)  # (batch, g, d)
 
-        # 从4D的y (batch, g, g, 3) 中提取2D权重 (batch, g)
-        if y is not None:
-            weights = y.sum(dim=-1).mean(dim=2)  # (batch, g)
-        else:
-            weights = None
-        # print(final_emb)
-        # 获取细胞嵌入
-        cell_emb = self._get_cell_emb_from_layer(final_emb, weights)
+        # 获取细胞嵌入 (不再使用y作为权重,因为新架构没有返回y)
+        cell_emb = self._get_cell_emb_from_layer(final_emb, weights=None)
         # 分类
         cls_output = self.cls_decoder(cell_emb)
-        return logits, regression_output, y, gene_emb, expr_emb, cls_output
+        return cls_output

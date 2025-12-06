@@ -1,3 +1,4 @@
+import math
 import os
 
 import numpy as np
@@ -6,15 +7,18 @@ import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
 from torch.optim import Adam
+from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from datetime import datetime
+from deepsc.data.data_collator import DataCollator
 from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
     GeneExpressionDatasetMappedWithGlobalCelltype,
 )
 from deepsc.utils import (
+    CosineAnnealingWarmRestartsWithDecayAndLinearWarmup,
     calculate_mean_ce_loss,
     create_scheduler_from_args,
     extract_state_dict_with_encoder_prefix,
@@ -506,60 +510,11 @@ class CellTypeAnnotation:
         """
         绘制评估图表：分类指标详情和混淆矩阵
         """
-        from sklearn.metrics import confusion_matrix
-
-        # 处理评估数据
-        processed_data = self.process_evaluation_data(y_true, y_pred)
-        if processed_data is None:
-            print("Warning: No valid categories found for plotting")
-            return
-
-        # 解包处理后的数据
-        categories = processed_data["categories"]
-        recalls = processed_data["recalls"]
-        precisions = processed_data["precisions"]
-        f1_scores = processed_data["f1_scores"]
-        supports = processed_data["supports"]
-        proportions = processed_data["proportions"]
-        unique_labels = processed_data["unique_labels"]
-        y_true = processed_data["y_true"]
-        y_pred = processed_data["y_pred"]
-
-        # 使用新的可视化目录
         save_dir = self.vis_dir
 
-        # 绘制图1：分类指标详情（4个子图）
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle(
-            f"Classification Metrics by Cell Type - Epoch {self.epoch}",
-            fontsize=16,
-            fontweight="bold",
+        plot_classification_metrics(
+            y_true, y_pred, self.id2type, save_dir=save_dir, epoch=self.epoch
         )
-
-        # 子图1: Recall
-        bars1 = ax1.bar(range(len(categories)), recalls, color="skyblue", alpha=0.8)
-        ax1.set_title("Recall by Cell Type")
-        ax1.set_ylabel("Recall")
-        ax1.set_xticks(range(len(categories)))
-        ax1.set_xticklabels(categories, rotation=45, ha="right")
-        ax1.set_ylim(0, 1)
-        ax1.grid(axis="y", alpha=0.3)
-        # 添加数值标签
-        for i, bar in enumerate(bars1):
-            height = bar.get_height()
-            ax1.text(
-                bar.get_x() + bar.get_width() / 2.0,
-                height + 0.01,
-                f"{height:.2f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-            )
-            plot_classification_metrics(
-                y_true, y_pred, self.id2type, save_dir=save_dir, epoch=self.epoch
-            )
-
-        return total_loss / total_num, total_error / total_num
 
     def train(self):
         print("train_loader: ", len(self.train_loader.dataset))
@@ -658,37 +613,37 @@ class CellTypeAnnotation:
         load_info = self.model.load_state_dict(state_dict, strict=False)
         report_loading_result(load_info)
 
-    def save_checkpoint(self, epoch, eval_loss, is_best=False):
-        """Save model checkpoint."""
-        save_dir = (
-            self.args.save_dir
-            if hasattr(self.args, "save_dir") and self.args.save_dir
-            else "./results/cell_type_annotation"
-        )
-        os.makedirs(save_dir, exist_ok=True)
+    # def save_checkpoint(self, epoch, eval_loss, is_best=False):
+    #     """Save model checkpoint."""
+    #     save_dir = (
+    #         self.args.save_dir
+    #         if hasattr(self.args, "save_dir") and self.args.save_dir
+    #         else "./results/cell_type_annotation"
+    #     )
+    #     os.makedirs(save_dir, exist_ok=True)
 
-        # Prepare checkpoint data
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scheduler_state_dict": (
-                self.scheduler.state_dict() if self.scheduler is not None else None
-            ),
-            "eval_loss": eval_loss,
-            "cell_type_count": self.cell_type_count,
-            "type2id": self.type2id,
-            "id2type": self.id2type,
-        }
+    #     # Prepare checkpoint data
+    #     checkpoint = {
+    #         "epoch": epoch,
+    #         "model_state_dict": self.model.state_dict(),
+    #         "optimizer_state_dict": self.optimizer.state_dict(),
+    #         "scheduler_state_dict": (
+    #             self.scheduler.state_dict() if self.scheduler is not None else None
+    #         ),
+    #         "eval_loss": eval_loss,
+    #         "cell_type_count": self.cell_type_count,
+    #         "type2id": self.type2id,
+    #         "id2type": self.id2type,
+    #     }
 
-        # Save checkpoint
-        if is_best:
-            checkpoint_path = os.path.join(save_dir, "best_model.pt")
-        else:
-            checkpoint_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch}.pt")
+    #     # Save checkpoint
+    #     if is_best:
+    #         checkpoint_path = os.path.join(save_dir, "best_model.pt")
+    #     else:
+    #         checkpoint_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch}.pt")
 
-        torch.save(checkpoint, checkpoint_path)
-        print(f"Checkpoint saved to {checkpoint_path}")
+    #     torch.save(checkpoint, checkpoint_path)
+    #     print(f"Checkpoint saved to {checkpoint_path}")
 
     def _load_and_split_data(self):
         """
