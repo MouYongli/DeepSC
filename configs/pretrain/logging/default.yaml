@@ -1,0 +1,12 @@
+wandb_project: "DeepSC"
+wandb_team: "rwth_lfb"
+tags: ["256hd", "big dataset", "mean ce", "adaptive mse and no adaptiv0 l0", "medium learning rate"]
+run_name: "mogaide scheduler, mean ce, adaptive mse, 5bin ,hd256, alpha0.3"
+
+log_on_wandb_every: 20
+log_m_matrix_every: 1000
+enable_moe_collapse_detection: False
+log_moe_collapse_every: 500  # 每500次iteration检查一次MoE塌缩
+plot_tsne_and_umap: False
+draw_continuous_pred_label_scatter: True
+show_mse_loss_details: False

@@ -1,0 +1,8 @@
+# Hydra-instantiable scheduler config
+_target_: deepsc.scheduler.scheduler.DeepSCScheduler
+
+# Scheduler behavior flags
+use_warmup: False
+warmup_ratio: 0.03
+use_scbert_scheduler: True
+use_mogaide_scheduler: False

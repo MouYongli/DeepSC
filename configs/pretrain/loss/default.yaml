@@ -1,0 +1,23 @@
+_target_: src.deepsc.losses.losses.LossCalculator
+
+enable_l0: False
+enable_mse: True
+enable_ce: True
+ce_loss_weight: 1.0
+target_mse_loss_weight: 3.0
+
+weighted_ce_loss: False
+mean_ce_loss: True
+use_ldam_loss: False
+enable_adaptive_ce_loss: False
+enable_alternating_ldam_mean_ce_loss: False
+
+enable_mse_loss: False
+enable_huber_loss: True
+# 回归任务
+# 最多只能打开一个开关 选择普通的还是加权的
+use_normal_regression_loss: True
+use_hard_regression_loss: False
+use_exp_regression_loss: False
+
+l0_lambda: 0.1

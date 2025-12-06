@@ -1,0 +1,4 @@
+use_moe_regressor: True  # 是否使用MoE回归器，False则使用原来的简单回归器
+use_M_matrix: False
+use_moe_ffn: False
+use_compile: False

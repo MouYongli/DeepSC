@@ -16,6 +16,7 @@ from torch import nn
 from torch.nn.modules.loss import _WeightedLoss
 from torch.optim.lr_scheduler import _LRScheduler
 
+import sys
 import wandb
 from datetime import datetime
 
@@ -132,6 +133,7 @@ def setup_logging(
     rank: int = -1,
     add_timestamp: bool = True,
     log_level: str = "INFO",
+    use_hydra: bool = True,
 ) -> str:
     """
     Setup unified logging configuration.
@@ -142,6 +144,7 @@ def setup_logging(
         rank: Process rank for distributed training (-1 for single process)
         add_timestamp: Whether to add timestamp to log filename
         log_level: Logging level
+        use_hydra: Whether running under Hydra (will only redirect stdout/stderr)
 
     Returns:
         str: Path to the created log file
@@ -158,23 +161,64 @@ def setup_logging(
 
     log_file = osp.join(log_path, log_filename)
 
-    # Set logging level based on rank
+    # Only setup logging handlers if not using Hydra
+    if not use_hydra:
+        # Set logging level based on rank
+        if rank in [-1, 0]:
+            level = getattr(logging, log_level.upper())
+        else:
+            level = logging.WARN
+
+        # Configure logging with file handler
+        file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+                datefmt="[%X]",
+            )
+        )
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(level)
+        stream_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+                datefmt="[%X]",
+            )
+        )
+
+        logging.basicConfig(
+            level=level,
+            handlers=[file_handler, stream_handler],
+            force=True,  # Reset any existing logging configuration
+        )
+
+        logger = logging.getLogger()
+        logger.info(f"Log file initialized: {log_file}")
+
+    # Redirect stdout and stderr to log file (only for master rank)
     if rank in [-1, 0]:
-        level = getattr(logging, log_level.upper())
-    else:
-        level = logging.WARN
 
-    # Configure logging
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
-        datefmt="[%X]",
-        handlers=[logging.FileHandler(log_file, mode="w"), logging.StreamHandler()],
-        force=True,  # Reset any existing logging configuration
-    )
+        class TeeOutput:
+            """Redirect print output to both console and log file"""
 
-    logger = logging.getLogger()
-    logger.info(f"Log file initialized: {log_file}")
+            def __init__(self, file_path, original_stream):
+                self.file = open(file_path, "a" if use_hydra else "w", buffering=1)
+                self.original = original_stream
+
+            def write(self, message):
+                self.file.write(message)
+                self.file.flush()
+                self.original.write(message)
+                self.original.flush()
+
+            def flush(self):
+                self.file.flush()
+                self.original.flush()
+
+        sys.stdout = TeeOutput(log_file, sys.__stdout__)
+        sys.stderr = TeeOutput(log_file, sys.__stderr__)
 
     return log_file
 
@@ -1098,30 +1142,6 @@ class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
         self._last_lr = [group["lr"] for group in self.optimizer.param_groups]
 
 
-def interval_masked_mse_loss(pred, target, mask):
-    """
-    统计四个区间的未加权 MSE
-    返回: dict, key为区间名，value为MSE
-    区间：lt3, 3to5, 5to7, ge7
-    """
-    loss_fn = nn.MSELoss(reduction="none")
-    elementwise_loss = loss_fn(pred, target)
-    results = {}
-    intervals = [
-        ("lt3", target < 3),
-        ("3to5", (target >= 3) & (target < 5)),
-        ("5to7", (target >= 5) & (target < 7)),
-        ("ge7", target >= 7),
-    ]
-    for name, cond in intervals:
-        interval_mask = cond & mask
-        if interval_mask.sum() == 0:
-            results[name] = torch.tensor(0.0, device=pred.device)
-        else:
-            results[name] = elementwise_loss[interval_mask].mean()
-    return results
-
-
 class LDAMLoss(nn.Module):
     def __init__(self, cls_num_list, max_m=0.5, weight=None, s=30, ignore_index=-100):
         super(LDAMLoss, self).__init__()
@@ -1322,27 +1342,6 @@ def compute_classification_metrics(valid_preds, valid_labels, num_classes, devic
     return recall, precision, f1, macro_f1, average_recall, average_precision
 
 
-def get_l0_lambda(epoch, index, l0_warmup_start_epoch, l0_lambda_target, epoch_length):
-    """
-    计算l0 lambda，使用warmup策略
-    """
-    if epoch < l0_warmup_start_epoch:
-        return 0.0
-    elif epoch > l0_warmup_start_epoch:
-        return l0_lambda_target
-    else:
-        return calculate_l0_lambda_with_warmup_fine_grained(
-            index, l0_lambda_target, epoch_length
-        )
-
-
-def calculate_l0_lambda_with_warmup_fine_grained(index, l0_lambda_target, epoch_length):
-    """
-    计算当前的l0 lambda 按index在l0_warmup_start_epoch到l0_warmup_start_epoch + 1之间线性增加到l0_lambda_target
-    """
-    return l0_lambda_target * (index / epoch_length)
-
-
 def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
     """
     统计 h5ad 文件中 obs 的 cell_type 列的唯一值数量
@@ -1352,15 +1351,643 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
         cell_type_col (str): obs 中细胞类型列名（默认 "cell_type"）
 
     Returns:
-        int: 唯一 cell_type 的数量
+        tuple: (count, names) - 唯一 cell_type 的数量和名称列表
     """
     adata = sc.read_h5ad(h5ad_path)
 
     if cell_type_col not in adata.obs.columns:
         raise ValueError(f"obs 中不存在列: {cell_type_col}")
 
-    unique_count = adata.obs[cell_type_col].nunique()
-    return unique_count
+    unique_celltypes = sorted(adata.obs[cell_type_col].astype(str).unique())
+
+    print(f"Found {len(unique_celltypes)} unique cell types in {h5ad_path}:")
+    for i, celltype in enumerate(unique_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(unique_celltypes), unique_celltypes
+
+
+def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
+    """
+    统计多个h5ad文件中所有unique的cell_type数量（并集）
+
+    Args:
+        *h5ad_paths: 多个h5ad文件路径
+        cell_type_col (str): obs中细胞类型列名
+
+    Returns:
+        int: 所有文件中唯一cell_type的总数量
+        list: 所有unique的cell_type名称列表（按字母顺序排序）
+    """
+    all_celltypes = set()
+
+    # 从所有h5ad文件中收集celltype
+    for h5ad_path in h5ad_paths:
+        adata = sc.read_h5ad(h5ad_path)
+
+        if cell_type_col not in adata.obs.columns:
+            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+
+        celltypes = adata.obs[cell_type_col].astype(str).unique()
+        all_celltypes.update(celltypes)
+
+    # 按字母顺序排序以确保稳定的映射
+    sorted_celltypes = sorted(all_celltypes)
+
+    print(
+        f"Found {len(sorted_celltypes)} unique cell types across {len(h5ad_paths)} files:"
+    )
+    for i, celltype in enumerate(sorted_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(sorted_celltypes), sorted_celltypes
+
+
+def count_common_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
+    """
+    统计多个h5ad文件中共同的cell_type数量（交集）
+
+    Args:
+        *h5ad_paths: 多个h5ad文件路径
+        cell_type_col (str): obs中细胞类型列名
+
+    Returns:
+        int: 所有文件共同的cell_type数量
+        list: 共同的cell_type名称列表（按字母顺序排序）
+    """
+    if not h5ad_paths:
+        return 0, []
+
+    # 读取第一个文件的细胞类型作为初始集合
+    first_adata = sc.read_h5ad(h5ad_paths[0])
+    if cell_type_col not in first_adata.obs.columns:
+        raise ValueError(f"文件 {h5ad_paths[0]} 的obs中不存在列: {cell_type_col}")
+
+    common_celltypes = set(first_adata.obs[cell_type_col].astype(str).unique())
+
+    # 与其他文件的细胞类型求交集
+    for h5ad_path in h5ad_paths[1:]:
+        adata = sc.read_h5ad(h5ad_path)
+        if cell_type_col not in adata.obs.columns:
+            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+
+        file_celltypes = set(adata.obs[cell_type_col].astype(str).unique())
+        common_celltypes &= file_celltypes  # 求交集
+
+    # 按字母顺序排序以确保稳定的映射
+    sorted_common_celltypes = sorted(common_celltypes)
+
+    print(
+        f"Found {len(sorted_common_celltypes)} common cell types across {len(h5ad_paths)} files:"
+    )
+    for i, celltype in enumerate(sorted_common_celltypes):
+        print(f"  {i}: {celltype}")
+
+    return len(sorted_common_celltypes), sorted_common_celltypes
+
+
+def extract_state_dict(maybe_state):
+    """
+    兼容多种保存方式：
+    - {"model": state_dict, ...}  ← 你现在的保存方式（Fabric）
+    - {"state_dict": state_dict, ...}  ← Lightning 常见
+    - 直接就是 state_dict
+    - 键带 "model." 前缀
+    """
+    if isinstance(maybe_state, dict):
+        if "model" in maybe_state and isinstance(maybe_state["model"], dict):
+            sd = maybe_state["model"]
+        elif "state_dict" in maybe_state and isinstance(
+            maybe_state["state_dict"], dict
+        ):
+            sd = maybe_state["state_dict"]
+        else:
+            # 可能就是 state_dict
+            sd = maybe_state
+    else:
+        raise ValueError("Checkpoint 内容不是字典，无法解析 state_dict")
+
+    # 去掉可能存在的前缀 "model." 或 "module."
+    need_strip_prefixes = ("model.", "module.")
+    if any(any(k.startswith(p) for p in need_strip_prefixes) for k in sd.keys()):
+        new_sd = {}
+        for k, v in sd.items():
+            for p in need_strip_prefixes:
+                if k.startswith(p):
+                    k = k[len(p) :]
+                    break
+            new_sd[k] = v
+        sd = new_sd
+    return sd
+
+
+def extract_state_dict_with_encoder_prefix(maybe_state):
+    """
+    专门处理模型结构中有 encoder. 前缀，但预训练权重没有此前缀的情况。
+
+    Args:
+        maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
+
+    Returns:
+        dict: 处理过前缀的state_dict，匹配当前模型结构
+    """
+    # 先用原有函数提取基本的state_dict
+    sd = extract_state_dict(maybe_state)
+
+    # 检查是否需要添加encoder前缀
+    # 如果state_dict中的键没有encoder前缀，但我们需要encoder前缀
+    has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
+
+    if not has_encoder_prefix:
+        # 需要为所有键添加encoder.前缀
+        new_sd = {}
+        for k, v in sd.items():
+            new_key = f"encoder.{k}"
+            new_sd[new_key] = v
+        print(f"[LOAD] 为 {len(sd)} 个参数添加了 'encoder.' 前缀")
+        return new_sd
+    else:
+        print("[LOAD] 检测到权重已有 'encoder.' 前缀，直接返回")
+        return sd
+
+
+def extract_state_dict_remove_encoder_prefix(maybe_state):
+    """
+    专门处理模型结构中没有 encoder. 前缀，但权重有此前缀的情况。
+
+    Args:
+        maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
+
+    Returns:
+        dict: 处理过前缀的state_dict，匹配当前模型结构
+    """
+    # 先用原有函数提取基本的state_dict
+    sd = extract_state_dict(maybe_state)
+
+    # 检查是否需要移除encoder前缀
+    has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
+
+    if has_encoder_prefix:
+        # 需要移除encoder.前缀
+        new_sd = {}
+        for k, v in sd.items():
+            if k.startswith("encoder."):
+                new_key = k[len("encoder.") :]  # 移除"encoder."前缀
+                new_sd[new_key] = v
+            else:
+                new_sd[k] = v
+        print(
+            f"[LOAD] 为 {len([k for k in sd.keys() if k.startswith('encoder.')])} 个参数移除了 'encoder.' 前缀"
+        )
+        return new_sd
+    else:
+        print("[LOAD] 检测到权重没有 'encoder.' 前缀，直接返回")
+        return sd
+
+
+def report_loading_result(load_info):
+    missing = list(load_info.missing_keys)
+    unexpected = list(load_info.unexpected_keys)
+    print(f"[LOAD] missing_keys: {len(missing)} | unexpected_keys: {len(unexpected)}")
+    if missing:
+        print("  ´ missing:", missing)
+    if unexpected:
+        print("   unexpected:", unexpected)
+
+
+def sample_weight_norms(model, sd, k=5):
+    """
+    随机抽样 k 个双方都存在的参数，打印加载前后的范数变化。
+    范数有变化 => 基本可确认成功写入。
+    """
+    with torch.no_grad():
+        common_keys = [name for name, _ in model.named_parameters() if name in sd]
+        if not common_keys:
+            print("[LOAD] 没有找到与 checkpoint 对齐的公共参数名，无法做范数对比。")
+            return
+        sample = random.sample(common_keys, min(k, len(common_keys)))
+        print("[LOAD] 抽样参数范数对比（加载前 -> 加载后）：")
+        for name in sample:
+            p = dict(model.named_parameters())[name]
+            before = p.detach().float().norm().item()
+            # 暂存当前权重
+            old = p.detach().cpu().clone()
+            # 用 ckpt 覆盖一次
+            p.copy_(sd[name].to(p.device).to(p.dtype))
+            after = p.detach().float().norm().item()
+            print(f"  - {name}: {before:.6f} -> {after:.6f}")
+            # 还原（只用于对比；真正的加载在 load_state_dict 里会再做一次）
+            p.copy_(old.to(p.device).to(p.dtype))
+
+
+def draw_expr_emb_analysis(E, epoch, ckpt_dir, iteration=0):
+    """
+    Draw t-SNE and UMAP visualization for expression embeddings.
+
+    Args:
+        E: Expression embeddings tensor
+        epoch: Current epoch number
+        ckpt_dir: Checkpoint directory for saving plots
+        is_master: Whether this is the master process
+        iteration: Current iteration number
+    """
+    # t-SNE visualization
+    try:
+        import matplotlib.pyplot as plt
+        from sklearn.manifold import TSNE
+
+        tsne = TSNE(n_components=2, random_state=0, perplexity=30, n_iter=1000)
+        E_np = E.cpu().numpy()
+        E_tsne = tsne.fit_transform(E_np)
+        plt.figure(figsize=(6, 6))
+        plt.scatter(E_tsne[:, 0], E_tsne[:, 1], s=2, alpha=0.5)
+        plt.title(f"expr_emb t-SNE (epoch {epoch}, iteration {iteration})")
+        plt.tight_layout()
+        tsne_dir = os.path.join(ckpt_dir, "tsne_vis")
+        os.makedirs(tsne_dir, exist_ok=True)
+        plt.savefig(
+            os.path.join(
+                tsne_dir,
+                f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png",
+            )
+        )
+        tsne_path = os.path.join(
+            tsne_dir, f"expr_emb_tsne_epoch{epoch}_iteration{iteration}.png"
+        )
+        logging.info(f"[Embedding Analysis] t-SNE plot saved:\n  {tsne_path}")
+        # New: upload t-SNE image to wandb
+        wandb.log(
+            {
+                "tsne": wandb.Image(tsne_path),
+            }
+        )
+        plt.close()
+
+        # New: UMAP visualization
+        import umap
+
+        reducer = umap.UMAP(n_components=2, random_state=0)
+        E_umap = reducer.fit_transform(E_np)
+        plt.figure(figsize=(6, 6))
+        plt.scatter(E_umap[:, 0], E_umap[:, 1], s=2, alpha=0.5)
+        plt.title(f"expr_emb UMAP (epoch {epoch}, iteration {iteration})")
+        plt.tight_layout()
+        umap_path = os.path.join(
+            tsne_dir, f"expr_emb_umap_epoch{epoch}_iteration{iteration}.png"
+        )
+        plt.savefig(umap_path)
+        wandb.log(
+            {
+                "umap": wandb.Image(umap_path),
+            }
+        )
+        plt.close()
+        logging.info("[Embedding Analysis] t-SNE and UMAP plots saved")
+    except Exception as e:
+        logging.error(f"[Embedding Analysis] t-SNE failed: {e}")
+
+
+def draw_continuous_pred_label_scatter(
+    all_masked_preds, all_masked_labels, epoch, ckpt_dir, iteration=0
+):
+    """
+    Draw scatter plot of predictions vs labels for continuous values.
+
+    Args:
+        all_masked_preds: List of prediction tensors
+        all_masked_labels: List of label tensors
+        epoch: Current epoch number
+        ckpt_dir: Checkpoint directory for saving plots
+        is_master: Whether this is the master process
+        iteration: Current iteration number
+    """
+    # --------- New: draw pred-label scatter plot and upload to wandb (only draw once at the end of validate)
+    if len(all_masked_preds) > 0:
+        import matplotlib.pyplot as plt
+        import torch
+
+        preds = torch.cat(all_masked_preds, dim=0).numpy().flatten()
+        labels = torch.cat(all_masked_labels, dim=0).numpy().flatten()
+        plt.figure(figsize=(6, 6))
+        plt.scatter(labels, preds, s=2, alpha=0.5)
+        plt.xlabel("Label")
+        plt.ylabel("Prediction")
+        plt.title(f"Pred vs Label (epoch {epoch}, iter {iteration})")
+        plt.tight_layout()
+        scatter_dir = os.path.join(ckpt_dir, "scatter_vis")
+        os.makedirs(scatter_dir, exist_ok=True)
+        scatter_path = os.path.join(
+            scatter_dir, f"pred_vs_label_epoch{epoch}_iter{iteration}.png"
+        )
+        plt.savefig(scatter_path)
+        wandb.log(
+            {
+                "pred_vs_label_scatter": wandb.Image(scatter_path),
+            }
+        )
+        plt.close()
+
+
+def load_checkpoint(
+    ckpt_file_path,
+    model,
+    optimizer=None,
+    scheduler=None,
+    fabric=None,
+    is_master=True,
+    resume_training=True,
+):
+    """
+    Load checkpoint from file and restore model, optimizer, scheduler states.
+
+    Args:
+        ckpt_file_path: Path to the checkpoint file
+        model: Model to restore
+        optimizer: Optimizer to restore (optional)
+        scheduler: Scheduler to restore (optional)
+        fabric: Fabric instance for distributed training (optional)
+        is_master: Whether this is the master process
+        resume_training: Whether to resume training state (epoch, iteration, etc.)
+
+    Returns:
+        dict: Dictionary containing checkpoint information:
+            - 'loaded': bool, whether checkpoint was loaded successfully
+            - 'epoch': int, last epoch (if resume_training=True)
+            - 'iteration': int, last iteration (if resume_training=True)
+            - 'chunk_idx': int, last chunk index (if resume_training=True)
+            - 'wandb_run_id': str, wandb run id (if available)
+            - 'wandb_config': dict, wandb config (if available)
+    """
+    if not os.path.exists(ckpt_file_path):
+        if is_master:
+            logging.warning(f"[WARN] Checkpoint not found: {ckpt_file_path}")
+        return {
+            "loaded": False,
+            "epoch": 1,
+            "iteration": 0,
+            "chunk_idx": 0,
+            "wandb_run_id": None,
+            "wandb_config": None,
+        }
+
+    try:
+        # Load state dict
+        if fabric is not None:
+            remainder = fabric.load(ckpt_file_path)
+        else:
+            remainder = torch.load(ckpt_file_path, map_location="cpu")
+
+        # Restore model, optimizer, scheduler parameters
+        if "model" in remainder:
+            model.load_state_dict(remainder["model"])
+        if "optimizer" in remainder and optimizer is not None:
+            optimizer.load_state_dict(remainder["optimizer"])
+        if (
+            "scheduler" in remainder
+            and scheduler is not None
+            and remainder["scheduler"] is not None
+        ):
+            scheduler.load_state_dict(remainder["scheduler"])
+
+        # Prepare return values
+        result = {
+            "loaded": True,
+            "epoch": remainder.get("epoch", 1) if resume_training else 1,
+            "iteration": remainder.get("iteration", 0) if resume_training else 0,
+            "chunk_idx": remainder.get("chunk_idx", 0) if resume_training else 0,
+            "wandb_run_id": remainder.get("wandb_run_id", None),
+            "wandb_config": remainder.get("wandb_config", None),
+        }
+
+        if is_master:
+            logging.info(f"[INFO] Checkpoint loaded successfully from {ckpt_file_path}")
+            if resume_training:
+                logging.info(
+                    f"[INFO] Resume training from epoch={result['epoch']}, "
+                    f"chunk={result['chunk_idx']}, iter={result['iteration']}"
+                )
+
+        return result
+
+    except Exception as e:
+        if is_master:
+            logging.error(
+                f"[ERROR] Failed to load checkpoint from {ckpt_file_path}: {e}"
+            )
+        return {
+            "loaded": False,
+            "epoch": 1,
+            "iteration": 0,
+            "chunk_idx": 0,
+            "wandb_run_id": None,
+            "wandb_config": None,
+        }
+
+
+def load_checkpoint_cta_test(checkpoint_path, model, fabric, is_master=True):
+    """
+    Load model checkpoint for Cell Type Annotation testing.
+
+    This function loads only the model weights and cell type mappings,
+    without loading optimizer/scheduler states (unlike load_checkpoint).
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model: Model to load weights into
+        fabric: Fabric instance for distributed loading
+        is_master: Whether this is the master process
+
+    Returns:
+        dict: Dictionary containing:
+            - cell_type_count: Number of cell types
+            - type2id: Mapping from cell type name to ID
+            - id2type: Mapping from ID to cell type name
+            - common_celltypes: Sorted list of cell type names
+            - epoch: Training epoch when checkpoint was saved
+            - eval_loss: Evaluation loss when checkpoint was saved
+    """
+    assert os.path.exists(checkpoint_path), f"Checkpoint not found: {checkpoint_path}"
+
+    if fabric.global_rank == 0:
+        print(f"[LOAD] Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    else:
+        checkpoint = None
+
+    # Broadcast checkpoint to all processes
+    checkpoint = fabric.broadcast(checkpoint, src=0)
+
+    # Load model state dict
+    load_info = model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+
+    if is_master:
+        print(f"Checkpoint loaded successfully from epoch {checkpoint['epoch']}")
+        print(f"Checkpoint eval loss: {checkpoint['eval_loss']:.4f}")
+        report_loading_result(load_info)
+
+    # Extract cell type mappings from checkpoint
+    cell_type_count = checkpoint["cell_type_count"]
+    type2id = checkpoint["type2id"]
+    id2type = checkpoint["id2type"]
+    common_celltypes = sorted(type2id.keys())
+
+    print(f"Loaded cell type count: {cell_type_count}")
+    print(f"Loaded cell types: {common_celltypes}")
+
+    return {
+        "cell_type_count": cell_type_count,
+        "type2id": type2id,
+        "id2type": id2type,
+        "common_celltypes": common_celltypes,
+        "epoch": checkpoint["epoch"],
+        "eval_loss": checkpoint["eval_loss"],
+    }
+
+
+def restore_wandb_session(wandb_run_id, wandb_config, args, is_master=True):
+    """
+    Restore wandb session from checkpoint information.
+
+    Args:
+        wandb_run_id: Saved wandb run ID
+        wandb_config: Saved wandb configuration
+        args: Training arguments
+        is_master: Whether this is the master process
+
+    Returns:
+        bool: Whether wandb session was restored successfully
+    """
+    if not is_master or wandb_run_id is None:
+        return False
+
+    try:
+        logging.info(f"[INFO] Found saved wandb run_id: {wandb_run_id}")
+        logging.info("[INFO] Using original run_id to restore wandb session...")
+
+        if wandb_config:
+            wandb.init(
+                id=wandb_run_id,
+                resume="allow",
+                project=wandb_config.get("project", args.logging.wandb_project),
+                entity=wandb_config.get("entity", args.logging.wandb_team),
+                name=wandb_config.get(
+                    "name",
+                    f"{args.logging.run_name}, lr: {args.learning_rate}",
+                ),
+                tags=wandb_config.get("tags", args.logging.tags),
+                config=wandb_config.get("config", dict(args)),
+            )
+        else:
+            wandb.init(
+                id=wandb_run_id,
+                resume="allow",
+                project=args.logging.wandb_project,
+                entity=args.logging.wandb_team,
+                name=f"{args.logging.run_name}, lr: {args.learning_rate}",
+                tags=args.logging.tags,
+                config=dict(args),
+            )
+
+        logging.info(
+            f"✅ Wandb restored! Project: {wandb.run.project}, Entity: {wandb.run.entity}, Run ID: {wandb.run.id}"
+        )
+        logging.info(f"🔗 Wandb URL: {wandb.run.url}")
+        return True
+
+    except Exception as e:
+        logging.error(f"[ERROR] Failed to restore wandb session: {e}")
+        return False
+
+
+def check_moe_collapse(model, epoch, iteration):
+    """
+    检查MoE塌缩情况并记录到日志
+
+    Args:
+        model: The model to check for MoE collapse
+        epoch: current epoch
+        iteration: current iteration
+    """
+    try:
+        # 检查模型是否有MoE塌缩检测功能
+        if not hasattr(model, "check_moe_collapse"):
+            return
+
+        print(f"\n[Epoch {epoch}, Iter {iteration}] 检查MoE塌缩状态...")
+
+        # 获取塌缩检测结果
+        collapse_results = model.check_moe_collapse(threshold=0.8)
+
+        if not collapse_results:
+            logging.info("No MoE layers found or MoE function not enabled")
+            return
+
+        # 统计塌缩情况
+        total_layers = len(collapse_results)
+        collapsed_layers = sum(
+            1 for result in collapse_results.values() if result["is_collapsed"]
+        )
+        healthy_layers = total_layers - collapsed_layers
+
+        # Log to console
+        logging.info(
+            f"MoE status summary: total_layers={total_layers}, "
+            f"collapsed_layers={collapsed_layers}, healthy_layers={healthy_layers}"
+        )
+
+        # If there's collapse, print detailed report
+        if collapsed_layers > 0:
+            logging.warning("⚠️  MoE collapse detected! Detailed information:")
+            for layer_name, result in collapse_results.items():
+                if result["is_collapsed"]:
+                    logging.warning(
+                        f"  🚨 {layer_name}: collapse_ratio={result['collapse_ratio']:.4f}, "
+                        f"entropy={result['entropy']:.4f}"
+                    )
+
+                    # Find the most used expert
+                    usage_ratios = result["expert_usage_ratio"]
+                    max_expert_idx = usage_ratios.index(max(usage_ratios))
+                    logging.warning(
+                        f"     Most used expert: Expert-{max_expert_idx} "
+                        f"(usage_rate: {usage_ratios[max_expert_idx]:.4f})"
+                    )
+        else:
+            logging.info("✅ All MoE layers are healthy")
+
+        # Log to wandb (if enabled)
+        if wandb.run is not None:
+            wandb_logs = {
+                "moe/total_layers": total_layers,
+                "moe/collapsed_layers": collapsed_layers,
+                "moe/healthy_layers": healthy_layers,
+                "moe/collapse_ratio": (
+                    collapsed_layers / total_layers if total_layers > 0 else 0.0
+                ),
+            }
+
+            # Log detailed information for each layer
+            for layer_name, result in collapse_results.items():
+                layer_key = layer_name.replace("/", "_").replace("-", "_")
+                wandb_logs[f"moe_layers/{layer_key}/collapse_ratio"] = result[
+                    "collapse_ratio"
+                ]
+                wandb_logs[f"moe_layers/{layer_key}/entropy"] = result["entropy"]
+                wandb_logs[f"moe_layers/{layer_key}/is_collapsed"] = int(
+                    result["is_collapsed"]
+                )
+
+            wandb.log(wandb_logs, step=iteration)
+
+        logging.info(
+            f"MoE collapse detection completed [Epoch {epoch}, Iter {iteration}]\n"
+        )
+
+    except Exception as e:
+        logging.error(f"MoE collapse detection error: {e}")
+        import traceback
+
+        traceback.print_exc()
 
 
 import pandas as pd
@@ -1404,42 +2031,6 @@ def build_gene_ids_for_dataset(genes, vocab2id, pad_token="<pad>"):
     n_hit = int((gene_ids != pad_id).sum())
     print(f"[映射] 命中 {n_hit}/{len(genes)} 个基因，未命中的用 <pad>={pad_id}")
     return gene_ids
-
-
-def extract_state_dict(maybe_state):
-    """
-    兼容多种保存方式：
-    - {"model": state_dict, ...}  ← 你现在的保存方式（Fabric）
-    - {"state_dict": state_dict, ...}  ← Lightning 常见
-    - 直接就是 state_dict
-    - 键带 "model." 前缀
-    """
-    if isinstance(maybe_state, dict):
-        if "model" in maybe_state and isinstance(maybe_state["model"], dict):
-            sd = maybe_state["model"]
-        elif "state_dict" in maybe_state and isinstance(
-            maybe_state["state_dict"], dict
-        ):
-            sd = maybe_state["state_dict"]
-        else:
-            # 可能就是 state_dict
-            sd = maybe_state
-    else:
-        raise ValueError("Checkpoint 内容不是字典，无法解析 state_dict")
-
-    # 去掉可能存在的前缀 "model." 或 "module."
-    need_strip_prefixes = ("model.", "module.")
-    if any(any(k.startswith(p) for p in need_strip_prefixes) for k in sd.keys()):
-        new_sd = {}
-        for k, v in sd.items():
-            for p in need_strip_prefixes:
-                if k.startswith(p):
-                    k = k[len(p) :]
-                    break
-            new_sd[k] = v
-        sd = new_sd
-    return sd
-
 
 def report_loading_result(load_info):
     missing = list(load_info.missing_keys)
