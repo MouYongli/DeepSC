@@ -30,11 +30,12 @@ def finetune(cfg: DictConfig):
     trainer = PPNEW(cfg, fabric=fabric, model=model)
 
     # initialize log to trainer's log directory
+    # use_hydra=True to only redirect stdout/stderr, not reconfigure logging
     if fabric.global_rank == 0:
-        setup_logging(rank=fabric.global_rank, log_path=trainer.log_dir)
+        setup_logging(rank=fabric.global_rank, log_path=trainer.log_dir, use_hydra=True)
     else:
         setup_logging(
-            rank=fabric.global_rank, log_path="./logs"
+            rank=fabric.global_rank, log_path="./logs", use_hydra=True
         )  # fallback for non-master
 
     # wandb initialization will be handled in trainer after checkpoint check

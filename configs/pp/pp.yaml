@@ -98,7 +98,7 @@ hydra:
   verbose: False
   # 设置输出目录: 按日期/时间组织
   run:
-    dir: /home/angli/DeepSC/results/cell_type_annotation/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    dir: /home/angli/DeepSC/results/perturbation_prediction/${now:%Y-%m-%d}/${now:%H-%M-%S}
   # Logs to stdout and to a file.
   job_logging:
     handlers:
