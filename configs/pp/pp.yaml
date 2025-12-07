@@ -4,7 +4,12 @@ defaults:
 
 wandb_project: "DeepSC"
 tags: ["256hd"]
-run_name: "finetune_cell_type_annotation_256hd"
+run_name: "finetune_perturbation_prediction_256hd"
+
+# 数据集相关
+data_name: "norman"  # 可选: norman, adamson, dixit, replogle_k562_essential, replogle_rpe1_essential
+split: "simulation"  # 数据集分割方式
+data_path: "./data"  # 数据路径
 
 #文件加载相关
 chunksize: 4

@@ -130,9 +130,12 @@ class PPNEW:
         return scheduler
 
     def prepare_data(self):
-        data_name = "adamson"
-        split = "simulation"
-        pert_data = PertData("./data")  # TODO: change to the data path
+        # 从配置文件读取data_name,如果没有配置则使用默认值"norman"
+        data_name = getattr(self.args, "data_name", "norman")
+        split = getattr(self.args, "split", "simulation")
+        data_path = getattr(self.args, "data_path", "./data")
+
+        pert_data = PertData(data_path)
         self.pert_data = pert_data
         pert_data.load(data_name=data_name)
         pert_data.prepare_split(split=split, seed=1)
