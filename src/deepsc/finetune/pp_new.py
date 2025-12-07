@@ -9,6 +9,7 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import LinearLR, SequentialLR
 from tqdm import tqdm
 
+from datetime import datetime
 from deepsc.utils import (
     build_gene_ids_for_dataset,
     build_vocab_from_csv,
@@ -32,6 +33,7 @@ class PPNEW:
         self.world_size = self.fabric.world_size
         seed_all(args.seed + self.fabric.global_rank)
         self.is_master = self.fabric.global_rank == 0
+        self.setup_output_directory()
         if args.pretrained_model:
             self.load_pretrained_model()
 
@@ -59,6 +61,54 @@ class PPNEW:
         # unique_vals, counts = np.unique(self.gene_ids, return_counts=True)
         # print("unique_vals:",unique_vals)
         # print("counts:",counts)
+
+    def setup_output_directory(self):
+        """
+        创建带时间戳的输出目录用于保存checkpoint、log和配置
+        按照日期(到天)分文件夹,然后再按照具体时间分文件夹
+        """
+        if self.is_master:
+            # 创建基础目录
+            base_dir = "/home/angli/DeepSC/results/cell_type_annotation"
+            os.makedirs(base_dir, exist_ok=True)
+
+            # 获取当前时间
+            now = datetime.now()
+            date_str = now.strftime("%Y-%m-%d")  # 日期到天: 2025-12-07
+            time_str = now.strftime("%H-%M-%S")  # 具体时间: 14-30-45
+
+            # 创建日期目录
+            date_dir = os.path.join(base_dir, date_str)
+            os.makedirs(date_dir, exist_ok=True)
+
+            # 创建时间目录
+            self.output_dir = os.path.join(date_dir, time_str)
+            os.makedirs(self.output_dir, exist_ok=True)
+
+            # 创建checkpoints、logs和visualizations子目录
+            self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
+            self.log_dir = os.path.join(self.output_dir, "logs")
+            self.vis_dir = os.path.join(self.output_dir, "visualizations")
+            os.makedirs(self.ckpt_dir, exist_ok=True)
+            os.makedirs(self.log_dir, exist_ok=True)
+            os.makedirs(self.vis_dir, exist_ok=True)
+
+            print(f"Output directory created: {self.output_dir}")
+            print(f"  - Checkpoints: {self.ckpt_dir}")
+            print(f"  - Logs: {self.log_dir}")
+            print(f"  - Visualizations: {self.vis_dir}")
+        else:
+            # 非master进程设置为None
+            self.output_dir = None
+            self.ckpt_dir = None
+            self.log_dir = None
+            self.vis_dir = None
+
+        # 广播输出目录到所有进程
+        self.output_dir = self.fabric.broadcast(self.output_dir, src=0)
+        self.ckpt_dir = self.fabric.broadcast(self.ckpt_dir, src=0)
+        self.log_dir = self.fabric.broadcast(self.log_dir, src=0)
+        self.vis_dir = self.fabric.broadcast(self.vis_dir, src=0)
 
     def init_loss_fn(self):
         self.criterion_mse = nn.MSELoss()

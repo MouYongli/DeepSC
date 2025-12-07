@@ -21,17 +21,25 @@ def finetune(cfg: DictConfig):
         precision="bf16-mixed",
     )
     fabric.launch()
-    # initialize log
-    setup_logging(rank=fabric.global_rank, log_path="./logs")
+
+    # instantiate model first
+    model: nn.Module = hydra.utils.instantiate(cfg.model)
+    model = model.float()
+
+    # create trainer (which sets up output directories)
+    trainer = PPNEW(cfg, fabric=fabric, model=model)
+
+    # initialize log to trainer's log directory
+    if fabric.global_rank == 0:
+        setup_logging(rank=fabric.global_rank, log_path=trainer.log_dir)
+    else:
+        setup_logging(
+            rank=fabric.global_rank, log_path="./logs"
+        )  # fallback for non-master
 
     # wandb initialization will be handled in trainer after checkpoint check
     # This way we don't create empty runs if we can resume
 
-    # model = select_model(cfg)
-    # instantiate model
-    model: nn.Module = hydra.utils.instantiate(cfg.model)
-    model = model.float()
-    trainer = PPNEW(cfg, fabric=fabric, model=model)
     trainer.train()
 
 

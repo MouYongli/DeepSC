@@ -18,7 +18,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from datetime import datetime
 from deepsc.data.dataset import (  # GeneExpressionDatasetMapped,; create_global_celltype_mapping,
     GeneExpressionDatasetMappedWithGlobalCelltype,
 )
@@ -63,19 +62,20 @@ class CellTypeAnnotation:
 
     def setup_output_directory(self):
         """
-        创建带时间戳的输出目录用于保存checkpoint和log
+        使用Hydra的输出目录,并在其中创建checkpoints、logs和visualizations子目录
         """
         if self.is_master:
-            # 创建基础目录
-            base_dir = "/home/angli/DeepSC/results/cell_type_annotation"
-            os.makedirs(base_dir, exist_ok=True)
+            # 使用Hydra的输出目录(通过HydraConfig获取,即使在fork后的子进程中也有效)
+            from hydra.core.hydra_config import HydraConfig
 
-            # 创建带时间戳的子目录
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.output_dir = os.path.join(base_dir, timestamp)
-            os.makedirs(self.output_dir, exist_ok=True)
+            try:
+                hydra_cfg = HydraConfig.get()
+                self.output_dir = hydra_cfg.runtime.output_dir
+            except:
+                # 如果不是在Hydra下运行,使用当前目录
+                self.output_dir = os.getcwd()
 
-            # 创建checkpoints和logs子目录
+            # 创建checkpoints、logs和visualizations子目录
             self.ckpt_dir = os.path.join(self.output_dir, "checkpoints")
             self.log_dir = os.path.join(self.output_dir, "logs")
             self.vis_dir = os.path.join(self.output_dir, "visualizations")
@@ -83,7 +83,7 @@ class CellTypeAnnotation:
             os.makedirs(self.log_dir, exist_ok=True)
             os.makedirs(self.vis_dir, exist_ok=True)
 
-            print(f"Output directory created: {self.output_dir}")
+            print(f"Output directory: {self.output_dir}")
             print(f"  - Checkpoints: {self.ckpt_dir}")
             print(f"  - Logs: {self.log_dir}")
             print(f"  - Visualizations: {self.vis_dir}")

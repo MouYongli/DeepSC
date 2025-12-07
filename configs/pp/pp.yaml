@@ -1,6 +1,6 @@
 defaults:
-  - _self_
   - model: deepsc
+  - _self_
 
 wandb_project: "DeepSC"
 tags: ["256hd"]
@@ -96,6 +96,9 @@ check_grad_flow: False  # 是否启用梯度检查 多卡的时候不需要启�
 hydra:
   # Logging configuration: https://hydra.cc/docs/tutorials/basic/running_your_app/logging/
   verbose: False
+  # 设置输出目录: 按日期/时间组织
+  run:
+    dir: /home/angli/DeepSC/results/cell_type_annotation/${now:%Y-%m-%d}/${now:%H-%M-%S}
   # Logs to stdout and to a file.
   job_logging:
     handlers:

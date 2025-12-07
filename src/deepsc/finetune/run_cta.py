@@ -1,6 +1,3 @@
-import os
-import shutil
-
 import hydra
 import torch.nn as nn
 from lightning.fabric import Fabric
@@ -32,14 +29,6 @@ def finetune(cfg: DictConfig):
         precision="bf16-mixed",
     )
     fabric.launch()
-    # initialize log (Hydra auto-manages working directory)
-    # use_hydra=True to only redirect stdout/stderr, not reconfigure logging
-    setup_logging(
-        rank=fabric.global_rank, log_path=".", log_name="finetune", use_hydra=True
-    )
-
-    # wandb initialization will be handled in trainer after checkpoint check
-    # This way we don't create empty runs if we can resume
 
     # 根据数据集使用方式获取细胞类型数量
     use_separated_datasets = getattr(cfg, "seperated_train_eval_dataset", True)
@@ -71,29 +60,24 @@ def finetune(cfg: DictConfig):
     )
     model = model.float()
     trainer = CellTypeAnnotation(cfg, fabric=fabric, model=model)
+
+    # initialize log after trainer is created (so we can use trainer.log_dir)
+    # use_hydra=True to only redirect stdout/stderr, not reconfigure logging
+    if fabric.global_rank == 0:
+        setup_logging(
+            rank=fabric.global_rank,
+            log_path=trainer.log_dir,
+            log_name="finetune",
+            use_hydra=True,
+        )
+
     trainer.train()
 
-    # 训练完成后,复制hydra日志到训练输出目录
-    if fabric.global_rank == 0 and trainer.output_dir:
-        try:
-            # 获取当前hydra输出目录
-            hydra_output_dir = os.getcwd()
-
-            # 查找finetune_0.log文件
-            log_file = os.path.join(hydra_output_dir, "finetune_0.log")
-            if os.path.exists(log_file):
-                dest_log = os.path.join(trainer.log_dir, "finetune.log")
-                shutil.copy2(log_file, dest_log)
-                print(f"Copied log file to: {dest_log}")
-
-            # 复制hydra配置
-            hydra_config_dir = os.path.join(hydra_output_dir, ".hydra")
-            if os.path.exists(hydra_config_dir):
-                dest_config_dir = os.path.join(trainer.output_dir, "config")
-                shutil.copytree(hydra_config_dir, dest_config_dir, dirs_exist_ok=True)
-                print(f"Copied config to: {dest_config_dir}")
-        except Exception as e:
-            print(f"Warning: Failed to copy logs/config: {e}")
+    # 所有文件已经在正确的目录下,不需要再复制
+    # Hydra的配置在 .hydra/ 目录
+    # 训练的checkpoints在 checkpoints/ 目录
+    # 日志在 logs/ 目录
+    # 可视化在 visualizations/ 目录
 
 
 if __name__ == "__main__":
