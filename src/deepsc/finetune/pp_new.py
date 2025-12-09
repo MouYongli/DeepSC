@@ -105,6 +105,11 @@ class PPNEW:
         self.criterion_mse = nn.MSELoss()
 
     def create_scheduler(self, optimizer, args):
+        # 如果使用恒定学习率，返回None
+        if getattr(args, "use_constant_lr", False):
+            if self.is_master:
+                print("Using constant learning rate (no scheduler)")
+            return None
 
         total_steps = args.epoch * math.ceil(
             (100000) / (args.batch_size * self.world_size * args.grad_acc)
@@ -285,9 +290,19 @@ class PPNEW:
                             self.num_genes, device=device, dtype=torch.long
                         )
                     else:
+                        # 得到在ori_gene_values或target_gene_values中至少有一个非零的基因索引
+                        ori_nonzero_gene_ids = (
+                            ori_gene_values.nonzero()[:, 1].flatten().unique()
+                        )
+                        target_nonzero_gene_ids = (
+                            target_gene_values.nonzero()[:, 1].flatten().unique()
+                        )
+                        # 合并两个集合，取并集
                         input_gene_ids = (
-                            ori_gene_values.nonzero()[:, 1].flatten().unique().sort()[0]
-                        )  # 得到整个batch里面没有0表达的基因原始索引
+                            torch.cat([ori_nonzero_gene_ids, target_nonzero_gene_ids])
+                            .unique()
+                            .sort()[0]
+                        )
                     if len(input_gene_ids) > self.args.data_length:
                         input_gene_ids = torch.randperm(
                             len(input_gene_ids), device=device
@@ -311,20 +326,28 @@ class PPNEW:
                     )
                     loss = self.criterion_mse(regression_output, target_values)
 
+                    # 梯度累积：将loss除以grad_acc，使得累积的梯度平均值正确
+                    loss = loss / self.args.grad_acc
                     self.fabric.backward(loss)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
-                    self.optimizer.step()
-                    self.scheduler.step()  # 每次optimizer.step()后更新学习率
-                    self.optimizer.zero_grad()
 
-                    # 累积损失用于记录
-                    total_loss += loss.item()
-                    total_mse += loss.item()
+                    # 累积损失用于记录（使用原始loss，不是缩放后的）
+                    total_loss += loss.item() * self.args.grad_acc
+                    total_mse += loss.item() * self.args.grad_acc
 
-                    # 更新进度条 - 这就是您要添加的代码！
+                    # 每grad_acc步或最后一个batch时，执行参数更新
+                    if (batch + 1) % self.args.grad_acc == 0 or (batch + 1) == len(
+                        self.train_loader
+                    ):
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1e2)
+                        self.optimizer.step()
+                        if self.scheduler is not None:
+                            self.scheduler.step()  # 每次optimizer.step()后更新学习率
+                        self.optimizer.zero_grad()
+
+                    # 更新进度条
                     if self.is_master:
                         data_iter.set_postfix(
-                            loss=loss.item(),
+                            loss=loss.item() * self.args.grad_acc,  # 显示原始loss
                             avg_loss=total_loss / (batch + 1),
                         )
             res = self.evaluate()
@@ -332,8 +355,25 @@ class PPNEW:
                 res,
                 self.pert_data.adata[self.pert_data.adata.obs["condition"] == "ctrl"],
             )
-            print("val_metrics at epoch 1: ")
-            print(val_metrics)
+            if self.is_master:
+                print(f"val_metrics at epoch {epoch + 1}: ")
+                print(val_metrics)
+
+                # 保存checkpoint
+                ckpt_path = os.path.join(self.ckpt_dir, f"epoch_{epoch+1}.pt")
+                self.fabric.save(
+                    ckpt_path,
+                    {"model": self.model, "optimizer": self.optimizer, "epoch": epoch},
+                )
+                print(f"Checkpoint saved to: {ckpt_path}")
+
+                # 保存最佳模型（如果需要的话，可以根据验证指标判断）
+                best_ckpt_path = os.path.join(self.ckpt_dir, "best_model.pt")
+                self.fabric.save(
+                    best_ckpt_path,
+                    {"model": self.model, "optimizer": self.optimizer, "epoch": epoch},
+                )
+                print(f"Best model saved to: {best_ckpt_path}")
 
     def evaluate(self):
         self.model.eval()
@@ -368,9 +408,17 @@ class PPNEW:
                             self.num_genes, device=device, dtype=torch.long
                         )
                     else:
+                        # 得到在ori_gene_values或target_gene_values(t)中至少有一个非零的基因索引
+                        ori_nonzero_gene_ids = (
+                            ori_gene_values.nonzero()[:, 1].flatten().unique()
+                        )
+                        target_nonzero_gene_ids = t.nonzero()[:, 1].flatten().unique()
+                        # 合并两个集合，取并集
                         input_gene_ids = (
-                            ori_gene_values.nonzero()[:, 1].flatten().unique().sort()[0]
-                        )  # 得到整个batch里面没有0表达的基因原始索引
+                            torch.cat([ori_nonzero_gene_ids, target_nonzero_gene_ids])
+                            .unique()
+                            .sort()[0]
+                        )
                     if len(input_gene_ids) > self.args.data_length:
                         input_gene_ids = torch.randperm(
                             len(input_gene_ids), device=device

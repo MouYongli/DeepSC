@@ -64,7 +64,7 @@ use_exp_regression_loss: False
 #Print details of mse loss in log
 show_mse_loss_details: False
 output_dir: "/home/angli/baseline/DeepSC/outputs/deepsc"
-csv_path: "/home/angli/baseline/DeepSC/data/gene_map.csv"
+csv_path: "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
 use_moe_ffn: False
 data_length: 3000
 seed: 42
@@ -90,8 +90,9 @@ draw_continuous_pred_label_scatter: True
 use_warmup: False
 warmup_ratio: 0.03
 use_warmup_with_decay: False
-use_scbert_scheduler: True
+use_scbert_scheduler: False
 use_mogaide_scheduler: False
+use_constant_lr: False  # 是否使用恒定学习率（不使用scheduler）
 
 # 新增checkpoint相关参数
 resume_last_training: True
