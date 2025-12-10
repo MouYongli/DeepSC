@@ -47,6 +47,13 @@ class PPNEW:
         self.gene_ids = build_gene_ids_for_dataset(self.original_genes, self.vocab)
         self.name2col = {g: i for i, g in enumerate(self.original_genes)}
         self.valid_gene_mask = self.gene_ids != 0
+        # 创建有效基因的索引列表（只包含在vocab中有对应的基因）
+        self.valid_gene_ids = torch.arange(self.num_genes)[self.valid_gene_mask]
+        self.num_valid_genes = len(self.valid_gene_ids)
+        if self.is_master:
+            print(f"Total genes in dataset: {self.num_genes}")
+            print(f"Valid genes (in vocab): {self.num_valid_genes}")
+            print(f"Invalid genes (not in vocab): {self.num_genes - self.num_valid_genes}")
         self.perts_to_plot = ["KCTD16+ctrl"]
         # 比较self.name2col和self.node_map是不是内容一样的字典
         if hasattr(self, "node_map"):
@@ -286,9 +293,8 @@ class PPNEW:
                 target_gene_values = batch_data.y  # (batch_size, n_genes)
                 if self.args.include_zero_gene in ["all", "batch-wise"]:
                     if self.args.include_zero_gene == "all":
-                        input_gene_ids = torch.arange(
-                            self.num_genes, device=device, dtype=torch.long
-                        )
+                        # 只使用有效基因（在vocab中有对应的基因）
+                        input_gene_ids = self.valid_gene_ids.to(device)
                     else:
                         # 得到在ori_gene_values或target_gene_values中至少有一个非零的基因索引
                         ori_nonzero_gene_ids = (
@@ -298,11 +304,14 @@ class PPNEW:
                             target_gene_values.nonzero()[:, 1].flatten().unique()
                         )
                         # 合并两个集合，取并集
-                        input_gene_ids = (
+                        nonzero_gene_ids = (
                             torch.cat([ori_nonzero_gene_ids, target_nonzero_gene_ids])
                             .unique()
                             .sort()[0]
                         )
+                        # 过滤掉无效基因：只保留在vocab中有对应的基因
+                        valid_mask = torch.isin(nonzero_gene_ids, self.valid_gene_ids.to(device))
+                        input_gene_ids = nonzero_gene_ids[valid_mask]
                     if len(input_gene_ids) > self.args.data_length:
                         input_gene_ids = torch.randperm(
                             len(input_gene_ids), device=device
@@ -322,7 +331,7 @@ class PPNEW:
                         gene_ids=mapped_input_gene_ids,
                         expression_bin=discrete_input_bins,
                         normalized_expr=input_values,
-                        input_pert_flags=all_pert_flags,
+                        input_pert_flags=input_pert_flags,
                     )
                     loss = self.criterion_mse(regression_output, target_values)
 
@@ -404,9 +413,8 @@ class PPNEW:
                 ori_gene_values = x[:, 0].view(batch_size, self.num_genes)
                 if self.args.include_zero_gene in ["all", "batch-wise"]:
                     if self.args.include_zero_gene == "all":
-                        input_gene_ids = torch.arange(
-                            self.num_genes, device=device, dtype=torch.long
-                        )
+                        # 只使用有效基因（在vocab中有对应的基因）
+                        input_gene_ids = self.valid_gene_ids.to(device)
                     else:
                         # 得到在ori_gene_values或target_gene_values(t)中至少有一个非零的基因索引
                         ori_nonzero_gene_ids = (
@@ -414,11 +422,14 @@ class PPNEW:
                         )
                         target_nonzero_gene_ids = t.nonzero()[:, 1].flatten().unique()
                         # 合并两个集合，取并集
-                        input_gene_ids = (
+                        nonzero_gene_ids = (
                             torch.cat([ori_nonzero_gene_ids, target_nonzero_gene_ids])
                             .unique()
                             .sort()[0]
                         )
+                        # 过滤掉无效基因：只保留在vocab中有对应的基因
+                        valid_mask = torch.isin(nonzero_gene_ids, self.valid_gene_ids.to(device))
+                        input_gene_ids = nonzero_gene_ids[valid_mask]
                     if len(input_gene_ids) > self.args.data_length:
                         input_gene_ids = torch.randperm(
                             len(input_gene_ids), device=device

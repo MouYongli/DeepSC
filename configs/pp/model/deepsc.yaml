@@ -1,4 +1,4 @@
-_target_: src.deepsc.models.generation_deepsc.model.DeepSC
+_target_: deepsc.models.generation_deepsc.model.DeepSC
 embedding_dim: 256
 num_genes: 35210
 num_layers: 10 # remember to check gene_embedding_participate_til_layer and n_moe_layers
