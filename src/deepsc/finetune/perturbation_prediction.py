@@ -250,7 +250,9 @@ class PPNEW:
                 x: torch.Tensor = batch_data.x  # (batch_size * n_genes, 2)
                 ori_gene_values = x[:, 0].view(batch_size, self.num_genes)
                 target_gene_values = batch_data.y  # (batch_size, n_genes)
-                pert_flags = construct_pert_flags(batch_data, batch_size, self.num_genes, device)
+                pert_flags = self.construct_pert_flags(batch_data, batch_size, self.num_genes, device)
+                print(batch_data.pert_idx)
+                print(batch_data.pert)
                 print("Training batch:", batch)
                 print("Batch data keys:", batch_data.keys())
                 if self.args.include_zero_gene in ["all", "batch-wise"]:

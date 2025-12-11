@@ -283,3 +283,30 @@ def compute_perturbation_metrics(
     metrics = metrics_across_genes
 
     return metrics
+
+
+def discretize_expression(input_values, num_bins=5):
+    """
+    Discretize expression values into bins for DeepSC.
+    Uses per-sample normalization to adapt to each sample's expression range.
+    """
+    batch_size = input_values.shape[0]
+    discrete_input_bins = torch.zeros_like(input_values, dtype=torch.long)
+
+    for i in range(batch_size):
+        row_vals = input_values[i]
+        # Skip invalid values (if any)
+        valid_mask = row_vals != -1.0
+        if valid_mask.any():
+            valid_vals = row_vals[valid_mask]
+            # Normalize to [0, 1] using this sample's min/max
+            min_val = valid_vals.min()
+            max_val = valid_vals.max()
+            norm = (valid_vals - min_val) / (max_val - min_val + 1e-8)
+            # Discretize into bins
+            bins = torch.floor(norm * (num_bins - 1)).long()
+            # Add 1 to avoid collision with pad token (0)
+            bins = torch.clamp(bins, 0, num_bins - 1) + 1
+            discrete_input_bins[i][valid_mask] = bins
+
+    return discrete_input_bins

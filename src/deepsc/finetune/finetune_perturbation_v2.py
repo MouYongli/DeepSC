@@ -185,7 +185,7 @@ logger.info(f"Running on {time.strftime('%Y-%m-%d %H:%M:%S')}")
 logger.info(f"Model type: {MODEL_TYPE}")
 
 # Load perturbation data
-pert_data = PertData("./archive/data")
+pert_data = PertData("./data")
 pert_data.load(data_name=data_name)
 pert_data.prepare_split(split=split, seed=1)
 pert_data.get_dataloader(batch_size=batch_size, test_batch_size=eval_batch_size)
@@ -432,25 +432,15 @@ def discretize_expression(input_values, num_bins=5):
 def construct_pert_flags(batch_data, batch_size, n_genes, device):
     """
     Construct perturbation flags from batch_data.pert for new version of gears.
-    Uses 3-level flag system:
-    - 0: Normal genes
-    - 1: Directly perturbed genes (from batch_data.pert)
-    - 2: Differentially expressed genes (from batch_data.de_idx)
     """
     pert_flags = torch.zeros(batch_size, n_genes, device=device, dtype=torch.long)
 
-    # Mark directly perturbed genes (pert_flags=1)
     for r, p in enumerate(batch_data.pert):
         for g in p.split("+"):
             if g and g != "ctrl":
                 j = name2col.get(g, -1)
                 if j != -1:
                     pert_flags[r, j] = 1
-
-    # Mark differentially expressed genes (pert_flags=2)
-    for r, de_idx in enumerate(batch_data.de_idx):
-        for g_idx in de_idx:
-            pert_flags[r, g_idx] = 2
 
     return pert_flags
 
@@ -665,9 +655,10 @@ def eval_perturb(
                     input_pert_flags=input_pert_flags,
                 )
 
-                # Reconstruct full prediction: use original values as base, only update predicted genes
-                p = ori_gene_values.clone()
-                p[:, input_gene_ids] = regression_output
+                # Reconstruct full prediction (scatter back to all genes)
+                p = torch.zeros(batch_size, n_genes, device=device)
+                for i, idx in enumerate(input_gene_ids):
+                    p[:, idx] = regression_output[:, i]
 
             t = batch.y
             pred.extend(p.cpu())
@@ -811,9 +802,10 @@ def predict(
                         input_pert_flags=input_pert_flags,
                     )
 
-                    # Reconstruct full prediction: use original values as base, only update predicted genes
-                    pred_gene_values = ori_gene_values.clone()
-                    pred_gene_values[:, input_gene_ids] = regression_output
+                    # Reconstruct full prediction
+                    pred_gene_values = torch.zeros(batch_size, n_genes, device=device)
+                    for i, idx in enumerate(input_gene_ids):
+                        pred_gene_values[:, idx] = regression_output[:, i]
 
                 preds.append(pred_gene_values)
 

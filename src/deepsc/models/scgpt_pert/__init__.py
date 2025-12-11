@@ -7,6 +7,7 @@ from .utils import (
     compute_perturbation_metrics,
     load_pretrained,
     add_file_handler,
+    discretize_expression,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "compute_perturbation_metrics",
     "load_pretrained",
     "add_file_handler",
+    "discretize_expression",
 ]

@@ -15,7 +15,7 @@ echo "Starting perturbation prediction fine-tuning..."
 echo "=============================================="
 
 # Run the training script
-python fp.py "$@"
+python finetune_perturbation_v2.py "$@"
 
 echo "=============================================="
 echo "Training completed!"
