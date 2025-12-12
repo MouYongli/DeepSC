@@ -2,18 +2,20 @@
 TransformerGenerator model for perturbation prediction.
 Extracted from scGPT to be self-contained.
 """
+
 import math
-from typing import Dict, Optional, Tuple, Any, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
-from torch import nn, Tensor
 import torch.nn.functional as F
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch import Tensor, nn
 from torch.distributions import Bernoulli
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from tqdm import trange
 
 try:
     from flash_attn.flash_attention import FlashMHA
+
     flash_attn_available = True
 except ImportError:
     flash_attn_available = False
@@ -66,6 +68,7 @@ class TransformerGenerator(nn.Module):
         if use_fast_transformer:
             if not flash_attn_available:
                 import warnings
+
                 warnings.warn(
                     "flash-attn is not installed, using pytorch transformer instead. "
                     "Set use_fast_transformer=False to avoid this warning. "
@@ -275,7 +278,9 @@ class TransformerGenerator(nn.Module):
             if genes is None:
                 raise ValueError("genes parameter is required for new GEARS format")
             name2col = {g: i for i, g in enumerate(genes)}
-            pert_flags = torch.zeros(batch_size, n_genes, device=device, dtype=torch.long)
+            pert_flags = torch.zeros(
+                batch_size, n_genes, device=device, dtype=torch.long
+            )
             for r, p in enumerate(batch_data.pert):
                 for g in p.split("+"):
                     if g and g != "ctrl":
@@ -301,8 +306,10 @@ class TransformerGenerator(nn.Module):
             mapped_input_gene_ids = map_raw_id_to_vocab_id(input_gene_ids, gene_ids)
             mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
             # Mask out positions where mapped_input_gene_ids is 0 (unmapped genes)
-            valid_gene_mask = (mapped_input_gene_ids[0] != 0)  # (seq_len,)
-            input_values = input_values * valid_gene_mask.float().unsqueeze(0)  # broadcast to (batch_size, seq_len)
+            valid_gene_mask = mapped_input_gene_ids[0] != 0  # (seq_len,)
+            input_values = input_values * valid_gene_mask.float().unsqueeze(
+                0
+            )  # broadcast to (batch_size, seq_len)
 
             src_key_padding_mask = torch.zeros_like(
                 input_values, dtype=torch.bool, device=device
@@ -528,6 +535,7 @@ class MVCDecoder(nn.Module):
 
 class FlashTransformerEncoderLayer(nn.Module):
     """TransformerEncoderLayer with FlashAttention support."""
+
     __constants__ = ["batch_first"]
 
     def __init__(
