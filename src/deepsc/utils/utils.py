@@ -5,15 +5,18 @@ import os.path as osp
 import random
 import warnings
 from pathlib import Path
+from typing import Dict
 
 import numpy as np
 import scanpy as sc
 import torch
 import torch.nn.functional as F
+from anndata import AnnData
 from torch import nn
 from torch.nn.modules.loss import _WeightedLoss
 from torch.optim.lr_scheduler import _LRScheduler
 
+import sys
 import wandb
 from datetime import datetime
 
@@ -130,6 +133,7 @@ def setup_logging(
     rank: int = -1,
     add_timestamp: bool = True,
     log_level: str = "INFO",
+    use_hydra: bool = True,
 ) -> str:
     """
     Setup unified logging configuration.
@@ -140,6 +144,7 @@ def setup_logging(
         rank: Process rank for distributed training (-1 for single process)
         add_timestamp: Whether to add timestamp to log filename
         log_level: Logging level
+        use_hydra: Whether running under Hydra (will only redirect stdout/stderr)
 
     Returns:
         str: Path to the created log file
@@ -156,23 +161,64 @@ def setup_logging(
 
     log_file = osp.join(log_path, log_filename)
 
-    # Set logging level based on rank
+    # Only setup logging handlers if not using Hydra
+    if not use_hydra:
+        # Set logging level based on rank
+        if rank in [-1, 0]:
+            level = getattr(logging, log_level.upper())
+        else:
+            level = logging.WARN
+
+        # Configure logging with file handler
+        file_handler = logging.FileHandler(log_file, mode="w")
+        file_handler.setLevel(level)
+        file_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+                datefmt="[%X]",
+            )
+        )
+
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(level)
+        stream_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
+                datefmt="[%X]",
+            )
+        )
+
+        logging.basicConfig(
+            level=level,
+            handlers=[file_handler, stream_handler],
+            force=True,  # Reset any existing logging configuration
+        )
+
+        logger = logging.getLogger()
+        logger.info(f"Log file initialized: {log_file}")
+
+    # Redirect stdout and stderr to log file (only for master rank)
     if rank in [-1, 0]:
-        level = getattr(logging, log_level.upper())
-    else:
-        level = logging.WARN
 
-    # Configure logging
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s",
-        datefmt="[%X]",
-        handlers=[logging.FileHandler(log_file, mode="w"), logging.StreamHandler()],
-        force=True,  # Reset any existing logging configuration
-    )
+        class TeeOutput:
+            """Redirect print output to both console and log file"""
 
-    logger = logging.getLogger()
-    logger.info(f"Log file initialized: {log_file}")
+            def __init__(self, file_path, original_stream):
+                self.file = open(file_path, "a" if use_hydra else "w", buffering=1)
+                self.original = original_stream
+
+            def write(self, message):
+                self.file.write(message)
+                self.file.flush()
+                self.original.write(message)
+                self.original.flush()
+
+            def flush(self):
+                self.file.flush()
+                self.original.flush()
+
+        sys.stdout = TeeOutput(log_file, sys.__stdout__)
+        sys.stderr = TeeOutput(log_file, sys.__stderr__)
 
     return log_file
 
@@ -1738,6 +1784,66 @@ def load_checkpoint(
         }
 
 
+def load_checkpoint_cta_test(checkpoint_path, model, fabric, is_master=True):
+    """
+    Load model checkpoint for Cell Type Annotation testing.
+
+    This function loads only the model weights and cell type mappings,
+    without loading optimizer/scheduler states (unlike load_checkpoint).
+
+    Args:
+        checkpoint_path: Path to the checkpoint file
+        model: Model to load weights into
+        fabric: Fabric instance for distributed loading
+        is_master: Whether this is the master process
+
+    Returns:
+        dict: Dictionary containing:
+            - cell_type_count: Number of cell types
+            - type2id: Mapping from cell type name to ID
+            - id2type: Mapping from ID to cell type name
+            - common_celltypes: Sorted list of cell type names
+            - epoch: Training epoch when checkpoint was saved
+            - eval_loss: Evaluation loss when checkpoint was saved
+    """
+    assert os.path.exists(checkpoint_path), f"Checkpoint not found: {checkpoint_path}"
+
+    if fabric.global_rank == 0:
+        print(f"[LOAD] Loading checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    else:
+        checkpoint = None
+
+    # Broadcast checkpoint to all processes
+    checkpoint = fabric.broadcast(checkpoint, src=0)
+
+    # Load model state dict
+    load_info = model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+
+    if is_master:
+        print(f"Checkpoint loaded successfully from epoch {checkpoint['epoch']}")
+        print(f"Checkpoint eval loss: {checkpoint['eval_loss']:.4f}")
+        report_loading_result(load_info)
+
+    # Extract cell type mappings from checkpoint
+    cell_type_count = checkpoint["cell_type_count"]
+    type2id = checkpoint["type2id"]
+    id2type = checkpoint["id2type"]
+    common_celltypes = sorted(type2id.keys())
+
+    print(f"Loaded cell type count: {cell_type_count}")
+    print(f"Loaded cell types: {common_celltypes}")
+
+    return {
+        "cell_type_count": cell_type_count,
+        "type2id": type2id,
+        "id2type": id2type,
+        "common_celltypes": common_celltypes,
+        "epoch": checkpoint["epoch"],
+        "eval_loss": checkpoint["eval_loss"],
+    }
+
+
 def restore_wandb_session(wandb_run_id, wandb_config, args, is_master=True):
     """
     Restore wandb session from checkpoint information.
@@ -1882,3 +1988,258 @@ def check_moe_collapse(model, epoch, iteration):
         import traceback
 
         traceback.print_exc()
+
+
+import pandas as pd
+
+
+def build_vocab_from_csv(csv_path, special_tokens=("<pad>", "<cls>", "<mlm>")):
+    df = pd.read_csv(csv_path)
+
+    # 必须有 feature_name 和 id 两列
+    assert {"feature_name", "id"}.issubset(
+        df.columns
+    ), "CSV 必须包含 feature_name 和 id 列"
+    df["feature_name"] = df["feature_name"].astype(str)
+    df["id"] = df["id"].astype(int)
+
+    # 基因名 -> 原始id
+    gene2id_raw = dict(zip(df["feature_name"], df["id"]))
+
+    # 特殊 token 预留
+    vocab2id = {}
+    vocab2id[special_tokens[0]] = 0  # <pad> 固定为 0
+    start_offset = 1  # 其它基因 id 全部 +1
+
+    # 加上基因
+    for g, i in gene2id_raw.items():
+        vocab2id[g] = i + start_offset
+
+    # 分配剩余的特殊 token
+    max_id = max(vocab2id.values())
+    for j, tok in enumerate(special_tokens[1:], start=1):  # <cls>, <eoc>
+        vocab2id[tok] = max_id + j
+
+    # 反向表
+    id2vocab = {i: g for g, i in vocab2id.items()}
+    return vocab2id, id2vocab, special_tokens[0], vocab2id[special_tokens[0]]
+
+
+def build_gene_ids_for_dataset(genes, vocab2id, pad_token="<pad>"):
+    pad_id = vocab2id[pad_token]
+    gene_ids = torch.tensor([vocab2id.get(g, pad_id) for g in genes], dtype=int)
+    n_hit = int((gene_ids != pad_id).sum())
+    print(f"[映射] 命中 {n_hit}/{len(genes)} 个基因，未命中的用 <pad>={pad_id}")
+    return gene_ids
+
+def report_loading_result(load_info):
+    missing = list(load_info.missing_keys)
+    unexpected = list(load_info.unexpected_keys)
+    print(f"[LOAD] missing_keys: {len(missing)} | unexpected_keys: {len(unexpected)}")
+    if missing:
+        print("  - (前10条) missing:", missing[:10])
+    if unexpected:
+        print("  - (前10条) unexpected:", unexpected[:10])
+
+
+def sample_weight_norms(model, sd, k=5):
+    """
+    随机抽样 k 个双方都存在的参数，打印加载前后的范数变化。
+    范数有变化 => 基本可确认成功写入。
+    """
+    with torch.no_grad():
+        common_keys = [name for name, _ in model.named_parameters() if name in sd]
+        if not common_keys:
+            print("[LOAD] 没有找到与 checkpoint 对齐的公共参数名，无法做范数对比。")
+            return
+        sample = random.sample(common_keys, min(k, len(common_keys)))
+        print("[LOAD] 抽样参数范数对比（加载前 -> 加载后）：")
+        for name in sample:
+            p = dict(model.named_parameters())[name]
+            before = p.detach().float().norm().item()
+            # 暂存当前权重
+            old = p.detach().cpu().clone()
+            # 用 ckpt 覆盖一次
+            p.copy_(sd[name].to(p.device).to(p.dtype))
+            after = p.detach().float().norm().item()
+            print(f"  - {name}: {before:.6f} -> {after:.6f}")
+            # 还原（只用于对比；真正的加载在 load_state_dict 里会再做一次）
+            p.copy_(old.to(p.device).to(p.dtype))
+
+
+# code from scGPT/scgpt/utils/util.py
+def compute_perturbation_metrics(
+    results: Dict,
+    ctrl_adata: AnnData,
+    non_zero_genes: bool = False,
+    return_raw: bool = False,
+) -> Dict:
+    """
+    Given results from a model run and the ground truth, compute metrics
+
+    Args:
+        results (:obj:`Dict`): The results from a model run
+        ctrl_adata (:obj:`AnnData`): The adata of the control condtion
+        non_zero_genes (:obj:`bool`, optional): Whether to only consider non-zero
+            genes in the ground truth when computing metrics
+        return_raw (:obj:`bool`, optional): Whether to return the raw metrics or
+            the mean of the metrics. Default is False.
+
+    Returns:
+        :obj:`Dict`: The metrics computed
+    """
+    from scipy.stats import pearsonr
+
+    # metrics:
+    #   Pearson correlation of expression on all genes, on DE genes,
+    #   Pearson correlation of expression change on all genes, on DE genes,
+
+    metrics_across_genes = {
+        "pearson": [],
+        "pearson_de": [],
+        "pearson_delta": [],
+        "pearson_de_delta": [],
+    }
+
+    metrics_across_conditions = {
+        "pearson": [],
+        "pearson_delta": [],
+    }
+
+    conditions = np.unique(results["pert_cat"])
+    # assert not "ctrl" in conditions, "ctrl should not be in test conditions"
+    condition2idx = {c: np.where(results["pert_cat"] == c)[0] for c in conditions}
+
+    mean_ctrl = np.array(ctrl_adata.X.mean(0)).flatten()  # (n_genes,)
+    assert ctrl_adata.X.max() <= 1000, "gene expression should be log transformed"
+
+    true_perturbed = results["truth"]  # (n_cells, n_genes)
+    assert true_perturbed.max() <= 1000, "gene expression should be log transformed"
+    true_mean_perturbed_by_condition = np.array(
+        [true_perturbed[condition2idx[c]].mean(0) for c in conditions]
+    )  # (n_conditions, n_genes)
+    print(
+        f"true_mean_perturbed_by_condition shape: {true_mean_perturbed_by_condition.shape}"
+    )
+    print(f"mean_ctrl shape: {mean_ctrl.shape}")
+    true_mean_delta_by_condition = true_mean_perturbed_by_condition - mean_ctrl
+    zero_rows = np.where(np.all(true_mean_perturbed_by_condition == 0, axis=1))[
+        0
+    ].tolist()
+    zero_cols = np.where(np.all(true_mean_perturbed_by_condition == 0, axis=0))[
+        0
+    ].tolist()
+
+    pred_perturbed = results["pred"]  # (n_cells, n_genes)
+    pred_mean_perturbed_by_condition = np.array(
+        [pred_perturbed[condition2idx[c]].mean(0) for c in conditions]
+    )  # (n_conditions, n_genes)
+    print(
+        f"pred_mean_perturbed_by_condition shape: {pred_mean_perturbed_by_condition.shape}"
+    )
+    print(f"mean_ctrl shape: {mean_ctrl.shape}")
+    pred_mean_delta_by_condition = pred_mean_perturbed_by_condition - mean_ctrl
+
+    def corr_over_genes(x, y, conditions, res_list, skip_rows=[], non_zero_mask=None):
+        """compute pearson correlation over genes for each condition"""
+        for i, c in enumerate(conditions):
+            if i in skip_rows:
+                continue
+            x_, y_ = x[i], y[i]
+            if non_zero_mask is not None:
+                x_ = x_[non_zero_mask[i]]
+                y_ = y_[non_zero_mask[i]]
+            res_list.append(pearsonr(x_, y_)[0])
+
+    corr_over_genes(
+        true_mean_perturbed_by_condition,
+        pred_mean_perturbed_by_condition,
+        conditions,
+        metrics_across_genes["pearson"],
+        zero_rows,
+        non_zero_mask=true_mean_perturbed_by_condition != 0 if non_zero_genes else None,
+    )
+    corr_over_genes(
+        true_mean_delta_by_condition,
+        pred_mean_delta_by_condition,
+        conditions,
+        metrics_across_genes["pearson_delta"],
+        zero_rows,
+        non_zero_mask=true_mean_perturbed_by_condition != 0 if non_zero_genes else None,
+    )
+
+    def find_DE_genes(adata, condition, geneid2idx, non_zero_genes=False, top_n=20):
+        """
+        Find the DE genes for a condition
+        """
+        key_components = next(
+            iter(adata.uns["rank_genes_groups_cov_all"].keys())
+        ).split("_")
+        assert len(key_components) == 3, "rank_genes_groups_cov_all key is not valid"
+
+        condition_key = "_".join([key_components[0], condition, key_components[2]])
+
+        de_genes = adata.uns["rank_genes_groups_cov_all"][condition_key]
+        if non_zero_genes:
+            de_genes = adata.uns["top_non_dropout_de_20"][condition_key]
+            # de_genes = adata.uns["rank_genes_groups_cov_all"][condition_key]
+            # de_genes = de_genes[adata.uns["non_zeros_gene_idx"][condition_key]]
+            # assert len(de_genes) > top_n
+
+        de_genes = de_genes[:top_n]
+
+        de_idx = [geneid2idx[i] for i in de_genes]
+
+        return de_idx, de_genes
+
+    geneid2idx = dict(zip(ctrl_adata.var.index.values, range(len(ctrl_adata.var))))
+    de_idx = {
+        c: find_DE_genes(ctrl_adata, c, geneid2idx, non_zero_genes)[0]
+        for c in conditions
+    }
+    mean_ctrl_de = np.array(
+        [mean_ctrl[de_idx[c]] for c in conditions]
+    )  # (n_conditions, n_diff_genes)
+
+    true_mean_perturbed_by_condition_de = np.array(
+        [
+            true_mean_perturbed_by_condition[i, de_idx[c]]
+            for i, c in enumerate(conditions)
+        ]
+    )  # (n_conditions, n_diff_genes)
+    zero_rows_de = np.where(np.all(true_mean_perturbed_by_condition_de == 0, axis=1))[
+        0
+    ].tolist()
+    true_mean_delta_by_condition_de = true_mean_perturbed_by_condition_de - mean_ctrl_de
+
+    pred_mean_perturbed_by_condition_de = np.array(
+        [
+            pred_mean_perturbed_by_condition[i, de_idx[c]]
+            for i, c in enumerate(conditions)
+        ]
+    )  # (n_conditions, n_diff_genes)
+    pred_mean_delta_by_condition_de = pred_mean_perturbed_by_condition_de - mean_ctrl_de
+
+    corr_over_genes(
+        true_mean_perturbed_by_condition_de,
+        pred_mean_perturbed_by_condition_de,
+        conditions,
+        metrics_across_genes["pearson_de"],
+        zero_rows_de,
+    )
+    corr_over_genes(
+        true_mean_delta_by_condition_de,
+        pred_mean_delta_by_condition_de,
+        conditions,
+        metrics_across_genes["pearson_de_delta"],
+        zero_rows_de,
+    )
+
+    if not return_raw:
+        for k, v in metrics_across_genes.items():
+            metrics_across_genes[k] = np.mean(v)
+        for k, v in metrics_across_conditions.items():
+            metrics_across_conditions[k] = np.mean(v)
+    metrics = metrics_across_genes
+
+    return metrics

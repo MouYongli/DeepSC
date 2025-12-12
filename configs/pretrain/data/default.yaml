@@ -1,6 +1,6 @@
 chunk_size: 1
 enable_data_augmentation: False  # 是否启用数据增强（动态掩码概率）
-data_path: "/home/angli/baseline/DeepSC/data/processed/small_example"
+data_path: "${oc.env:DATASET_SHUFFELED}"
 dataset_size: 200000
 
 DataCollator:

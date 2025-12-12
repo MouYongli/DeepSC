@@ -188,6 +188,7 @@ glossary/*bk.md
 **/scBERT_old
 
 ckpts/
+ckpt/
 configs/scbert_pretrain.yaml
 outputs/
 tests/outputs/
@@ -199,3 +200,7 @@ tests/test_dummy.py
 logs/
 test_checkpoints/
 /data/
+issues/
+pull_request/
+
+temp/
