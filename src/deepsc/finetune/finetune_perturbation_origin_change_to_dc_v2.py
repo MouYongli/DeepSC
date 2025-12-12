@@ -122,7 +122,7 @@ enable_ce = False
 
 
 # dataset and evaluation choices
-data_name = "norman"
+data_name = "dixit"
 split = "simulation"
 if data_name == "norman":
     perts_to_plot = ["SAMD1+ZBTB1"]
@@ -304,6 +304,12 @@ def train(model: nn.Module, train_loader: torch.utils.data.DataLoader) -> None:
 
             mapped_input_gene_ids = map_raw_id_to_vocab_id(input_gene_ids, gene_ids)
             mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
+
+            # Mask out positions where mapped_input_gene_ids is 0 (unmapped genes)
+            valid_gene_mask = (mapped_input_gene_ids[0] != 0)  # (seq_len,)
+            input_values = input_values * valid_gene_mask.float().unsqueeze(0)  # broadcast to (batch_size, seq_len)
+            target_values = target_values * valid_gene_mask.float().unsqueeze(0)
+
             src_key_padding_mask = torch.zeros_like(
                 input_values, dtype=torch.bool, device=device
             )
@@ -386,6 +392,11 @@ def eval_perturb(
                 genes=genes,  # Required for new GEARS format
             )
             t = batch.y
+
+            # Mask out unmapped genes in target values (where gene_ids == 0)
+            valid_gene_mask = torch.tensor(gene_ids != 0, dtype=torch.float32, device=device)  # (n_genes,)
+            t = t * valid_gene_mask.unsqueeze(0)  # broadcast to (batch_size, n_genes)
+
             pred.extend(p.cpu())
             truth.extend(t.cpu())
 

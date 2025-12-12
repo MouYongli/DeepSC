@@ -94,7 +94,7 @@ log_interval = 100
 plot_scatter = False  # Set to True to plot prediction vs target scatter plots
 
 # dataset and evaluation choices
-data_name = "norman"
+data_name = "dixit"
 split = "simulation"
 if data_name == "norman":
     perts_to_plot = ["SAMD1+ZBTB1"]
@@ -258,6 +258,11 @@ def train(model: nn.Module, train_loader: torch.utils.data.DataLoader) -> None:
             mapped_input_gene_ids = map_raw_id_to_vocab_id(input_gene_ids, gene_ids)
             mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
 
+            # Mask out positions where mapped_input_gene_ids is 0 (unmapped genes)
+            valid_gene_mask = (mapped_input_gene_ids[0] != 0)  # (seq_len,)
+            input_values = input_values * valid_gene_mask.float().unsqueeze(0)  # broadcast to (batch_size, seq_len)
+            target_values = target_values * valid_gene_mask.float().unsqueeze(0)
+
             src_key_padding_mask = torch.zeros_like(
                 input_values, dtype=torch.bool, device=device
             )
@@ -345,6 +350,11 @@ def eval_perturb(
                 genes=genes,  # Required for new GEARS format
             )
             t = batch.y
+
+            # Mask out unmapped genes in target values (where gene_ids == 0)
+            valid_gene_mask = torch.tensor(gene_ids != 0, dtype=torch.float32, device=device)  # (n_genes,)
+            t = t * valid_gene_mask.unsqueeze(0)  # broadcast to (batch_size, n_genes)
+
             pred.extend(p.cpu())
             truth.extend(t.cpu())
 
@@ -450,129 +460,12 @@ def predict(
     return results_pred
 
 
-def plot_perturbation(
-    model: nn.Module, query: str, save_file: str = None, pool_size: int = None
-) -> matplotlib.figure.Figure:
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import seaborn as sns
-
-    sns.set_theme(style="ticks", rc={"axes.facecolor": (0, 0, 0, 0)}, font_scale=1.5)
-
-    adata = pert_data.adata
-    gene2idx = pert_data.node_map
-    cond2name = dict(adata.obs[["condition", "condition_name"]].values)
-    gene_raw2id = dict(zip(adata.var.index.values, adata.var.gene_name.values))
-
-    de_idx = [
-        gene2idx[gene_raw2id[i]]
-        for i in adata.uns["top_non_dropout_de_20"][cond2name[query]]
-    ]
-    genes = [
-        gene_raw2id[i] for i in adata.uns["top_non_dropout_de_20"][cond2name[query]]
-    ]
-    truth = adata[adata.obs.condition == query].X.toarray()[:, de_idx]
-    if query.split("+")[1] == "ctrl":
-        pred = predict(model, [[query.split("+")[0]]], pool_size=pool_size)
-        pred = pred[query.split("+")[0]][de_idx]
-    else:
-        pred = predict(model, [query.split("+")], pool_size=pool_size)
-        pred = pred["_".join(query.split("+"))][de_idx]
-    ctrl_means = adata[adata.obs["condition"] == "ctrl"].to_df().mean()[de_idx].values
-
-    pred = pred - ctrl_means
-    truth = truth - ctrl_means
-
-    fig, ax = plt.subplots(figsize=[16.5, 4.5])
-    plt.title(query)
-    plt.boxplot(truth, showfliers=False, medianprops=dict(linewidth=0))
-
-    for i in range(pred.shape[0]):
-        _ = plt.scatter(i + 1, pred[i], color="red")
-
-    plt.axhline(0, linestyle="dashed", color="green")
-
-    ax.xaxis.set_ticklabels(genes, rotation=90)
-
-    plt.ylabel("Change in Gene Expression over Control", labelpad=10)
-    plt.tick_params(axis="x", which="major", pad=5)
-    plt.tick_params(axis="y", which="major", pad=5)
-    sns.despine()
-
-    if save_file:
-        fig.savefig(save_file, bbox_inches="tight", transparent=False)
-
-    return fig
-
-if 'perts_to_plot' in locals() and perts_to_plot:
-    logger.info(f"Plotting perturbations: {perts_to_plot}")
-    for p in perts_to_plot:
-        logger.info(f"Plotting perturbation: {p}")
-        plot_perturbation(best_model, p, pool_size=300, save_file=f"{save_dir}/{p}.png")
-        logger.info(f"Perturbation plot saved: {p}")
-else:
-    logger.info("No perturbations to plot (perts_to_plot not defined for this dataset)")
-
 logger.info("Running test evaluation...")
 test_loader = pert_data.dataloader["test_loader"]
 test_res = eval_perturb(test_loader, best_model, device)
 logger.info("Test evaluation completed")
 
 # Optional: Plot scatter plots for prediction vs target values
-if plot_scatter:
-    logger.info("Plotting scatter plots...")
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-
-    # Flatten the prediction and target arrays for scatter plot
-    pred_values = test_res["pred"].flatten()
-    target_values = test_res["truth"].flatten()
-
-    # Create scatter plot
-    plt.figure(figsize=(10, 8))
-    plt.scatter(target_values, pred_values, alpha=0.6, s=20)
-    plt.plot([target_values.min(), target_values.max()], [target_values.min(), target_values.max()], 'r--', lw=2)
-    plt.xlabel('Target Values', fontsize=12)
-    plt.ylabel('Predicted Values', fontsize=12)
-    plt.title('Prediction vs Target Values - All Genes', fontsize=14)
-    plt.grid(True, alpha=0.3)
-
-    # Add correlation coefficient to plot
-    correlation = np.corrcoef(target_values, pred_values)[0, 1]
-    plt.text(0.05, 0.95, f'Correlation: {correlation:.4f}', transform=plt.gca().transAxes,
-             fontsize=12, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    plt.tight_layout()
-    plt.savefig(f"{save_dir}/prediction_vs_target_scatter_all_genes.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # Also create scatter plot for differentially expressed genes only
-    pred_de_values = test_res["pred_de"].flatten()
-    target_de_values = test_res["truth_de"].flatten()
-
-    plt.figure(figsize=(10, 8))
-    plt.scatter(target_de_values, pred_de_values, alpha=0.6, s=20, color='orange')
-    plt.plot([target_de_values.min(), target_de_values.max()], [target_de_values.min(), target_de_values.max()], 'r--', lw=2)
-    plt.xlabel('Target Values (DE genes)', fontsize=12)
-    plt.ylabel('Predicted Values (DE genes)', fontsize=12)
-    plt.title('Prediction vs Target Values - Differentially Expressed Genes', fontsize=14)
-    plt.grid(True, alpha=0.3)
-
-    # Add correlation coefficient to plot
-    correlation_de = np.corrcoef(target_de_values, pred_de_values)[0, 1]
-    plt.text(0.05, 0.95, f'Correlation: {correlation_de:.4f}', transform=plt.gca().transAxes,
-             fontsize=12, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-    plt.tight_layout()
-    plt.savefig(f"{save_dir}/prediction_vs_target_scatter_de_genes.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-    logger.info(f"Scatter plots saved")
-    logger.info(f"Correlation (all genes): {correlation:.4f}")
-    logger.info(f"Correlation (DE genes): {correlation_de:.4f}")
-else:
-    logger.info("Skipping scatter plot generation (plot_scatter=False)")
-
 
 logger.info("Computing test metrics...")
 test_metrics = compute_perturbation_metrics(

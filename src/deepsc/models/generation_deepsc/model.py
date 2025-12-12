@@ -1126,6 +1126,11 @@ class DeepSC(nn.Module):
 
             mapped_input_gene_ids = map_raw_id_to_vocab_id(input_gene_ids, gene_ids)
             mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
+
+            # Mask out positions where mapped_input_gene_ids is 0 (unmapped genes)
+            valid_gene_mask = (mapped_input_gene_ids[0] != 0)  # (seq_len,)
+            input_values = input_values * valid_gene_mask.float().unsqueeze(0)  # broadcast to (batch_size, seq_len)
+
             discrete_input = discretize_expression(input_values, 5)
             src_key_padding_mask = torch.zeros_like(
                 input_values, dtype=torch.bool, device=device
