@@ -1,11 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from deepsc.models.scgpt_pert import (
-    map_raw_id_to_vocab_id,
-    discretize_expression
-)
-    
+
+from deepsc.models.scgpt_pert import discretize_expression, map_raw_id_to_vocab_id
+
 # Flash Attention v2 support
 try:
     from torch.nn.functional import scaled_dot_product_attention
@@ -1073,7 +1071,7 @@ class DeepSC(nn.Module):
         elif self.enable_ce:
             logits = self.classifier(final_emb)
             return logits, gene_emb, expr_emb
-        
+
     def pred_perturb(
         self,
         batch_data,
@@ -1128,8 +1126,10 @@ class DeepSC(nn.Module):
             mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
 
             # Mask out positions where mapped_input_gene_ids is 0 (unmapped genes)
-            valid_gene_mask = (mapped_input_gene_ids[0] != 0)  # (seq_len,)
-            input_values = input_values * valid_gene_mask.float().unsqueeze(0)  # broadcast to (batch_size, seq_len)
+            valid_gene_mask = mapped_input_gene_ids[0] != 0  # (seq_len,)
+            input_values = input_values * valid_gene_mask.float().unsqueeze(
+                0
+            )  # broadcast to (batch_size, seq_len)
 
             discrete_input = discretize_expression(input_values, 5)
             src_key_padding_mask = torch.zeros_like(
@@ -1141,11 +1141,10 @@ class DeepSC(nn.Module):
                     discrete_input,
                     input_values,
                     input_pert_flags,
-                ) 
+                )
             pred_gene_values = torch.zeros_like(ori_gene_values)
             pred_gene_values[:, input_gene_ids] = output_diregression_output
         return pred_gene_values
-
 
     def get_regressor_output(self, final_emb):
         """
@@ -1437,4 +1436,3 @@ class DeepSCClassifier(nn.Module):
         # 分类
         cls_output = self.cls_decoder(cell_emb)
         return cls_output
-

@@ -2,45 +2,46 @@
 Fine-tune perturbation prediction model.
 Migrated from scGPT examples, all dependencies are self-contained.
 """
-import json
-import os
-import sys
-import time
-import copy
-import logging
-from pathlib import Path
-from typing import Iterable, List, Tuple, Dict, Union, Optional
-import warnings
 
-import torch
+import json
+import logging
+import os
+import warnings
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple, Union
+
+import matplotlib
 import numpy as np
 import pandas as pd
-import matplotlib
+import torch
+from gears import GEARS, PertData
+from gears.inference import compute_metrics, deeper_analysis, non_dropout_analysis
+from gears.utils import create_cell_graph_dataset_for_prediction
 from torch import nn
 from torch.nn import functional as F
 from torch_geometric.loader import DataLoader
-from gears import PertData, GEARS
-from gears.inference import compute_metrics, deeper_analysis, non_dropout_analysis
-from gears.utils import create_cell_graph_dataset_for_prediction
+
+import copy
+import sys
+import time
+from deepsc.models.generation_deepsc.model import DeepSC
 
 # Import from our self-contained scgpt_pert package
 from deepsc.models.scgpt_pert import (
-    TransformerGenerator,
-    masked_mse_loss,
-    criterion_neg_log_bernoulli,
-    masked_relative_error,
     GeneVocab,
-    tokenize_batch,
-    pad_batch,
-    tokenize_and_pad_batch,
-    set_seed,
-    map_raw_id_to_vocab_id,
-    compute_perturbation_metrics,
-    load_pretrained,
+    TransformerGenerator,
     add_file_handler,
+    compute_perturbation_metrics,
+    criterion_neg_log_bernoulli,
+    load_pretrained,
+    map_raw_id_to_vocab_id,
+    masked_mse_loss,
+    masked_relative_error,
+    pad_batch,
+    set_seed,
+    tokenize_and_pad_batch,
+    tokenize_batch,
 )
-
-from deepsc.models.generation_deepsc.model import DeepSC
 
 matplotlib.rcParams["savefig.transparent"] = False
 warnings.filterwarnings("ignore")
@@ -87,7 +88,9 @@ log_interval = 100
 
 # DeepSC pretrained model and vocabulary
 load_model = "/home/angli/DeepSC/results/pretraining_1201/latest_checkpoint.ckpt"
-vocab_csv_path = "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
+vocab_csv_path = (
+    "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
+)
 
 # DeepSC model architecture (must match pretrained model)
 embedding_dim = 256
@@ -145,7 +148,9 @@ pert_data.prepare_split(split=split, seed=1)
 pert_data.get_dataloader(batch_size=batch_size, test_batch_size=eval_batch_size)
 # DeepSC gene mapping preparation
 # Load DeepSC gene mapping from CSV (id=0 is padding in DeepSC, so CSV ids need +1)
-deepsc_gene_map_file = Path("/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv")
+deepsc_gene_map_file = Path(
+    "/home/angli/baseline/DeepSC-117-t86/scripts/data/preprocessing/gene_map_tp10k.csv"
+)
 if deepsc_gene_map_file.exists():
     logger.info(f"Loading DeepSC gene mapping from {deepsc_gene_map_file}")
     deepsc_gene_df = pd.read_csv(deepsc_gene_map_file)
@@ -183,11 +188,12 @@ else:
     deepsc_gene_to_id = {}
     gene_ids = None
 
-n_genes=len(genes)
+n_genes = len(genes)
 
 # DeepSC model initialization
 # Create a namespace object for moe config (supports attribute access)
 from types import SimpleNamespace
+
 moe_config_obj = SimpleNamespace(
     n_moe_layers=4,
     use_moe_ffn=use_moe_ffn,
@@ -217,7 +223,7 @@ model = DeepSC(
     gene_embedding_participate_til_layer=gene_embedding_participate_til_layer,
     attention_stream=attention_stream,
     cross_attention_architecture=cross_attention_architecture,
-    moe=moe_config_obj
+    moe=moe_config_obj,
 )
 
 if load_model is not None:
@@ -233,9 +239,13 @@ if load_model is not None:
 
     logger.info(f"Loaded pretrained DeepSC model from {load_model}")
     if load_info.missing_keys:
-        logger.info(f"Missing keys ({len(load_info.missing_keys)}): {load_info.missing_keys[:10]}...")
+        logger.info(
+            f"Missing keys ({len(load_info.missing_keys)}): {load_info.missing_keys[:10]}..."
+        )
     if load_info.unexpected_keys:
-        logger.info(f"Unexpected keys ({len(load_info.unexpected_keys)}): {load_info.unexpected_keys[:10]}...")
+        logger.info(
+            f"Unexpected keys ({len(load_info.unexpected_keys)}): {load_info.unexpected_keys[:10]}..."
+        )
 
 model.to(device)
 
@@ -291,6 +301,7 @@ def discretize_expression(input_values, num_bins=5):
 
     return discrete_input_bins
 
+
 def train(model: nn.Module, train_loader: torch.utils.data.DataLoader) -> None:
     """
     Train the model for one epoch.
@@ -331,12 +342,12 @@ def train(model: nn.Module, train_loader: torch.utils.data.DataLoader) -> None:
             mapped_input_gene_ids = map_raw_id_to_vocab_id(input_gene_ids, gene_ids)
             mapped_input_gene_ids = mapped_input_gene_ids.repeat(batch_size, 1)
 
-
             # Mask out positions where mapped_input_gene_ids is 0 (unmapped genes)
-            valid_gene_mask = (mapped_input_gene_ids[0] != 0)  # (seq_len,)
-            input_values = input_values * valid_gene_mask.float().unsqueeze(0)  # broadcast to (batch_size, seq_len)
+            valid_gene_mask = mapped_input_gene_ids[0] != 0  # (seq_len,)
+            input_values = input_values * valid_gene_mask.float().unsqueeze(
+                0
+            )  # broadcast to (batch_size, seq_len)
             target_values = target_values * valid_gene_mask.float().unsqueeze(0)
-
 
             discrete_input = discretize_expression(input_values, 5)
             src_key_padding_mask = torch.zeros_like(
@@ -424,7 +435,9 @@ def eval_perturb(
             t = batch.y
 
             # Mask out unmapped genes in target values (where gene_ids == 0)
-            valid_gene_mask = torch.tensor(gene_ids != 0, dtype=torch.float32, device=device)  # (n_genes,)
+            valid_gene_mask = torch.tensor(
+                gene_ids != 0, dtype=torch.float32, device=device
+            )  # (n_genes,)
             t = t * valid_gene_mask.unsqueeze(0)  # broadcast to (batch_size, n_genes)
 
             pred.extend(p.cpu())
@@ -493,6 +506,7 @@ for epoch in range(1, epochs + 1):
 torch.save(best_model.state_dict(), save_dir / "best_model.pt")
 logger.info("Best model saved")
 
+
 def predict(
     model: TransformerGenerator, pert_list: List[str], pool_size: Optional[int] = None
 ) -> Dict:
@@ -523,13 +537,18 @@ def predict(
             preds = []
             for batch_data in loader:
                 pred_gene_values = model.pred_perturb(
-                    batch_data, include_zero_gene, gene_ids=gene_ids, amp=True, genes=genes
+                    batch_data,
+                    include_zero_gene,
+                    gene_ids=gene_ids,
+                    amp=True,
+                    genes=genes,
                 )
                 preds.append(pred_gene_values)
             preds = torch.cat(preds, dim=0)
             results_pred["_".join(pert)] = np.mean(preds.detach().cpu().numpy(), axis=0)
 
     return results_pred
+
 
 logger.info("Running test evaluation...")
 test_loader = pert_data.dataloader["test_loader"]
