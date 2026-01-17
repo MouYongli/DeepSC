@@ -997,13 +997,13 @@ def compute_bin_distribution(final, valid_mask, num_bins, topk=None):
     """
     Calculate prediction distribution.
     Args:
-        final: 预测的类别 (tensor)
-        valid_mask: 有效位置的mask (tensor, bool)
-        num_bins: bin的数量 (int)
-        topk: 若为None，返回前num_bins bins的分布，否则返回预测比例最多的前topk bins及其编号和比例
+        final: Predicted classes (tensor)
+        valid_mask: Valid position mask (tensor, bool)
+        num_bins: Number of bins (int)
+        topk: If None, return distribution of first num_bins bins; otherwise return top-k bins with highest prediction ratios, their indices and ratios
     Returns:
-        如果topk为None，返回[(bin编号, 比例), ...]，长度为num_bins
-        否则，返回[(bin编号, 比例), ...]，长度为topk
+        If topk is None, return [(bin_number, ratio), ...] of length num_bins
+        Otherwise, return [(bin_number, ratio), ...] of length topk
     """
     if final is not None and valid_mask.any():
         pred_counts = torch.bincount(final[valid_mask].cpu(), minlength=num_bins + 1)
@@ -1076,7 +1076,7 @@ class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
             )
 
         if self.warmup_steps == 0:
-            # 没有 warmup，直接用 cosine annealing
+            # No warmup, use cosine annealing directly
             return [
                 self.eta_min
                 + (base_lr - self.eta_min)
@@ -1085,7 +1085,7 @@ class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
                 for base_lr in self.base_lrs
             ]
         else:
-            # 有 warmup，按原有逻辑
+            # Has warmup, use original logic
             return [
                 (self.current_steps / self.warmup_steps)
                 * (
@@ -1145,13 +1145,15 @@ class CosineAnnealingWarmRestartsWithDecayAndLinearWarmup(_LRScheduler):
 class LDAMLoss(nn.Module):
     def __init__(self, cls_num_list, max_m=0.5, weight=None, s=30, ignore_index=-100):
         super(LDAMLoss, self).__init__()
-        # 排除padding类（第0类），只对有效类别计算margin
-        valid_cls_num_list = cls_num_list[1:]  # 排除第0类
+        # Exclude padding class (class 0), only compute margin for valid classes
+        valid_cls_num_list = cls_num_list[1:]  # Exclude class 0
         m_list = 1.0 / np.sqrt(np.sqrt(valid_cls_num_list))
         m_list = m_list * (max_m / np.max(m_list))
-        # 为padding类（第0类）设置margin为0
+        # Set margin to 0 for padding class (class 0)
         self.m_list = torch.zeros(len(cls_num_list), dtype=torch.float32)
-        self.m_list[1:] = torch.tensor(m_list, dtype=torch.float32)  # 第0类margin为0
+        self.m_list[1:] = torch.tensor(
+            m_list, dtype=torch.float32
+        )  # Class 0 margin is 0
         self.s = s
         self.weight = weight
         self.ignore_index = ignore_index
@@ -1184,18 +1186,18 @@ def check_grad_flow(
     backward_fn=None,
 ):
     """
-    检查模型的梯度传导是否正常。
+    Check if model gradient flow is normal.
     Args:
         model: nn.Module
         loss_tensor: loss
-        verbose: 是否详细打印
-        retain_graph: 是否保留计算图
-        backward_fn: 自定义反向传播函数（如 fabric.backward）
+        verbose: Whether to print detailed info
+        retain_graph: Whether to retain computation graph
+        backward_fn: Custom backward function (e.g. fabric.backward)
     """
     print("=" * 60)
-    print("➡️ [检查开始] 反向传播中梯度传导情况...")
+    print("➡️ [Check Start] Gradient flow during backpropagation...")
 
-    # 保存原始梯度状态
+    # Save original gradient state
     original_grads = {}
     for name, param in model.named_parameters():
         if param.grad is not None:
@@ -1209,8 +1211,8 @@ def check_grad_flow(
         else:
             loss_tensor.backward(retain_graph=retain_graph)
     except Exception as e:
-        print(f"[ERROR] 反向传播失败: {e}")
-        # 恢复原始梯度
+        print(f"[ERROR] Backpropagation failed: {e}")
+        # Restore original gradients
         for name, param in model.named_parameters():
             if name in original_grads:
                 param.grad = original_grads[name]
@@ -1237,16 +1239,16 @@ def check_grad_flow(
                         f"[✅ OK  ] {name}: grad max={param.grad.abs().max():.4e}, min={param.grad.abs().min():.4e}"
                     )
         except Exception as e:
-            print(f"[ERROR] 检查参数 {name} 梯度时出错: {e}")
+            print(f"[ERROR] Error checking gradient for parameter {name}: {e}")
             no_grad_names.append(name)
 
     print("-" * 60)
-    print(f"✅ 有效梯度参数数：{len(ok_grad_names)}")
-    print(f"⚠️ 梯度为0的参数数：{len(zero_grad_names)}")
-    print(f"❌ grad is None 的参数数：{len(no_grad_names)}")
+    print(f"✅ Parameters with valid gradients: {len(ok_grad_names)}")
+    print(f"⚠️ Parameters with zero gradients: {len(zero_grad_names)}")
+    print(f"❌ Parameters with None gradients: {len(no_grad_names)}")
     print("=" * 60)
 
-    # 恢复原始梯度
+    # Restore original gradients
     for name, param in model.named_parameters():
         if name in original_grads:
             param.grad = original_grads[name]
@@ -1260,18 +1262,18 @@ def check_grad_flow(
 
 def compute_M_from_y(y):
     """
-    从 Gumbel Softmax 输出 y 计算门控矩阵 M
+    Compute gating matrix M from Gumbel Softmax output y
     Args:
-        y: Gumbel Softmax 输出, shape: (batch, g, g, 3)
+        y: Gumbel Softmax output, shape: (batch, g, g, 3)
     Returns:
-        M: 门控矩阵, shape: (batch, g, g)
+        M: Gating matrix, shape: (batch, g, g)
     """
     return y[..., 0] * (-1) + y[..., 1] * 0 + y[..., 2] * (+1)
 
 
 def print_m_matrix(epoch, index, M):
     print(f"\n=== Epoch {epoch}, Iteration {index}: M Matrix ===")
-    # 只打印第一个batch的第一个样本的M矩阵
+    # Only print M matrix of first sample in first batch
     M_sample = M[0].detach().cpu().numpy()
     print(f"M matrix shape: {M_sample.shape}")
 
@@ -1293,24 +1295,24 @@ def print_m_matrix(epoch, index, M):
     print("=" * 50)
 
 
-# 计算每个类别的TP, FP, FN
+# Compute TP, FP, FN for each class
 def compute_classification_metrics(valid_preds, valid_labels, num_classes, device):
     """
-    计算每个类别的TP, FP, FN, recall, precision, f1, macro_f1
-    返回: recall, precision, f1, macro_f1
-    注意：不计算bin0（即类别0）的指标
+    Compute TP, FP, FN, recall, precision, f1, macro_f1 for each class
+    Returns: recall, precision, f1, macro_f1
+    Note: Does not compute metrics for bin0 (class 0)
     """
-    # True Positives (TP): 预测为i且真实为i
+    # True Positives (TP): predicted as i and actually is i
     TP = torch.zeros(num_classes, dtype=torch.long, device=device)
     for i in range(num_classes):
         TP[i] = ((valid_preds == i) & (valid_labels == i)).sum()
 
-    # False Positives (FP): 预测为i但真实不是i
+    # False Positives (FP): predicted as i but actually not i
     FP = torch.zeros(num_classes, dtype=torch.long, device=device)
     for i in range(num_classes):
         FP[i] = ((valid_preds == i) & (valid_labels != i)).sum()
 
-    # False Negatives (FN): 真实为i但预测不是i
+    # False Negatives (FN): actually is i but predicted as not i
     FN = torch.zeros(num_classes, dtype=torch.long, device=device)
     for i in range(num_classes):
         FN[i] = ((valid_preds != i) & (valid_labels == i)).sum()
@@ -1334,7 +1336,7 @@ def compute_classification_metrics(valid_preds, valid_labels, num_classes, devic
             f1[i] = 2 * recall[i] * precision[i] / (recall[i] + precision[i])
         else:
             f1[i] = torch.tensor(0.0, device=device)
-    # 只计算bin1~num_classes-1的macro_f1
+    # Only compute macro_f1 for bin1~num_classes-1
     macro_f1 = f1[1:].mean().item()
     average_recall = recall[1:].mean().item()
     average_precision = precision[1:].mean().item()
@@ -1344,19 +1346,19 @@ def compute_classification_metrics(valid_preds, valid_labels, num_classes, devic
 
 def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
     """
-    统计 h5ad 文件中 obs 的 cell_type 列的唯一值数量
+    Count unique cell types in h5ad file's obs cell_type column
 
     Args:
-        h5ad_path (str): h5ad 文件路径
-        cell_type_col (str): obs 中细胞类型列名（默认 "cell_type"）
+        h5ad_path (str): Path to h5ad file
+        cell_type_col (str): Cell type column name in obs (default "cell_type")
 
     Returns:
-        tuple: (count, names) - 唯一 cell_type 的数量和名称列表
+        tuple: (count, names) - Number of unique cell types and list of names
     """
     adata = sc.read_h5ad(h5ad_path)
 
     if cell_type_col not in adata.obs.columns:
-        raise ValueError(f"obs 中不存在列: {cell_type_col}")
+        raise ValueError(f"Column does not exist in obs: {cell_type_col}")
 
     unique_celltypes = sorted(adata.obs[cell_type_col].astype(str).unique())
 
@@ -1369,29 +1371,31 @@ def count_unique_cell_types(h5ad_path, cell_type_col="cell_type"):
 
 def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
     """
-    统计多个h5ad文件中所有unique的cell_type数量（并集）
+    Count all unique cell types across multiple h5ad files (union)
 
     Args:
-        *h5ad_paths: 多个h5ad文件路径
-        cell_type_col (str): obs中细胞类型列名
+        *h5ad_paths: Multiple h5ad file paths
+        cell_type_col (str): Cell type column name in obs
 
     Returns:
-        int: 所有文件中唯一cell_type的总数量
-        list: 所有unique的cell_type名称列表（按字母顺序排序）
+        int: Total number of unique cell types across all files
+        list: List of all unique cell type names (sorted alphabetically)
     """
     all_celltypes = set()
 
-    # 从所有h5ad文件中收集celltype
+    # Collect celltypes from all h5ad files
     for h5ad_path in h5ad_paths:
         adata = sc.read_h5ad(h5ad_path)
 
         if cell_type_col not in adata.obs.columns:
-            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+            raise ValueError(
+                f"Column does not exist in obs of file {h5ad_path}: {cell_type_col}"
+            )
 
         celltypes = adata.obs[cell_type_col].astype(str).unique()
         all_celltypes.update(celltypes)
 
-    # 按字母顺序排序以确保稳定的映射
+    # Sort alphabetically to ensure stable mapping
     sorted_celltypes = sorted(all_celltypes)
 
     print(
@@ -1405,36 +1409,40 @@ def count_unique_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell
 
 def count_common_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell_type"):
     """
-    统计多个h5ad文件中共同的cell_type数量（交集）
+    Count common cell types across multiple h5ad files (intersection)
 
     Args:
-        *h5ad_paths: 多个h5ad文件路径
-        cell_type_col (str): obs中细胞类型列名
+        *h5ad_paths: Multiple h5ad file paths
+        cell_type_col (str): Cell type column name in obs
 
     Returns:
-        int: 所有文件共同的cell_type数量
-        list: 共同的cell_type名称列表（按字母顺序排序）
+        int: Number of common cell types across all files
+        list: List of common cell type names (sorted alphabetically)
     """
     if not h5ad_paths:
         return 0, []
 
-    # 读取第一个文件的细胞类型作为初始集合
+    # Read cell types from first file as initial set
     first_adata = sc.read_h5ad(h5ad_paths[0])
     if cell_type_col not in first_adata.obs.columns:
-        raise ValueError(f"文件 {h5ad_paths[0]} 的obs中不存在列: {cell_type_col}")
+        raise ValueError(
+            f"Column does not exist in obs of file {h5ad_paths[0]}: {cell_type_col}"
+        )
 
     common_celltypes = set(first_adata.obs[cell_type_col].astype(str).unique())
 
-    # 与其他文件的细胞类型求交集
+    # Compute intersection with cell types from other files
     for h5ad_path in h5ad_paths[1:]:
         adata = sc.read_h5ad(h5ad_path)
         if cell_type_col not in adata.obs.columns:
-            raise ValueError(f"文件 {h5ad_path} 的obs中不存在列: {cell_type_col}")
+            raise ValueError(
+                f"Column does not exist in obs of file {h5ad_path}: {cell_type_col}"
+            )
 
         file_celltypes = set(adata.obs[cell_type_col].astype(str).unique())
-        common_celltypes &= file_celltypes  # 求交集
+        common_celltypes &= file_celltypes  # Intersection
 
-    # 按字母顺序排序以确保稳定的映射
+    # Sort alphabetically to ensure stable mapping
     sorted_common_celltypes = sorted(common_celltypes)
 
     print(
@@ -1448,11 +1456,11 @@ def count_common_cell_types_from_multiple_files(*h5ad_paths, cell_type_col="cell
 
 def extract_state_dict(maybe_state):
     """
-    兼容多种保存方式：
-    - {"model": state_dict, ...}  ← 你现在的保存方式（Fabric）
-    - {"state_dict": state_dict, ...}  ← Lightning 常见
-    - 直接就是 state_dict
-    - 键带 "model." 前缀
+    Compatible with various save formats:
+    - {"model": state_dict, ...}  ← Current save format (Fabric)
+    - {"state_dict": state_dict, ...}  ← Common in Lightning
+    - Direct state_dict
+    - Keys with "model." prefix
     """
     if isinstance(maybe_state, dict):
         if "model" in maybe_state and isinstance(maybe_state["model"], dict):
@@ -1462,12 +1470,14 @@ def extract_state_dict(maybe_state):
         ):
             sd = maybe_state["state_dict"]
         else:
-            # 可能就是 state_dict
+            # Possibly a direct state_dict
             sd = maybe_state
     else:
-        raise ValueError("Checkpoint 内容不是字典，无法解析 state_dict")
+        raise ValueError(
+            "Checkpoint content is not a dictionary, cannot parse state_dict"
+        )
 
-    # 去掉可能存在的前缀 "model." 或 "module."
+    # Remove possible prefixes "model." or "module."
     need_strip_prefixes = ("model.", "module.")
     if any(any(k.startswith(p) for p in need_strip_prefixes) for k in sd.keys()):
         new_sd = {}
@@ -1483,60 +1493,62 @@ def extract_state_dict(maybe_state):
 
 def extract_state_dict_with_encoder_prefix(maybe_state):
     """
-    专门处理模型结构中有 encoder. 前缀，但预训练weights没有此前缀的情况。
+    Handle case where model structure has encoder. prefix but pretrained weights don't.
 
     Args:
-        maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
+        maybe_state: Loaded checkpoint, may be dict or direct state_dict
 
     Returns:
-        dict: 处理过前缀的state_dict，匹配当前模型结构
+        dict: Processed state_dict with prefix matching current model structure
     """
-    # 先用原有函数提取基本的state_dict
+    # Extract basic state_dict using existing function
     sd = extract_state_dict(maybe_state)
 
-    # 检查是否需要添加encoder前缀
-    # 如果state_dict中的键没有encoder前缀，但我们需要encoder前缀
+    # Check if encoder prefix needs to be added
+    # If keys in state_dict don't have encoder prefix, but we need it
     has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
 
     if not has_encoder_prefix:
-        # 需要为所有键添加encoder.前缀
+        # Need to add encoder. prefix to all keys
         new_sd = {}
         for k, v in sd.items():
             new_key = f"encoder.{k}"
             new_sd[new_key] = v
-        print(f"[LOAD] 为 {len(sd)} 个参数添加了 'encoder.' 前缀")
+        print(f"[LOAD] Added 'encoder.' prefix to {len(sd)} parameters")
         return new_sd
     else:
-        print("[LOAD] 检测到weights已有 'encoder.' 前缀，直接返回")
+        print(
+            "[LOAD] Detected weights already have 'encoder.' prefix, returning directly"
+        )
         return sd
 
 
 def extract_state_dict_remove_encoder_prefix(maybe_state):
     """
-    专门处理模型结构中没有 encoder. 前缀，但weights有此前缀的情况。
+    Handle case where model structure doesn't have encoder. prefix but weights do.
 
     Args:
-        maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
+        maybe_state: Loaded checkpoint, may be dict or direct state_dict
 
     Returns:
-        dict: 处理过前缀的state_dict，匹配当前模型结构
+        dict: Processed state_dict with prefix matching current model structure
     """
-    # 先用原有函数提取基本的state_dict
+    # Extract basic state_dict using existing function
     sd = extract_state_dict(maybe_state)
 
-    # 检查是否需要移除encoder前缀
+    # Check if encoder prefix needs to be removed
     has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
 
     if has_encoder_prefix:
         new_sd = {}
         for k, v in sd.items():
             if k.startswith("encoder."):
-                new_key = k[len("encoder.") :]  # 移除"encoder."前缀
+                new_key = k[len("encoder.") :]  # Remove "encoder." prefix
                 new_sd[new_key] = v
             else:
                 new_sd[k] = v
         print(
-            f"[LOAD] 为 {len([k for k in sd.keys() if k.startswith('encoder.')])} 个参数移除了 'encoder.' 前缀"
+            f"[LOAD] Removed 'encoder.' prefix from {len([k for k in sd.keys() if k.startswith('encoder.')])} parameters"
         )
         return new_sd
     else:
@@ -1558,20 +1570,22 @@ def sample_weight_norms(model, sd, k=5):
     with torch.no_grad():
         common_keys = [name for name, _ in model.named_parameters() if name in sd]
         if not common_keys:
-            print("[LOAD] 没有找到与 checkpoint 对齐的公共参数名，无法做范数对比。")
+            print(
+                "[LOAD] No common parameter names found matching checkpoint, cannot compare norms."
+            )
             return
         sample = random.sample(common_keys, min(k, len(common_keys)))
-        print("[LOAD] 抽样参数范数对比（加载前 -> 加载后）：")
+        print("[LOAD] Sampled parameter norm comparison (before -> after loading):")
         for name in sample:
             p = dict(model.named_parameters())[name]
             before = p.detach().float().norm().item()
-            # 暂存当前weights
+            # Store current weights temporarily
             old = p.detach().cpu().clone()
-            # 用 ckpt 覆盖一次
+            # Overwrite with checkpoint once
             p.copy_(sd[name].to(p.device).to(p.dtype))
             after = p.detach().float().norm().item()
             print(f"  - {name}: {before:.6f} -> {after:.6f}")
-            # 还原（只用于对比；真正的加载在 load_state_dict 里会再做一次）
+            # Restore (only for comparison; actual loading happens in load_state_dict)
             p.copy_(old.to(p.device).to(p.dtype))
 
 
@@ -1896,7 +1910,7 @@ def restore_wandb_session(wandb_run_id, wandb_config, args, is_master=True):
 
 def check_moe_collapse(model, epoch, iteration):
     """
-    检查MoE塌缩情况并记录到日志
+    Check MoE collapse and log to console
 
     Args:
         model: The model to check for MoE collapse
@@ -1904,20 +1918,20 @@ def check_moe_collapse(model, epoch, iteration):
         iteration: current iteration
     """
     try:
-        # 检查模型是否有MoE塌缩检测功能
+        # Check if model has MoE collapse detection capability
         if not hasattr(model, "check_moe_collapse"):
             return
 
-        print(f"\n[Epoch {epoch}, Iter {iteration}] 检查MoE塌缩状态...")
+        print(f"\n[Epoch {epoch}, Iter {iteration}] Checking MoE collapse status...")
 
-        # 获取塌缩检测结果
+        # Get collapse detection results
         collapse_results = model.check_moe_collapse(threshold=0.8)
 
         if not collapse_results:
             logging.info("No MoE layers found or MoE function not enabled")
             return
 
-        # 统计塌缩情况
+        # Count collapse statistics
         total_layers = len(collapse_results)
         collapsed_layers = sum(
             1 for result in collapse_results.values() if result["is_collapsed"]
@@ -1991,31 +2005,31 @@ import pandas as pd
 def build_vocab_from_csv(csv_path, special_tokens=("<pad>", "<cls>", "<mlm>")):
     df = pd.read_csv(csv_path)
 
-    # 必须有 feature_name 和 id 两列
+    # Must have feature_name and id columns
     assert {"feature_name", "id"}.issubset(
         df.columns
-    ), "CSV 必须包含 feature_name 和 id 列"
+    ), "CSV must contain feature_name and id columns"
     df["feature_name"] = df["feature_name"].astype(str)
     df["id"] = df["id"].astype(int)
 
-    # 基因名 -> 原始id
+    # Gene name -> original id
     gene2id_raw = dict(zip(df["feature_name"], df["id"]))
 
-    # 特殊 token 预留
+    # Reserve special tokens
     vocab2id = {}
-    vocab2id[special_tokens[0]] = 0  # <pad> 固定为 0
-    start_offset = 1  # 其它基因 id 全部 +1
+    vocab2id[special_tokens[0]] = 0  # <pad> fixed at 0
+    start_offset = 1  # All other gene ids +1
 
-    # 加上基因
+    # Add genes
     for g, i in gene2id_raw.items():
         vocab2id[g] = i + start_offset
 
-    # 分配剩余的特殊 token
+    # Assign remaining special tokens
     max_id = max(vocab2id.values())
     for j, tok in enumerate(special_tokens[1:], start=1):  # <cls>, <eoc>
         vocab2id[tok] = max_id + j
 
-    # 反向表
+    # Reverse mapping
     id2vocab = {i: g for g, i in vocab2id.items()}
     return vocab2id, id2vocab, special_tokens[0], vocab2id[special_tokens[0]]
 
@@ -2024,7 +2038,9 @@ def build_gene_ids_for_dataset(genes, vocab2id, pad_token="<pad>"):
     pad_id = vocab2id[pad_token]
     gene_ids = torch.tensor([vocab2id.get(g, pad_id) for g in genes], dtype=int)
     n_hit = int((gene_ids != pad_id).sum())
-    print(f"[映射] 命中 {n_hit}/{len(genes)} 个基因，未命中的用 <pad>={pad_id}")
+    print(
+        f"[Mapping] Matched {n_hit}/{len(genes)} genes, unmapped genes use <pad>={pad_id}"
+    )
     return gene_ids
 
 

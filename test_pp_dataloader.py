@@ -20,7 +20,7 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
     print(f"\n✓ batch_size = {batch_size}")
 
     # batch_data.pert
-    print("\n【batch_data.pert】")
+    print("\n[batch_data.pert]")
     print("  Type: {}".format(type(batch_data.pert)))
     print("  Length: {}".format(len(batch_data.pert)))
     print("  Examples (first 5):")
@@ -28,7 +28,7 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
         print(f"    [{i}] {pert}")
 
     # batch_data.y
-    print("\n【batch_data.y】")
+    print("\n[batch_data.y]")
     print("  Type: {}".format(type(batch_data.y)))
     print("  Shape: {}".format(batch_data.y.shape))
     print("  Dtype: {}".format(batch_data.y.dtype))
@@ -38,7 +38,7 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
     print("  Min: {:.4f}, Max: {:.4f}".format(batch_data.y.min(), batch_data.y.max()))
 
     # batch_data.x
-    print("\n【batch_data.x】")
+    print("\n[batch_data.x]")
     print("  Type: {}".format(type(batch_data.x)))
     print("  Shape: {}".format(batch_data.x.shape))
     print("  Dtype: {}".format(batch_data.x.dtype))
@@ -55,7 +55,7 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
     print("    {}".format(ori_gene_values[0, :10]))
 
     # Other attributes of batch_data
-    print("\n【Other attributes of batch_data】")
+    print("\n[Other attributes of batch_data]")
     other_attrs = ["edge_index", "batch", "pert_idx", "dose", "ctrl"]
     for attr in other_attrs:
         if hasattr(batch_data, attr):
@@ -100,26 +100,28 @@ def main():
         f"  Dataset loaded: {pert_data.dataset_name if hasattr(pert_data, 'dataset_name') else config['data_name']}"
     )
 
-    # 准备数据集
-    print(f"\n🔧 准备数据划分 (split={config['split']}, seed={config['seed']})...")
+    # Prepare dataset
+    print(
+        f"\n🔧 Preparing data split (split={config['split']}, seed={config['seed']})..."
+    )
     pert_data.prepare_split(split=config["split"], seed=config["seed"])
     pert_data.get_dataloader(
         batch_size=config["batch_size"], test_batch_size=config["test_batch_size"]
     )
 
-    # 数据加载器信息
+    # DataLoader information
     train_loader = pert_data.dataloader["train_loader"]
     val_loader = pert_data.dataloader["val_loader"]
     test_loader = pert_data.dataloader["test_loader"]
 
-    print("\n📊 DataLoader 统计:")
+    print("\n📊 DataLoader statistics:")
     print("  Train batches: {}".format(len(train_loader)))
     print("  Val batches:   {}".format(len(val_loader)))
     print("  Test batches:  {}".format(len(test_loader)))
 
-    # 探索训练集的前3个 batch
+    # Explore first 3 batches of training set
     print("\n" + "=" * 80)
-    print("🔍 探索训练集 (前3个 batches)")
+    print("🔍 Exploring training set (first 3 batches)")
     print("=" * 80)
 
     train_iter = iter(train_loader)
@@ -127,57 +129,61 @@ def main():
         batch_data = next(train_iter)
         explore_batch_data_detailed(batch_data, batch_idx=i)
 
-    # 探索验证集的第一个 batch
+    # Explore first batch of validation set
     print("\n" + "=" * 80)
-    print("🔍 探索验证集 (第1个 batch)")
+    print("🔍 Exploring validation set (1st batch)")
     print("=" * 80)
 
     val_iter = iter(val_loader)
     batch_data = next(val_iter)
     explore_batch_data_detailed(batch_data, batch_idx=0)
 
-    # 额外：检查数据的一致性
+    # Additional: Check data consistency
     print("\n" + "=" * 80)
-    print("🧪 数据一致性检查")
+    print("🧪 Data consistency check")
     print("=" * 80)
 
-    # 重新获取一个 batch
+    # Get a batch again
     train_iter = iter(train_loader)
     batch_data = next(train_iter)
     batch_size = len(batch_data.y)
     num_genes = batch_data.x.shape[0] // batch_size
 
-    print("\n基本信息:")
+    print("\nBasic information:")
     print("  batch_size = {}".format(batch_size))
     print("  num_genes = {}".format(num_genes))
     print("  batch_data.y.shape = {}".format(batch_data.y.shape))
     print("  batch_data.x.shape = {}".format(batch_data.x.shape))
 
-    # 检查形状一致性
-    assert batch_data.y.shape[0] == batch_size, "y 的第一维应该等于 batch_size"
-    assert batch_data.y.shape[1] == num_genes, "y 的第二维应该等于 num_genes"
+    # Check shape consistency
+    assert (
+        batch_data.y.shape[0] == batch_size
+    ), "y's first dimension should equal batch_size"
+    assert (
+        batch_data.y.shape[1] == num_genes
+    ), "y's second dimension should equal num_genes"
     assert (
         batch_data.x.shape[0] == batch_size * num_genes
-    ), "x 的行数应该等于 batch_size * num_genes"
-    print("\n✅ 形状一致性检查通过!")
+    ), "x's row count should equal batch_size * num_genes"
+    print("\n✅ Shape consistency check passed!")
 
-    # 检查 include_zero_gene 的影响
-    print(f"\n测试 include_zero_gene={config['include_zero_gene']}:")
+    # Check the effect of include_zero_gene
+    print(f"\nTesting include_zero_gene={config['include_zero_gene']}:")
     if config["include_zero_gene"] == "all":
-        print("  ➜ 所有基因都会被包含在输入中")
+        print("  ➜ All genes will be included in the input")
         input_gene_ids = torch.arange(num_genes, dtype=torch.long)
         print(
-            f"  ➜ input_gene_ids 范围: [0, {num_genes-1}], 长度: {len(input_gene_ids)}"
+            f"  ➜ input_gene_ids range: [0, {num_genes-1}], length: {len(input_gene_ids)}"
         )
     elif config["include_zero_gene"] == "batch-wise":
-        print("  ➜ 只包含当前 batch 中有表达的基因")
+        print("  ➜ Only include genes with expression in current batch")
         ori_gene_values = batch_data.x[:, 0].view(batch_size, num_genes)
         input_gene_ids = torch.where(ori_gene_values.sum(dim=0) > 0)[0]
-        print(f"  ➜ 有表达的基因数: {len(input_gene_ids)} / {num_genes}")
-        print(f"  ➜ 第一个10个有表达的基因ID: {input_gene_ids[:10]}")
+        print(f"  ➜ Number of expressed genes: {len(input_gene_ids)} / {num_genes}")
+        print(f"  ➜ First 10 expressed gene IDs: {input_gene_ids[:10]}")
 
     print("\n" + "=" * 80)
-    print("✅ 数据结构探索完成!")
+    print("✅ Data structure exploration completed!")
     print("=" * 80)
 
 
