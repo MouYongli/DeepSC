@@ -13,7 +13,7 @@ enable_ce: ${..loss.enable_ce}
 num_layers_ffn: 2
 use_moe_regressor: ${..experiment.use_moe_regressor}
 gene_embedding_participate_til_layer: 3
-attention_stream: 1
+attention_stream: 2
 cross_attention_architecture: "A"
 
 moe:

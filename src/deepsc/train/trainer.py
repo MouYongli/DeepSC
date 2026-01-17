@@ -512,7 +512,7 @@ class Trainer:
                 wandb.log(
                     {
                         "val/loss": val_loss,
-                        "val/mse_loss": val_mse_loss,
+                        "val/huber_loss": val_mse_loss,
                         "val/per_bin_recall": val_per_bin_recall,
                         "val/total_acc": val_total_acc,
                         "val/ce_loss": val_ce_loss,
@@ -814,10 +814,12 @@ class Trainer:
                 logging.info(
                     "[INFO] wandb run_id not found or restore failed, will create new wandb run"
                 )
+                self.init_wandb()
         elif self.is_master:
             logging.info(
                 "[INFO] wandb run_id not found in checkpoint, will create new wandb run"
             )
+            self.init_wandb()
 
         return True
 
