@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from deepsc.models.scgpt_pert import discretize_expression, map_raw_id_to_vocab_id
+from deepsc.models.scgpt_pert import map_raw_id_to_vocab_id
 
 # Flash Attention v2 support
 try:
@@ -99,6 +99,33 @@ class ExpressionEmbedding(nn.Module):
         expr_embeddings = discrete_embeddings + continuous_component
 
         return expr_embeddings
+
+
+class ContinuousValueEncoder(nn.Module):
+    """
+    Encode real number values to a vector using neural nets projection.
+    """
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_value: int = 512):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        self.linear1 = nn.Linear(1, d_model)
+        self.activation = nn.ReLU()
+        self.linear2 = nn.Linear(d_model, d_model)
+        self.norm = nn.LayerNorm(d_model)
+        self.max_value = max_value
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor, shape [batch_size, seq_len]
+        """
+        x = x.unsqueeze(-1)
+        x = torch.clamp(x, max=self.max_value)
+        x = self.activation(self.linear1(x))
+        x = self.linear2(x)
+        x = self.norm(x)
+        return self.dropout(x)
 
 
 class PerturbationEmbedding(nn.Module):
@@ -889,9 +916,7 @@ class DeepSC(nn.Module):
         super().__init__()
         self.gene_embedding_participate_til_layer = gene_embedding_participate_til_layer
         self.gene_embedding = GeneEmbedding(embedding_dim, num_genes)
-        self.expr_embedding = ExpressionEmbedding(
-            embedding_dim, num_bins=num_bins, alpha=alpha
-        )
+        self.expr_embedding = ContinuousValueEncoder(embedding_dim, dropout=0.1)
         self.pert_encoder = nn.Embedding(4, embedding_dim, padding_idx=0)
         self.cross_attention_architecture = cross_attention_architecture
         self.attention_stream = attention_stream
@@ -1020,7 +1045,6 @@ class DeepSC(nn.Module):
     def forward(
         self,
         gene_ids,
-        expression_bin,
         normalized_expr,
         input_pert_flags,
         return_encodings=False,
@@ -1029,12 +1053,11 @@ class DeepSC(nn.Module):
     ):
         """
         gene_ids: (batch, g)  # 基因ID序列
-        expression_bin: (batch, g)  # 离散化的表达量
         normalized_expr: (batch, g)  # 归一化的表达量
         return_gate_weights: 是否返回MoE的gate权重
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
-        expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
+        expr_emb = self.expr_embedding(normalized_expr)  # (batch, g, d)
         pert_emb = self.pert_encoder(input_pert_flags)  # (batch, g, d)
         # 这样处理是否合理？直接相加？？？
         gene_emb = gene_emb + pert_emb
@@ -1131,14 +1154,12 @@ class DeepSC(nn.Module):
                 0
             )  # broadcast to (batch_size, seq_len)
 
-            discrete_input = discretize_expression(input_values, 5)
             src_key_padding_mask = torch.zeros_like(
                 input_values, dtype=torch.bool, device=device
             )
             with torch.cuda.amp.autocast(enabled=True):
                 output_diregression_output, gene_emb, expr_emb = self(
                     mapped_input_gene_ids,
-                    discrete_input,
                     input_values,
                     input_pert_flags,
                 )
@@ -1306,133 +1327,3 @@ class DeepSC(nn.Module):
 
         # 返回是否有塌缩
         return len(collapsed_layers) > 0
-
-
-class ClsDecoder(nn.Module):
-    """
-    Decoder for classification task.
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        n_cls: int,
-        nlayers: int = 3,
-        activation: callable = nn.ReLU,
-    ):
-        super().__init__()
-        # module list
-        self._decoder = nn.ModuleList()
-        for i in range(nlayers - 1):
-            self._decoder.append(nn.Linear(d_model, d_model))
-            self._decoder.append(activation())
-            self._decoder.append(nn.LayerNorm(d_model))
-        self.out_layer = nn.Linear(d_model, n_cls)
-
-    def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [batch_size, embsize]
-        """
-        for layer in self._decoder:
-            x = layer(x)
-        return self.out_layer(x)
-
-
-class DeepSCClassifier(nn.Module):
-    """
-    分类模型，使用DeepSC作为encoder
-    """
-
-    def __init__(
-        self,
-        deepsc_encoder: nn.Module,
-        n_cls: int = 1,
-        num_layers_cls: int = 3,
-        cell_emb_style: str = "avg-pool",
-    ):
-        super().__init__()
-        self.encoder = deepsc_encoder
-        self.cell_emb_style = cell_emb_style
-        self.cls_decoder = ClsDecoder(
-            deepsc_encoder.gene_embedding.embedding_dim, n_cls, num_layers_cls
-        )
-
-    def _get_cell_emb_from_layer(self, layer_output, weights=None):
-        """
-        Args:
-            layer_output(:obj:`Tensor`): shape (batch, seq_len, embsize)
-            weights(:obj:`Tensor`): shape (batch, seq_len), optional and only used
-                when :attr:`self.cell_emb_style` is "w-pool".
-
-        Returns:
-            :obj:`Tensor`: shape (batch, embsize)
-        """
-        if self.cell_emb_style == "cls":
-            cell_emb = layer_output[:, 0, :]  # (batch, embsize)
-        elif self.cell_emb_style == "avg-pool":
-            cell_emb = torch.mean(layer_output, dim=1)
-        elif self.cell_emb_style == "w-pool":
-            if weights is None:
-                raise ValueError("weights is required when cell_emb_style is w-pool")
-            if weights.dim() != 2:
-                raise ValueError("weights should be 2D")
-            cell_emb = torch.sum(layer_output * weights.unsqueeze(2), dim=1)
-            cell_emb = F.normalize(cell_emb, p=2, dim=1)  # (batch, embsize)
-
-        return cell_emb
-
-    def forward(self, gene_ids, value_log1p, value_binned, **kwargs):
-        """
-        前向传播
-
-        Args:
-            gene_ids: (batch, g)  # 基因ID序列
-            value_log1p: (batch, g)  # 归一化的表达量
-            value_binned: (batch, g)  # 离散化的表达量
-
-        Returns:
-            cls_output: 分类结果
-        """
-        # 从kwargs中移除可能冲突的参数
-        encoder_kwargs = kwargs.copy()
-        encoder_kwargs.pop("return_encodings", None)
-        encoder_kwargs.pop("return_mask_prob", None)
-        encoder_kwargs.pop("return_gate_weights", None)
-        # 使用encoder获取嵌入，注意DeepSC的参数名
-        encoder_output = self.encoder(
-            gene_ids=gene_ids,
-            normalized_expr=value_log1p,
-            expression_bin=value_binned,
-            return_encodings=True,
-            return_mask_prob=False,
-            return_gate_weights=False,
-            **encoder_kwargs,
-        )
-
-        # 根据encoder的返回值数量解包
-        # enable_mse and enable_ce: 返回 (logits, regression_output, gene_emb, expr_emb)
-        # enable_ce only: 返回 (logits, gene_emb, expr_emb)
-        # enable_mse only: 返回 (regression_output, gene_emb, expr_emb)
-        if len(encoder_output) == 4:
-            logits, regression_output, gene_emb, expr_emb = encoder_output
-        elif len(encoder_output) == 3:
-            # 判断是ce only还是mse only
-            if self.encoder.enable_ce:
-                logits, gene_emb, expr_emb = encoder_output
-                regression_output = None
-            else:
-                regression_output, gene_emb, expr_emb = encoder_output
-                logits = None
-        else:
-            raise ValueError(f"Unexpected encoder output length: {len(encoder_output)}")
-
-        # 融合基因和表达嵌入
-        final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
-        final_emb = self.encoder.fused_emb_proj(final_emb)  # (batch, g, d)
-
-        # 获取细胞嵌入 (不再使用y作为权重,因为新架构没有返回y)
-        cell_emb = self._get_cell_emb_from_layer(final_emb, weights=None)
-        # 分类
-        cls_output = self.cls_decoder(cell_emb)
-        return cls_output

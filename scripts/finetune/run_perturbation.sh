@@ -10,4 +10,4 @@ MASTER_PORT=12620
 PYTHONPATH=src torchrun \
   --nproc_per_node=$NUM_GPUS \
   --master_port=$MASTER_PORT \
-  -m deepsc.finetune.finetune_cta
+  -m deepsc.finetune.finetune_perturbation
