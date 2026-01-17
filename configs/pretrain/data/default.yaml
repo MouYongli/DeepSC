@@ -1,6 +1,6 @@
 chunk_size: 1
 enable_data_augmentation: False  # 是否启用数据增强（动态掩码概率）
-data_path: "${oc.env:DATASET_SHUFFELED}"
+data_path: "/home/angli/DeepSC/data/processed/small_example"
 dataset_size: 200000
 
 DataCollator:
@@ -8,7 +8,7 @@ DataCollator:
   num_bins: ${num_bin}
   pad_token_id: 0
   pad_value: 0
-  num_genes: 34683
+  num_genes: 35210
   do_padding: True
   do_mlm: True
   do_binning: True
