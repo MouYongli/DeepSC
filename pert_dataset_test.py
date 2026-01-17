@@ -30,31 +30,31 @@ if __name__ == "__main__":
         print(f"Batch {index}: ori_gene_values.shape = {ori_gene_values.shape}")
         print(f"Batch {index}: batch.y.shape = {batch.y.shape}")
 
-        # 检查ori_gene_values为0但batch.y不为0的位置
-        ori_zero_mask = ori_gene_values == 0  # ori_gene_values为0的位置
-        batch_nonzero_mask = batch.y != 0  # batch.y不为0的位置
+        # Check positions where ori_gene_values is 0 but batch.y is not 0
+        ori_zero_mask = ori_gene_values == 0  # Positions where ori_gene_values is 0
+        batch_nonzero_mask = batch.y != 0  # Positions where batch.y is not 0
 
-        # 找到同时满足两个条件的位置：ori_gene_values为0 AND batch.y不为0
+        # Find positions satisfying both conditions: ori_gene_values is 0 AND batch.y is not 0
         mismatch_mask = ori_zero_mask & batch_nonzero_mask
         num_mismatches = mismatch_mask.sum().item()
 
         print(
-            f"Batch {index}: 发现 {num_mismatches} 个位置ori_gene_values为0但batch.y不为0"
+            f"Batch {index}: Found {num_mismatches} positions where ori_gene_values is 0 but batch.y is not 0"
         )
 
-        # 如果有不匹配的位置，打印一些额外信息
+        # If there are mismatched positions, print some additional information
         if num_mismatches > 0:
             total_positions = ori_gene_values.numel()
             percentage = (num_mismatches / total_positions) * 100
             print(
-                f"Batch {index}: 不匹配比例: {percentage:.4f}% ({num_mismatches}/{total_positions})"
+                f"Batch {index}: Mismatch ratio: {percentage:.4f}% ({num_mismatches}/{total_positions})"
             )
 
-            # 打印前几个不匹配位置的坐标和值
+            # Print coordinates and values of the first few mismatched positions
             mismatch_indices = mismatch_mask.nonzero()[
                 : min(5, num_mismatches)
-            ]  # 最多显示前5个
-            print(f"Batch {index}: 前几个不匹配位置 (行,列):")
+            ]  # Show at most 5
+            print(f"Batch {index}: First few mismatched positions (row, col):")
             for i, (row, col) in enumerate(mismatch_indices):
                 ori_val = ori_gene_values[row, col].item()
                 batch_val = batch.y[row, col].item()

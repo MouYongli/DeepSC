@@ -296,7 +296,7 @@ def save_checkpoint(
             "iteration": iteration,
             "wandb_run_id": wandb_run_id,
             "wandb_config": wandb_config,
-            "chunk_idx": chunk_idx,  # 保存chunk索引
+            "chunk_idx": chunk_idx,  # Save chunk index
         }
 
         # Save latest checkpoint
@@ -361,13 +361,13 @@ def save_ckpt_fabric(
         ckpt_folder,
         iteration=iteration,
         fabric=fabric,
-        chunk_idx=chunk_idx,  # 保存chunk索引
+        chunk_idx=chunk_idx,  # Save chunk index
     )
 
 
 def get_reduced(tensor, current_device, dest_device, world_size):
     """
-    将不同GPU上的变量或tensor集中在主GPU上，并得到均值
+    Gather variables or tensors from different GPUs to the main GPU and get the mean
     """
     tensor = (
         tensor.clone().detach() if torch.is_tensor(tensor) else torch.tensor(tensor)
@@ -385,7 +385,7 @@ def get_reduced_with_fabric(tensor, fabric):
 
 def get_ndtensor_reduced(tensor, current_device, dest_device, world_size):
     """
-    将不同GPU上的变量或tensor集中在主GPU上，并得到均值, 需要是2维张量
+    Gather variables or tensors from different GPUs to the main GPU and get the mean, needs to be 2D tensor
     """
     tensor = (
         tensor.clone().detach() if torch.is_tensor(tensor) else torch.tensor(tensor)
@@ -476,7 +476,7 @@ class SequentialDistributedSampler(torch.utils.data.sampler.Sampler):
 
 def distributed_concat(tensor, num_total_examples, world_size):
     """
-    合并不同进程的inference结果
+    Merge inference results from different processes
     """
     output_tensors = [tensor.clone() for _ in range(world_size)]
     torch.distributed.all_gather(output_tensors, tensor)
@@ -744,21 +744,21 @@ def masked_mse_loss(
     reduction: str = "mean",
 ):
     """
-    计算只在 mask=True 的位置上的 MSE Loss。
+    Calculate MSE Loss only at positions where mask=True.
 
     Args:
-        pred (Tensor): 模型输出，shape = (B, T)
-        target (Tensor): 目标值，shape = (B, T)
-        mask (BoolTensor): 掩码，True 表示需要计算的位置
-        reduction (str): "mean"、"sum" 或 "none"
+        pred (Tensor): model output, shape = (B, T)
+        target (Tensor): target value, shape = (B, T)
+        mask (BoolTensor): mask, True indicates positions to calculate
+        reduction (str): "mean", "sum" or "none"
 
     Returns:
-        Tensor: loss 值
+        Tensor: loss value
     """
     loss_fn = loss_fn
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
-    masked_loss = elementwise_loss[mask]  # 只取被掩码的部分
+    masked_loss = elementwise_loss[mask]  # Only take masked parts
 
     if reduction == "mean":
         if masked_loss.numel() == 0:
@@ -783,13 +783,13 @@ def weighted_masked_mse_loss(
     log_each: bool = False,
 ):
     """
-    分区加权 MSE Loss，只在 mask=True 的位置计算。
-    权重区间：
+    Partitioned weighted MSE Loss, calculated only at positions where mask=True.
+    Weight ranges:
         target == 1       → 0.2
         1 < target < 3    → 0.5
         3 <= target < 5   → 1.0
         target >= 5       → 2.0
-    加权后进行归一化处理，防止梯度爆炸或 collapse。
+    Normalized after weighting to prevent gradient explosion or collapse.
     """
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
@@ -836,17 +836,17 @@ def weighted_masked_mse_loss_v2(
     log_each: bool = False,
 ):
     """
-    以2为底的指数加权 MSE Loss，只在 mask=True 的位置上计算。
-    权重 = 2^(target - shift)
-    shift 可调节权重起点，默认为0。
+    Base-2 exponentially weighted MSE Loss, calculated only at positions where mask=True.
+    weight = 2^(target - shift)
+    shift can adjust weight starting point, default is 0.
     """
     loss_fn = loss_fn
     elementwise_loss = loss_fn(pred, target)  # shape: (B, T)
 
-    # 生成以2为底的指数权重
+    # Generate base-2 exponential weights
     weights = torch.pow(1.8, target - 1)
 
-    # 只在 mask=True 的地方计算
+    # Calculate only where mask=True
     weighted_loss = elementwise_loss * weights
     masked_weighted_loss = weighted_loss[mask]
 
@@ -902,7 +902,7 @@ def log_stats(
             )
         )
         # INSERT_YOUR_CODE
-        # 将每个类别的recall, precision, f1上传到wandb
+        # Upload recall, precision, f1 for each category to wandb
         if "wandb" in globals() and wandb.run is not None:
             log_dict = {}
             for i in range(num_classes):
@@ -910,7 +910,7 @@ def log_stats(
                 log_dict[f"precision/bin{i}"] = precision[i].item()
                 log_dict[f"f1/bin{i}"] = f1[i].item()
             log_dict["val/macro_f1"] = macro_f1
-            # 只对非第0类(bin0)求平均
+            # Average only for non-class-0 (bin0)
             log_dict["val/average_recall"] = average_recall
             log_dict["val/average_precision"] = average_precision
             wandb.log(log_dict)
@@ -995,12 +995,12 @@ def log_stats(
 
 def compute_bin_distribution(final, valid_mask, num_bins, topk=None):
     """
-    计算预测分布。
+    Calculate prediction distribution.
     Args:
         final: 预测的类别 (tensor)
         valid_mask: 有效位置的mask (tensor, bool)
         num_bins: bin的数量 (int)
-        topk: 若为None，返回前num_bins个bin的分布，否则返回预测比例最多的前topk个bin及其编号和比例
+        topk: 若为None，返回前num_bins bins的分布，否则返回预测比例最多的前topk bins及其编号和比例
     Returns:
         如果topk为None，返回[(bin编号, 比例), ...]，长度为num_bins
         否则，返回[(bin编号, 比例), ...]，长度为topk
@@ -1483,7 +1483,7 @@ def extract_state_dict(maybe_state):
 
 def extract_state_dict_with_encoder_prefix(maybe_state):
     """
-    专门处理模型结构中有 encoder. 前缀，但预训练权重没有此前缀的情况。
+    专门处理模型结构中有 encoder. 前缀，但预训练weights没有此前缀的情况。
 
     Args:
         maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
@@ -1507,13 +1507,13 @@ def extract_state_dict_with_encoder_prefix(maybe_state):
         print(f"[LOAD] 为 {len(sd)} 个参数添加了 'encoder.' 前缀")
         return new_sd
     else:
-        print("[LOAD] 检测到权重已有 'encoder.' 前缀，直接返回")
+        print("[LOAD] 检测到weights已有 'encoder.' 前缀，直接返回")
         return sd
 
 
 def extract_state_dict_remove_encoder_prefix(maybe_state):
     """
-    专门处理模型结构中没有 encoder. 前缀，但权重有此前缀的情况。
+    专门处理模型结构中没有 encoder. 前缀，但weights有此前缀的情况。
 
     Args:
         maybe_state: 加载的checkpoint，可能是dict或直接的state_dict
@@ -1528,7 +1528,6 @@ def extract_state_dict_remove_encoder_prefix(maybe_state):
     has_encoder_prefix = any(k.startswith("encoder.") for k in sd.keys())
 
     if has_encoder_prefix:
-        # 需要移除encoder.前缀
         new_sd = {}
         for k, v in sd.items():
             if k.startswith("encoder."):
@@ -1541,7 +1540,6 @@ def extract_state_dict_remove_encoder_prefix(maybe_state):
         )
         return new_sd
     else:
-        print("[LOAD] 检测到权重没有 'encoder.' 前缀，直接返回")
         return sd
 
 
@@ -1556,10 +1554,7 @@ def report_loading_result(load_info):
 
 
 def sample_weight_norms(model, sd, k=5):
-    """
-    随机抽样 k 个双方都存在的参数，打印加载前后的范数变化。
-    范数有变化 => 基本可确认成功写入。
-    """
+
     with torch.no_grad():
         common_keys = [name for name, _ in model.named_parameters() if name in sd]
         if not common_keys:
@@ -1570,7 +1565,7 @@ def sample_weight_norms(model, sd, k=5):
         for name in sample:
             p = dict(model.named_parameters())[name]
             before = p.detach().float().norm().item()
-            # 暂存当前权重
+            # 暂存当前weights
             old = p.detach().cpu().clone()
             # 用 ckpt 覆盖一次
             p.copy_(sd[name].to(p.device).to(p.dtype))
@@ -2031,40 +2026,6 @@ def build_gene_ids_for_dataset(genes, vocab2id, pad_token="<pad>"):
     n_hit = int((gene_ids != pad_id).sum())
     print(f"[映射] 命中 {n_hit}/{len(genes)} 个基因，未命中的用 <pad>={pad_id}")
     return gene_ids
-
-def report_loading_result(load_info):
-    missing = list(load_info.missing_keys)
-    unexpected = list(load_info.unexpected_keys)
-    print(f"[LOAD] missing_keys: {len(missing)} | unexpected_keys: {len(unexpected)}")
-    if missing:
-        print("  - (前10条) missing:", missing[:10])
-    if unexpected:
-        print("  - (前10条) unexpected:", unexpected[:10])
-
-
-def sample_weight_norms(model, sd, k=5):
-    """
-    随机抽样 k 个双方都存在的参数，打印加载前后的范数变化。
-    范数有变化 => 基本可确认成功写入。
-    """
-    with torch.no_grad():
-        common_keys = [name for name, _ in model.named_parameters() if name in sd]
-        if not common_keys:
-            print("[LOAD] 没有找到与 checkpoint 对齐的公共参数名，无法做范数对比。")
-            return
-        sample = random.sample(common_keys, min(k, len(common_keys)))
-        print("[LOAD] 抽样参数范数对比（加载前 -> 加载后）：")
-        for name in sample:
-            p = dict(model.named_parameters())[name]
-            before = p.detach().float().norm().item()
-            # 暂存当前权重
-            old = p.detach().cpu().clone()
-            # 用 ckpt 覆盖一次
-            p.copy_(sd[name].to(p.device).to(p.dtype))
-            after = p.detach().float().norm().item()
-            print(f"  - {name}: {before:.6f} -> {after:.6f}")
-            # 还原（只用于对比；真正的加载在 load_state_dict 里会再做一次）
-            p.copy_(old.to(p.device).to(p.dtype))
 
 
 # code from scGPT/scgpt/utils/util.py

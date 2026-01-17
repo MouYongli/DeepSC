@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-测试脚本：探索 PertData 的数据结构
+Test script: explore PertData data structure
 
-用法：
+Usage:
     python test_dataloader.py
 """
 import torch
@@ -11,23 +11,23 @@ from gears import PertData
 
 def explore_batch_data(batch_data, batch_idx=0):
     """
-    探索并打印 batch_data 的所有属性和数据结构
+    Explore and print all attributes and data structure of batch_data
 
     Args:
-        batch_data: 来自 DataLoader 的一个 batch
-        batch_idx: batch 的索引（用于打印）
+        batch_data: a batch from DataLoader
+        batch_idx: batch index (for printing)
     """
     print("=" * 80)
-    print(f"Batch {batch_idx} 数据结构探索")
+    print(f"Batch {batch_idx} data structure exploration")
     print("=" * 80)
 
-    # 1. 打印所有属性
-    print("\n【1. batch_data 的所有属性】")
+    # 1. Print all attributes
+    print("\n【1. All attributes of batch_data】")
     attributes = [attr for attr in dir(batch_data) if not attr.startswith("_")]
-    print(f"属性列表: {attributes}")
+    print(f"Attribute list: {attributes}")
 
-    # 2. 探索关键属性
-    print("\n【2. 关键属性详细信息】")
+    # 2. Explore key attributes
+    print("\n【2. Key attribute details】")
 
     # 2.1 batch_data.y
     if hasattr(batch_data, "y"):
@@ -50,7 +50,7 @@ def explore_batch_data(batch_data, batch_idx=0):
         print(f"  - type: {type(batch_data.pert)}")
         print(f"  - len: {len(batch_data.pert)}")
         print(f"  - first 3 values: {batch_data.pert[:3]}")
-        print(f"  - 示例扰动: {batch_data.pert[0]}")
+        print(f"  - Example perturbation: {batch_data.pert[0]}")
 
     # 2.3 batch_data.x
     if hasattr(batch_data, "x"):
@@ -61,21 +61,21 @@ def explore_batch_data(batch_data, batch_idx=0):
         print(f"  - device: {batch_data.x.device}")
         print(f"  - first 3 rows:\n{batch_data.x[:3]}")
 
-    # 2.4 batch_data.edge_index (如果有)
+    # 2.4 batch_data.edge_index (if exists)
     if hasattr(batch_data, "edge_index"):
         print("\nbatch_data.edge_index:")
         print(f"  - type: {type(batch_data.edge_index)}")
         print(f"  - shape: {batch_data.edge_index.shape}")
         print(f"  - first 5 edges:\n{batch_data.edge_index[:, :5]}")
 
-    # 2.5 batch_data.batch (如果有)
+    # 2.5 batch_data.batch (if exists)
     if hasattr(batch_data, "batch"):
         print("\nbatch_data.batch:")
         print(f"  - type: {type(batch_data.batch)}")
         print(f"  - shape: {batch_data.batch.shape}")
         print(f"  - unique values: {torch.unique(batch_data.batch).tolist()}")
 
-    # 2.6 其他可能的属性
+    # 2.6 Other possible attributes
     other_attrs = ["pert_idx", "dose", "ctrl", "condition"]
     for attr in other_attrs:
         if hasattr(batch_data, attr):
@@ -92,14 +92,14 @@ def explore_batch_data(batch_data, batch_idx=0):
 
 
 def main():
-    print("开始加载数据...")
+    print("Starting to load data...")
 
-    # 初始化 PertData
+    # Initialize PertData
     pert_data = PertData("./data")
 
-    # 加载数据集
-    data_name = "adamson"  # 或 "norman", "dixit" 等
-    print(f"\n加载数据集: {data_name}")
+    # Load data集
+    data_name = "adamson"  # or "norman", "dixit" etc
+    print(f"\nLoading dataset: {data_name}")
     pert_data.load(data_name=data_name)
 
     # 获取数据集信息
@@ -130,7 +130,7 @@ def main():
     batch_data = next(data_iter)
     explore_batch_data(batch_data, batch_idx=1)
 
-    # 探索验证集的一个 batch
+    # 探索验证集 a batch
     print("\n\n探索验证集的第一个 batch:")
     val_iter = iter(pert_data.dataloader["val_loader"])
     batch_data = next(val_iter)

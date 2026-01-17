@@ -8,10 +8,10 @@ def get_feature_name_3ca_cxg(output_path: str, tripleca_path: str, cellxgene_pat
     This function extracts feature names from .h5ad files in the 3CA dataset and the CellxGene dataset,
     and saves them to text files.
     """
-    # 设置基础路径
+    # Set base path
     all_feature_names = set()
 
-    # 遍历子文件夹
+    # Traverse subfolders
     for root, dirs, files in os.walk(tripleca_path):
         for file in files:
             if file.endswith(".h5ad"):
@@ -27,11 +27,11 @@ def get_feature_name_3ca_cxg(output_path: str, tripleca_path: str, cellxgene_pat
                 except Exception as e:
                     print(f"[Error] Failed to read {h5ad_path}: {e}")
 
-    # 读取 CellxGene 的 .h5ad 文件
+    # Read CellxGene .h5ad files
     cxg_path = os.path.join(cellxgene_path, "heart", "partition_0.h5ad")
     adata_cxg = ad.read_h5ad(cxg_path)
 
-    # 提取 var 中的 feature_name 列
+    # Extract feature_name column from var
     cellxgene_feature_names = adata_cxg.var["feature_name"].tolist()
 
     output_3ca = os.path.join(output_path, "3ca_gene_names.txt")

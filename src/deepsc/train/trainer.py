@@ -89,7 +89,7 @@ class Trainer:
         files_subset = list(files_subset)
 
         if len(files_subset) == 1 and not self.data_is_directory:
-            # 单文件路径：兼容旧逻辑
+            # Single file path: compatible with old logic
             csr_matrix = scipy.sparse.load_npz(files_subset[0])
         else:
             csr_matrix = self._load_all_csr_from_files(files_subset)
@@ -106,7 +106,7 @@ class Trainer:
         self.val_dataset: Dataset = GeneExpressionDataset(csr_matrix=val_csr)
         self.train_sampler = DistributedSampler(self.train_dataset, shuffle=True)
         self.val_sampler = DistributedSampler(self.val_dataset, shuffle=True)
-        # 计算动态掩码概率（使用已缓存的class_counts）
+        # Calculate dynamic mask probabilities (using cached class_counts)
 
     def _prepare_file_plan(self):
         """When data_path is a directory, prepare the full file list and split by chunk order
@@ -547,10 +547,10 @@ class Trainer:
                     logging.info("No checkpoint found, initializing new wandb run...")
                     self.init_wandb()
             else:
-                # 非master进程只需要尝试加载checkpoint
+                # Non-master process only needs to try loading checkpoint
                 self.checkpoint_reload()
         else:
-            # resume_last_training = False，直接新建wandb run
+            # resume_last_training = False, directly create new wandb run
             if self.is_master:
                 logging.info(
                     "resume_last_training=False, initializing new wandb run..."
@@ -561,7 +561,7 @@ class Trainer:
         start_epoch = self.last_epoch if hasattr(self, "last_epoch") else 1
         for epoch in range(start_epoch, self.args.epoch + 1):
             self._prepare_file_plan()
-            # 确定本epoch从哪个chunk开始（仅当从checkpoint恢复且仍在同一epoch时跳过已完成的chunk）
+            # Determine which chunk to start from in this epoch (only skip completed chunks when recovering from checkpoint in the same epoch)
             start_chunk_idx = (
                 self.last_chunk_idx if epoch == getattr(self, "last_epoch", 1) else 0
             )
@@ -765,7 +765,7 @@ class Trainer:
                 self.args.system.ckpt_dir,
                 self.fabric,
                 iteration=0,  # Reset iteration counter
-                chunk_idx=0,  # 重置chunk索引
+                chunk_idx=0,  # Reset chunk index
             )
 
     def get_top_bins_distribution_str(
@@ -968,7 +968,7 @@ class Trainer:
             "Calculating dynamic mask probabilities based on bin distribution..."
         )
 
-        # 使用缓存的class_counts
+        # Use cached class_counts
         class_counts = self.class_counts
 
         # Calculate total valid samples (excluding padding)

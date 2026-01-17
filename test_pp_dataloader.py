@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """
-测试脚本：使用 pp_new.py 相同的数据加载逻辑探索数据结构
+Test script: explore data structure using the same data loading logic as pp_new.py
 
-用法：
+Usage:
     PYTHONPATH=src python test_pp_dataloader.py
 """
 import torch
@@ -10,12 +10,12 @@ from gears import PertData
 
 
 def explore_batch_data_detailed(batch_data, batch_idx=0):
-    """详细探索 batch_data 的结构"""
+    """Explore batch_data structure in detail"""
     print("\n" + "=" * 80)
-    print(f"📦 Batch {batch_idx} 详细结构")
+    print(f"📦 Batch {batch_idx} detailed structure")
     print("=" * 80)
 
-    # 基本信息
+    # Basic information
     batch_size = len(batch_data.y)
     print(f"\n✓ batch_size = {batch_size}")
 
@@ -23,7 +23,7 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
     print("\n【batch_data.pert】")
     print("  Type: {}".format(type(batch_data.pert)))
     print("  Length: {}".format(len(batch_data.pert)))
-    print("  示例 (前5个):")
+    print("  Examples (first 5):")
     for i, pert in enumerate(batch_data.pert[:5]):
         print(f"    [{i}] {pert}")
 
@@ -33,7 +33,7 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
     print("  Shape: {}".format(batch_data.y.shape))
     print("  Dtype: {}".format(batch_data.y.dtype))
     print("  Device: {}".format(batch_data.y.device))
-    print("  Values (前3个样本, 前10个基因):")
+    print("  Values (first 3 samples, first 10 genes):")
     print(batch_data.y[:3, :10])
     print("  Min: {:.4f}, Max: {:.4f}".format(batch_data.y.min(), batch_data.y.max()))
 
@@ -43,19 +43,19 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
     print("  Shape: {}".format(batch_data.x.shape))
     print("  Dtype: {}".format(batch_data.x.dtype))
     print("  Device: {}".format(batch_data.x.device))
-    print("  说明: x[:, 0] 是输入表达量, x[:, 1] 是扰动标志")
-    print("  前3行:")
+    print("  Note: x[:, 0] is input expression, x[:, 1] is perturbation flag")
+    print("  First 3 rows:")
     print(batch_data.x[:3])
 
-    # 重构为 (batch_size, num_genes)
+    # Reconstruct to (batch_size, num_genes)
     num_genes = batch_data.x.shape[0] // batch_size
     ori_gene_values = batch_data.x[:, 0].view(batch_size, num_genes)
     print("\n  Reshaped ori_gene_values: {}".format(ori_gene_values.shape))
-    print("  第一个样本的前10个基因表达量:")
+    print("  First 10 gene expressions of first sample:")
     print("    {}".format(ori_gene_values[0, :10]))
 
-    # batch_data 的其他属性
-    print("\n【batch_data 其他属性】")
+    # Other attributes of batch_data
+    print("\n【Other attributes of batch_data】")
     other_attrs = ["edge_index", "batch", "pert_idx", "dose", "ctrl"]
     for attr in other_attrs:
         if hasattr(batch_data, attr):
@@ -74,27 +74,27 @@ def explore_batch_data_detailed(batch_data, batch_idx=0):
 
 
 def main():
-    print("🚀 开始测试 Perturbation Prediction 数据加载器\n")
+    print("🚀 Start testing Perturbation Prediction data loader\n")
 
-    # 配置参数（模拟 pp.yaml）
+    # Configuration parameters (simulate pp.yaml)
     config = {
-        "data_name": "adamson",  # 使用 adamson 数据集
+        "data_name": "adamson",  # Use adamson dataset
         "split": "simulation",
         "seed": 1,
         "batch_size": 32,
         "test_batch_size": 128,
-        "include_zero_gene": "all",  # 或 'batch-wise'
+        "include_zero_gene": "all",  # or 'batch-wise'
     }
 
-    print("📋 配置信息:")
+    print("📋 Configuration info:")
     for key, value in config.items():
         print(f"  {key}: {value}")
 
-    # 加载数据
-    print("\n📂 初始化 PertData...")
+    # Load data
+    print("\n📂 Initializing PertData...")
     pert_data = PertData("./data")
 
-    print(f"\n📥 加载数据集 (data_name={config['data_name']})...")
+    print(f"\n📥 Loading dataset (data_name={config['data_name']})...")
     pert_data.load(data_name=config["data_name"])
     print(
         f"  Dataset loaded: {pert_data.dataset_name if hasattr(pert_data, 'dataset_name') else config['data_name']}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-脚本用于检查checkpoint文件的结构和层信息
+Script to inspect checkpoint file structure and layer information
 """
 
 import os
@@ -10,7 +10,7 @@ import torch
 
 
 def inspect_checkpoint(checkpoint_path):
-    """检查checkpoint文件的结构"""
+    """Inspect checkpoint file structure"""
     if not os.path.exists(checkpoint_path):
         print(f"Error: Checkpoint file {checkpoint_path} does not exist!")
         return
@@ -19,10 +19,10 @@ def inspect_checkpoint(checkpoint_path):
     print("=" * 80)
 
     try:
-        # 加载checkpoint
+        # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-        # 显示checkpoint的顶级keys
+        # Display checkpoint top-level keys
         print("\n📁 Checkpoint top-level keys:")
         print("-" * 40)
         for key in checkpoint.keys():
@@ -33,7 +33,7 @@ def inspect_checkpoint(checkpoint_path):
             else:
                 print(f"  {key}: {type(checkpoint[key])}")
 
-        # 检查模型参数的位置
+        # Check model parameter location
         state_dict = None
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
@@ -43,9 +43,9 @@ def inspect_checkpoint(checkpoint_path):
             print("\n🔍 Found 'model' key, checking its structure...")
             print(f"   Type: {type(model_data)}")
 
-            # 如果model是一个dict，可能是state_dict
+            # If model is a dict, it might be state_dict
             if isinstance(model_data, dict):
-                # 检查是否包含tensor参数
+                # Check if it contains tensor parameters
                 tensor_keys = [
                     k for k, v in model_data.items() if isinstance(v, torch.Tensor)
                 ]
@@ -58,7 +58,7 @@ def inspect_checkpoint(checkpoint_path):
                     print(
                         f"   'model' key contains {len(model_data)} items but no tensors"
                     )
-                    # 尝试查看model内部结构
+                    # Try to view internal model structure
                     for k, v in list(model_data.items())[:5]:
                         print(f"     {k}: {type(v)}")
             else:
@@ -73,7 +73,7 @@ def inspect_checkpoint(checkpoint_path):
         print("\n🧠 Model layers and parameters:")
         print("-" * 80)
 
-        # 只显示tensor参数
+        # Only display tensor parameters
         total_params = 0
         for name, param in state_dict.items():
             if isinstance(param, torch.Tensor):
@@ -85,13 +85,13 @@ def inspect_checkpoint(checkpoint_path):
 
         print(f"\n🎯 Total parameters: {total_params:,}")
 
-        # 检查是否有model.前缀
+        # Check if there's a 'model.' prefix
         tensor_keys = [k for k, v in state_dict.items() if isinstance(v, torch.Tensor)]
         if tensor_keys:
             has_model_prefix = any(k.startswith("model.") for k in tensor_keys)
             print(f"🏷️  Has 'model.' prefix: {has_model_prefix}")
 
-        # 显示模块分组
+        # Display layers grouped by module
         print("\n📊 Layers grouped by module:")
         print("-" * 80)
         layer_groups = OrderedDict()

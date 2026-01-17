@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-测试 Flash Attention v2 在 DeepSC 模型中的使用
+Test Flash Attention v2 integration in DeepSC model
 """
 
 import os
@@ -10,7 +10,7 @@ import torch
 
 import sys
 
-# 添加模型路径
+# Add model path
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 from src.deepsc.models.deepsc.model import DeepSC
@@ -18,7 +18,7 @@ from src.deepsc.models.deepsc.model import DeepSC
 
 @dataclass
 class MoEConfig:
-    """MoE配置类"""
+    """MoE configuration class"""
 
     dim: int = 256
     n_routed_experts: int = 8
@@ -27,24 +27,24 @@ class MoEConfig:
     moe_inter_dim: int = 512
     route_scale: float = 1.0
     score_func: str = "softmax"  # "softmax" or "sigmoid"
-    n_moe_layers: int = 2  # 最后n层使用MoE
-    use_moe_ffn: bool = True  # 是否在FFN中使用MoE
+    n_moe_layers: int = 2  # Last n layers use MoE
+    use_moe_ffn: bool = True  # Whether to use MoE in FFN
 
 
 def test_flash_attention():
-    """测试 Flash Attention 功能"""
+    """Test Flash Attention functionality"""
     print("Testing Flash Attention v2 integration...")
 
-    # 模型参数
+    # Model parameters
     embedding_dim = 256
     num_genes = 1000
-    num_layers = 4  # 总层数
+    num_layers = 4  # Total layers
     num_heads = 8
     batch_size = 4
     seq_len = 128
     num_bins = 8
 
-    # 创建测试数据
+    # Create test data
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -52,7 +52,7 @@ def test_flash_attention():
     expression_bin = torch.randint(0, num_bins, (batch_size, seq_len)).to(device)
     normalized_expr = torch.randn(batch_size, seq_len).to(device)
 
-    # 创建MoE配置
+    # Create MoE configuration
     moe_config = MoEConfig(
         dim=embedding_dim,
         n_routed_experts=8,
@@ -61,11 +61,11 @@ def test_flash_attention():
         moe_inter_dim=embedding_dim * 2,
         route_scale=1.0,
         score_func="softmax",
-        n_moe_layers=2,  # 最后2层使用MoE
+        n_moe_layers=2,  # Last 2 layers use MoE
         use_moe_ffn=True,
     )
 
-    # 创建模型
+    # Create model
     flash_model = DeepSC(
         embedding_dim=embedding_dim,
         num_genes=num_genes,
@@ -83,16 +83,16 @@ def test_flash_attention():
         f"Flash model parameters: {sum(p.numel() for p in flash_model.parameters()):,}"
     )
 
-    # 测试前向传播
+    # Test forward pass
     print("\nTesting forward pass...")
 
     try:
         with torch.no_grad():
-            # Flash Attention 模型
+            # Flash Attention model
             flash_outputs = flash_model(gene_ids, expression_bin, normalized_expr)
             print("Flash Attention model forward pass successful!")
 
-            # 输出格式: (logits, regression_output, gene_emb, expr_emb)
+            # Output format: (logits, regression_output, gene_emb, expr_emb)
             if len(flash_outputs) == 4:
                 logits, regression_output, gene_emb, expr_emb = flash_outputs
                 print(f"  Logits shape: {logits.shape}")  # (batch, seq_len, num_bins+1)
@@ -117,7 +117,7 @@ def test_flash_attention():
         traceback.print_exc()
         return False
 
-    # 测试训练模式
+    # Test training mode
     print("\nTesting training mode...")
     try:
         flash_model.train()
@@ -132,7 +132,7 @@ def test_flash_attention():
         traceback.print_exc()
         return False
 
-    # 测试带gate_weights的输出
+    # Test output with gate weights
     print("\nTesting with gate weights...")
     try:
         flash_model.eval()
@@ -155,7 +155,7 @@ def test_flash_attention():
 
         traceback.print_exc()
 
-    # 测试内存使用（仅在CUDA可用时）
+    # Test memory usage (only when CUDA is available)
     if torch.cuda.is_available():
         print("\nTesting memory usage...")
         try:
@@ -172,23 +172,23 @@ def test_flash_attention():
     else:
         print("\nSkipping memory test (CUDA not available)")
 
-    # 测试MoE统计信息
+    # Test MoE statistics
     print("\nTesting MoE statistics...")
     try:
         flash_model.train()
-        # 运行几次前向传播以累积统计信息
+        # Run a few forward passes to accumulate statistics
         for _ in range(3):
             _ = flash_model(gene_ids, expression_bin, normalized_expr)
 
-        # 获取MoE统计信息
+        # Get MoE statistics
         moe_stats = flash_model.get_all_moe_stats()
         print(f"Found {len(moe_stats)} MoE layers")
 
-        # 检查塌缩
+        # Check for collapse
         has_collapse = flash_model.print_moe_collapse_report(threshold=0.8)
         print(f"MoE collapse detected: {has_collapse}")
 
-        # 重置统计信息
+        # Reset statistics
         flash_model.reset_all_moe_stats()
         print("MoE statistics reset successful!")
 

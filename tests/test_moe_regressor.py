@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-测试 MoERegressor 模块
+Test MoERegressor module
 
-测试内容：
-1. 基本初始化
-2. forward 方法的输入输出形状
-3. gate_weights 的有效性
-4. 不同参数配置
-5. 梯度流
-6. 边界情况
+Test contents:
+1. Basic initialization
+2. Forward method input/output shapes
+3. Validity of gate_weights
+4. Different parameter configurations
+5. Gradient flow
+6. Edge cases
 """
 
 import os
@@ -19,18 +19,18 @@ import torch.nn as nn
 
 import sys
 
-# 添加项目路径
+# Add project path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from src.deepsc.models.deepsc.model import MoERegressor, RegressorExpert
 
 
 class TestMoERegressor:
-    """MoERegressor 测试类"""
+    """MoERegressor test class"""
 
     @pytest.fixture
     def default_params(self):
-        """默认参数"""
+        """Default parameters"""
         return {
             "embedding_dim": 256,
             "dropout": 0.1,
@@ -40,39 +40,39 @@ class TestMoERegressor:
 
     @pytest.fixture
     def device(self):
-        """测试设备"""
+        """Test device"""
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def test_initialization(self, default_params):
-        """测试基本初始化"""
+        """Test basic initialization"""
         model = MoERegressor(**default_params)
 
-        # 检查基本属性
+        # Check basic attributes
         assert model.embedding_dim == default_params["embedding_dim"]
         assert model.num_experts == default_params["number_of_experts"]
         assert model.gate_temperature == default_params["gate_temperature"]
 
-        # 检查 gate 网络结构
+        # Check gate network structure
         assert isinstance(model.gate, nn.Sequential)
 
-        # 检查 experts 数量
+        # Check number of experts
         assert len(model.experts) == default_params["number_of_experts"]
 
-        # 检查每个 expert 是 RegressorExpert 实例
+        # Check each expert is a RegressorExpert instance
         for expert in model.experts:
             assert isinstance(expert, RegressorExpert)
 
     def test_forward_shape(self, default_params, device):
-        """测试 forward 方法的输入输出形状"""
+        """Test forward method input/output shapes"""
         model = MoERegressor(**default_params).to(device)
         model.eval()
 
-        # 测试不同的 batch_size 和 seq_len
+        # Test different batch_size and seq_len
         test_cases = [
-            (2, 64),  # 小批次
-            (8, 128),  # 中等批次
-            (16, 256),  # 大批次
-            (1, 32),  # 单样本
+            (2, 64),  # Small batch
+            (8, 128),  # Medium batch
+            (16, 256),  # Large batch
+            (1, 32),  # Single sample
         ]
 
         for batch_size, seq_len in test_cases:
@@ -82,13 +82,13 @@ class TestMoERegressor:
                 ).to(device)
                 output, gate_weights = model(x)
 
-                # 检查输出形状
+                # Check output shape
                 assert output.shape == (
                     batch_size,
                     seq_len,
                 ), f"Expected output shape {(batch_size, seq_len)}, got {output.shape}"
 
-                # 检查 gate_weights 形状
+                # Check gate_weights shape
                 expected_gate_shape = (
                     batch_size,
                     seq_len,
@@ -99,7 +99,7 @@ class TestMoERegressor:
                 ), f"Expected gate_weights shape {expected_gate_shape}, got {gate_weights.shape}"
 
     def test_gate_weights_validity(self, default_params, device):
-        """测试 gate_weights 的有效性"""
+        """Test validity of gate_weights"""
         model = MoERegressor(**default_params).to(device)
         model.eval()
 
@@ -109,7 +109,7 @@ class TestMoERegressor:
         with torch.no_grad():
             output, gate_weights = model(x)
 
-            # 1. 检查 gate_weights 在 [0, 1] 范围内
+            # 1. Check gate_weights are in [0, 1] range
             assert torch.all(
                 gate_weights >= 0
             ), "Gate weights should be non-negative (softmax output)"
@@ -117,18 +117,18 @@ class TestMoERegressor:
                 gate_weights <= 1
             ), "Gate weights should be <= 1 (softmax output)"
 
-            # 2. 检查每个位置的 gate_weights 和为 1（softmax 特性）
+            # 2. Check gate_weights sum to 1 at each position (softmax property)
             weight_sums = gate_weights.sum(dim=-1)
             assert torch.allclose(
                 weight_sums, torch.ones_like(weight_sums), atol=1e-6
             ), "Gate weights should sum to 1 along expert dimension"
 
-            # 3. 检查 gate_weights 没有 NaN 或 Inf
+            # 3. Check gate_weights don't have NaN or Inf
             assert not torch.isnan(gate_weights).any(), "Gate weights contain NaN"
             assert not torch.isinf(gate_weights).any(), "Gate weights contain Inf"
 
     def test_different_expert_numbers(self, device):
-        """测试不同的 expert 数量"""
+        """Test different numbers of experts"""
         embedding_dim = 256
         batch_size, seq_len = 4, 64
 
@@ -149,18 +149,18 @@ class TestMoERegressor:
             with torch.no_grad():
                 output, gate_weights = model(x)
 
-                # 检查形状
+                # Check shapes
                 assert output.shape == (batch_size, seq_len)
                 assert gate_weights.shape == (batch_size, seq_len, num_experts)
 
-                # 检查 gate_weights 和为 1
+                # Check gate_weights sum to 1
                 weight_sums = gate_weights.sum(dim=-1)
                 assert torch.allclose(
                     weight_sums, torch.ones_like(weight_sums), atol=1e-6
                 )
 
     def test_gate_temperature_effect(self, default_params, device):
-        """测试不同 gate_temperature 对输出的影响"""
+        """Test effect of different gate_temperature on output"""
         batch_size, seq_len = 4, 64
         x = torch.randn(batch_size, seq_len, default_params["embedding_dim"]).to(device)
 
@@ -174,23 +174,23 @@ class TestMoERegressor:
             model.eval()
 
             with torch.no_grad():
-                # 固定随机种子以确保可重复性
+                # Fix random seed for reproducibility
                 torch.manual_seed(42)
                 _, gate_weights = model(x)
                 gate_weights_list.append(gate_weights)
 
-                # 检查 gate_weights 仍然有效
+                # Check gate_weights are still valid
                 weight_sums = gate_weights.sum(dim=-1)
                 assert torch.allclose(
                     weight_sums, torch.ones_like(weight_sums), atol=1e-6
                 )
 
-        # 低温度应该产生更尖锐的分布（更接近 one-hot）
-        # 高温度应该产生更平滑的分布（更均匀）
-        # 注意：由于随机初始化，我们只检查趋势而不是具体值
+        # Lower temperature should produce sharper distribution (closer to one-hot)
+        # Higher temperature should produce smoother distribution (more uniform)
+        # Note: Due to random initialization, we only check the trend, not specific values
 
     def test_gradient_flow(self, default_params, device):
-        """测试梯度流"""
+        """Test gradient flow"""
         model = MoERegressor(**default_params).to(device)
         model.train()
 
@@ -199,22 +199,22 @@ class TestMoERegressor:
             batch_size, seq_len, default_params["embedding_dim"], requires_grad=True
         ).to(device)
 
-        # 保留输入梯度（对于非叶子张量）
+        # Retain input gradients (for non-leaf tensors)
         x.retain_grad()
 
-        # 前向传播
+        # Forward pass
         output, gate_weights = model(x)
 
-        # 计算简单的损失
+        # Compute simple loss
         loss = output.sum()
 
-        # 反向传播
+        # Backward pass
         loss.backward()
 
-        # 检查梯度存在
+        # Check gradients exist
         assert x.grad is not None, "Input gradients should exist"
 
-        # 检查模型参数的梯度
+        # Check model parameter gradients
         for name, param in model.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"Parameter {name} should have gradients"
@@ -226,56 +226,56 @@ class TestMoERegressor:
                 ).any(), f"Parameter {name} has Inf gradients"
 
     def test_weight_initialization(self, default_params):
-        """测试权重初始化"""
+        """Test weight initialization"""
         model = MoERegressor(**default_params)
 
-        # 检查 gate 网络的权重和偏置
+        # Check gate network weights and biases
         for m in model.gate:
             if isinstance(m, nn.Linear):
-                # 检查权重不是全零
+                # Check weights are not all zeros
                 assert not torch.allclose(
                     m.weight, torch.zeros_like(m.weight)
                 ), "Gate weights should not be all zeros"
-                # 检查偏置是全零
+                # Check biases are all zeros
                 assert torch.allclose(
                     m.bias, torch.zeros_like(m.bias)
                 ), "Gate biases should be initialized to zeros"
 
-        # 检查 expert 网络的权重和偏置
+        # Check expert network weights and biases
         for expert in model.experts:
             for m in expert.modules():
                 if isinstance(m, nn.Linear):
-                    # 检查权重不是全零
+                    # Check weights are not all zeros
                     assert not torch.allclose(
                         m.weight, torch.zeros_like(m.weight)
                     ), "Expert weights should not be all zeros"
-                    # 检查偏置是全零
+                    # Check biases are all zeros
                     assert torch.allclose(
                         m.bias, torch.zeros_like(m.bias)
                     ), "Expert biases should be initialized to zeros"
 
     def test_output_range(self, default_params, device):
-        """测试输出值的合理性"""
+        """Test output value reasonableness"""
         model = MoERegressor(**default_params).to(device)
         model.eval()
 
         batch_size, seq_len = 4, 64
 
-        # 测试正常输入
+        # Test normal input
         x = torch.randn(batch_size, seq_len, default_params["embedding_dim"]).to(device)
 
         with torch.no_grad():
             output, gate_weights = model(x)
 
-            # 检查输出没有 NaN 或 Inf
+            # Check output has no NaN or Inf
             assert not torch.isnan(output).any(), "Output contains NaN"
             assert not torch.isinf(output).any(), "Output contains Inf"
 
-            # 对于归一化的输入，输出应该在合理范围内（不会太大）
+            # For normalized input, output should be within reasonable range (not too large)
             assert torch.abs(output).max() < 1e3, "Output values are unreasonably large"
 
     def test_zero_input(self, default_params, device):
-        """测试零输入的情况"""
+        """Test zero input case"""
         model = MoERegressor(**default_params).to(device)
         model.eval()
 
@@ -285,18 +285,18 @@ class TestMoERegressor:
         with torch.no_grad():
             output, gate_weights = model(x)
 
-            # 检查输出有效
+            # Check output is valid
             assert not torch.isnan(output).any(), "Output contains NaN for zero input"
             assert not torch.isinf(output).any(), "Output contains Inf for zero input"
 
-            # 检查 gate_weights 仍然有效
+            # Check gate_weights are still valid
             weight_sums = gate_weights.sum(dim=-1)
             assert torch.allclose(
                 weight_sums, torch.ones_like(weight_sums), atol=1e-6
             ), "Gate weights should sum to 1 for zero input"
 
     def test_determinism(self, default_params, device):
-        """测试确定性（相同输入应产生相同输出）"""
+        """Test determinism (same input should produce same output)"""
         model = MoERegressor(**default_params).to(device)
         model.eval()
 
@@ -307,7 +307,7 @@ class TestMoERegressor:
             output1, gate_weights1 = model(x)
             output2, gate_weights2 = model(x)
 
-            # 相同输入应该产生相同输出
+            # Same input should produce same output
             assert torch.allclose(
                 output1, output2, atol=1e-6
             ), "Model should be deterministic in eval mode"
@@ -316,10 +316,10 @@ class TestMoERegressor:
             ), "Gate weights should be deterministic in eval mode"
 
     def test_dropout_effect(self, device):
-        """测试 dropout 在训练和评估模式下的效果"""
+        """Test dropout effect in training and evaluation modes"""
         params = {
             "embedding_dim": 256,
-            "dropout": 0.5,  # 较高的 dropout 率以便观察效果
+            "dropout": 0.5,  # Higher dropout rate to observe effect
             "number_of_experts": 3,
             "gate_temperature": 1.0,
         }
@@ -328,20 +328,20 @@ class TestMoERegressor:
         batch_size, seq_len = 4, 64
         x = torch.randn(batch_size, seq_len, params["embedding_dim"]).to(device)
 
-        # 训练模式：输出应该不同（由于 dropout）
+        # Training mode: outputs should differ (due to dropout)
         model.train()
         torch.manual_seed(42)
         output1_train, _ = model(x)
         torch.manual_seed(43)
         output2_train, _ = model(x)
 
-        # 训练模式下，由于 dropout，输出应该不同
-        # 注意：这个测试可能偶尔失败，因为随机性
+        # In training mode, outputs should differ due to dropout
+        # Note: This test may occasionally fail due to randomness
         assert not torch.allclose(
             output1_train, output2_train, atol=1e-6
         ), "Outputs should differ in training mode due to dropout"
 
-        # 评估模式：输出应该相同
+        # Evaluation mode: outputs should be identical
         model.eval()
         with torch.no_grad():
             output1_eval, _ = model(x)
@@ -353,7 +353,7 @@ class TestMoERegressor:
 
 
 def test_regressor_expert():
-    """测试 RegressorExpert 模块"""
+    """Test RegressorExpert module"""
     embedding_dim = 256
     dropout = 0.1
 
@@ -364,7 +364,7 @@ def test_regressor_expert():
 
     output = expert(x)
 
-    # 检查输出形状（最后一维应该是1，因为是回归输出）
+    # Check output shape (last dimension should be 1, as it's regression output)
     assert output.shape == (
         batch_size,
         seq_len,
@@ -373,7 +373,7 @@ def test_regressor_expert():
 
 
 def run_all_tests():
-    """运行所有测试"""
+    """Run all tests"""
     print("=" * 60)
     print("Testing MoERegressor")
     print("=" * 60)
@@ -383,7 +383,7 @@ def run_all_tests():
 
     test_suite = TestMoERegressor()
 
-    # 获取 fixtures
+    # Get fixtures
     default_params = {
         "embedding_dim": 256,
         "dropout": 0.1,

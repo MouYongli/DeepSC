@@ -68,7 +68,7 @@ class DataCollator:
                 f"({self.max_length})."
             )
 
-        # 验证dynamic_mask_probabilities
+        # Validate dynamic_mask_probabilities
         if self.dynamic_mask_probabilities is not None:
             for bin_idx in range(1, self.num_bins + 1):
                 if bin_idx not in self.dynamic_mask_probabilities:
@@ -83,13 +83,13 @@ class DataCollator:
         self, examples: List[Dict[str, torch.Tensor]]
     ) -> Dict[str, torch.Tensor]:
         """
-        该函数的输出为 data_dict 包括以下key：
-        gene: 基因id
-        masked_discrete_expr: 离散表达值掩码 (输入模型)
-        masked_continuous_expr: 连续表达值掩码 (输入模型)
-        discrete_expr_label: 离散表达值label （和模型的输出比较）(添加了-100,表明这些位置不参加cross entropy loss)
-        continuous_expr_label: 连续表达值label （和模型的输出比较）（未添加-100）
-        mask: 掩码的位置 （用于计算MSE的label，continuous_expr_label使用，在masked_mse函数中使用）
+        This function outputs data_dict including the following keys:
+        gene: gene id
+        masked_discrete_expr: discrete expression mask (input to model)
+        masked_continuous_expr: continuous expression mask (input to model)
+        discrete_expr_label: discrete expression label (compared with model output) (added -100, indicating these positions don't participate in cross entropy loss)
+        continuous_expr_label: continuous expression label (compared with model output) (not added -100)
+        mask: mask positions (used for MSE label calculation, used by continuous_expr_label, used in masked_mse function)
         """
         if not isinstance(examples[0], Mapping):
             return NotImplementedError
@@ -113,15 +113,15 @@ class DataCollator:
             genes = examples[i]["genes"]
             expressions = examples[i]["expressions"]
             expression_label = expressions.clone().float()
-            # 如果gene_from_zero为True，则将gene加1 为pad_token_id留出位置
+            # If gene_from_zero is True, add 1 to gene to reserve space for pad_token_id
             if self.gene_from_zero:
                 genes = genes + 1
-            # 做binning
+            # Do binning
             if self.do_binning:
-                # 按细胞进行离散化，
+                # Discretize by cell
                 expressions = self.discretize_expression(expressions)
                 expressions = expressions.long()
-            # 添加cls token
+            # Add cls token
             genes = torch.cat(
                 [
                     torch.tensor(
@@ -150,32 +150,32 @@ class DataCollator:
                     expression_label,
                 ]
             )
-            # 对gene, expressions, expression_label进行采样或截断并填充
+            # Sample or truncate and pad gene, expressions, expression_label
             genes, expressions, expression_label = self._sample_or_truncate_plus_pad(
                 genes, expressions, expression_label, _max_length
             )  # torch tensors of length _max_length
             padded_genes.append(genes)
             padded_discrete_expr.append(expressions)
             padded_continuous_expr.append(expression_label)
-        # 对padded_genes, padded_discrete_expr, padded_continuous_expr进行stack
+        # Stack padded_genes, padded_discrete_expr, padded_continuous_expr
         padded_genes = torch.stack(padded_genes, dim=0)
         padded_discrete_expr = torch.stack(padded_discrete_expr, dim=0)
         padded_continuous_expr = torch.stack(padded_continuous_expr, dim=0)
         continuous_expr_label = padded_continuous_expr.clone().float()
 
-        # 这两个添加完cls之后即可加入data_dict
+        # These two can be added to data_dict after adding cls
         data_dict = {
             "gene": padded_genes,
             "continuous_expr_label": continuous_expr_label,
         }
 
-        # 为padded_continuous_expr添加mask 以及为padded_discrete_expr添加mask
+        # Add mask for padded_continuous_expr and padded_discrete_expr
         if self.do_mlm:
-            # 只采样一次 mask
+            # Sample mask only once
             masked_discrete_expressions, mask = self._mask(
                 padded_discrete_expr, return_mask=True
             )
-            # 用同一个 mask 应用到 continuous
+            # Apply the same mask to continuous
             masked_continuous_expressions = padded_continuous_expr.masked_fill(
                 mask, self.mask_value
             )
@@ -185,17 +185,17 @@ class DataCollator:
             mask = torch.zeros_like(padded_discrete_expr, dtype=torch.bool)
         data_dict["masked_discrete_expr"] = masked_discrete_expressions
         data_dict["masked_continuous_expr"] = masked_continuous_expressions
-        # 检查masked_discrete_expr的第二维的第一个数是否为cls
+        # Check if the first number in the second dimension of masked_discrete_expr is cls
         if (
             data_dict["masked_discrete_expr"].shape[1] == 0
             or data_dict["masked_discrete_expr"][0, 0].item() != self.num_bins + 1
         ):
             raise ValueError(
-                f"离散mask 的第二维的第一个数不是 {self.num_bins}，而是 {data_dict['masked_discrete_expr'][0, 0].item()}"
+                f"The first number in the second dimension of discrete mask is not {self.num_bins}, but {data_dict['masked_discrete_expr'][0, 0].item()}"
             )
 
-        # 新增 label: mask 位置为原始 expression，其他为 -100
-        # discrete_expr_label可以在这里做掩码，然而continuous_expr_label,可以在trainer里传入自定义的masked mse 里面，在那里处理应该做掩码的indices
+        # Add label: mask position is original expression, others are -100
+        # discrete_expr_label can be masked here, however continuous_expr_label can be passed to custom masked mse in trainer, where indices to be masked are handled
         discrete_expr_label = torch.full_like(padded_discrete_expr, -100)
         discrete_expr_label[mask] = padded_discrete_expr[mask]
         data_dict["discrete_expr_label"] = discrete_expr_label
@@ -329,11 +329,11 @@ class DataCollator:
 
     def discretize_expression(self, normalized_expr: torch.Tensor) -> torch.Tensor:
         """
-        表达量离散化：b_j = Discretize_N(x̃_j)
+        Expression discretization: b_j = Discretize_N(x̃_j)
         Args:
-            normalized_expr: 归一化表达量 x̃, shape: (g,)
+            normalized_expr: normalized expression x̃, shape: (g,)
         Returns:
-            bin_indices: 离散化的bin索引 b, shape: (g,)
+            bin_indices: discretized bin indices b, shape: (g,)
         """
         min_val = normalized_expr.min()
         max_val = normalized_expr.max()
@@ -346,42 +346,42 @@ class DataCollator:
         self, normalized_expr: torch.Tensor
     ) -> torch.Tensor:
         """
-        新的表达量离散化方法：
-        - 小于2的元素分为bin1
-        - 大于等于2的元素，按对数间隔分为剩下的bin（元素越大bin宽度越宽）
+        New expression discretization method:
+        - Elements less than 2 are assigned to bin1
+        - Elements >= 2 are divided into remaining bins by logarithmic intervals (larger elements have wider bin widths)
         Args:
-            normalized_expr: 原始表达量 x, shape: (g,)
+            normalized_expr: original expression x, shape: (g,)
         Returns:
-            bin_indices: 离散化的bin索引 b, shape: (g,)
+            bin_indices: discretized bin indices b, shape: (g,)
         """
         num_bins = self.num_bins
         expr = normalized_expr.clone()
         bin_indices = torch.zeros_like(expr, dtype=torch.long)
 
-        # 1. 小于2的分为bin1
+        # 1. Values less than 2 are assigned to bin1
         mask_lt2 = expr < 2
         bin_indices[mask_lt2] = 1
 
-        # 2. 大于等于2的分为剩下的bin（对数分bin）
+        # 2. Values >= 2 are divided into remaining bins (logarithmic binning)
         mask_ge2 = ~mask_lt2
         if mask_ge2.any():
             expr_ge2 = expr[mask_ge2]
             min_val = 2.0
             max_val = expr_ge2.max().item()
-            n_log_bins = num_bins - 1  # bin1已用
+            n_log_bins = num_bins - 1  # bin1 already used
             if max_val > min_val:
-                # 对数分bin
+                # Logarithmic binning
                 log_min = torch.log(torch.tensor(min_val))
                 log_max = torch.log(torch.tensor(max_val) + 1e-8)
                 log_expr = torch.log(expr_ge2)
-                # 归一化到[0,1]
+                # Normalize to [0,1]
                 norm_log = (log_expr - log_min) / (log_max - log_min + 1e-8)
-                # 分到[2, num_bins]的bin
+                # Assign to bins [2, num_bins]
                 bins = torch.floor(norm_log * (n_log_bins - 1)).long() + 2
                 bins = torch.clamp(bins, 2, num_bins)
                 bin_indices[mask_ge2] = bins
             else:
-                # 如果所有大于等于2的值都相等，则分到bin2
+                # If all values >= 2 are equal, assign to bin2
                 bin_indices[mask_ge2] = 2
         return bin_indices
 
@@ -389,27 +389,27 @@ class DataCollator:
         self, normalized_expr: torch.Tensor
     ) -> torch.Tensor:
         """
-        按如下规则分为3个bin：
-        - 小于3的为bin1
-        - 大于等于3且小于6.7的为bin2
-        - 大于等于6.7的为bin3
+        Divide according to the following rules into 3 bins:
+        - Less than 3 is bin1
+        - Greater than or equal to 3 and less than 6.7 is bin2
+        - Greater than or equal to 6.7 is bin3
         Args:
-            normalized_expr: 原始表达量 x, shape: (g,)
+            normalized_expr: original expression x, shape: (g,)
         Returns:
-            bin_indices: 离散化的bin索引 b, shape: (g,)
+            bin_indices: discretized bin indices b, shape: (g,)
         """
         expr = normalized_expr.clone()
         bin_indices = torch.zeros_like(expr, dtype=torch.long)
 
-        # bin1: 小于3
+        # bin1: less than 3
         mask_bin1 = expr <= 2
         bin_indices[mask_bin1] = 1
 
-        # bin2: 大于等于3且小于6.7
+        # bin2: greater than or equal to 3 and less than 6.7
         mask_bin2 = (expr > 2) & (expr < 5.5)
         bin_indices[mask_bin2] = 2
 
-        # bin3: 大于等于6.7
+        # bin3: greater than or equal to 6.7
         mask_bin3 = expr >= 5.5
         bin_indices[mask_bin3] = 3
 
@@ -423,19 +423,19 @@ class DataCollator:
         max_length: int,
     ) -> Tuple[torch.LongTensor, torch.Tensor, torch.Tensor]:
         """
-        优先截取表达值最大的基因，如果还不够长就pad。
-        保持前 keep_first_n_tokens 个不变。
+        Prioritize truncating genes with highest expression values, pad if still not long enough.
+        Keep the first keep_first_n_tokens unchanged.
         """
         device = genes.device
         _n = self.keep_first_n_tokens
         total_len = len(genes)
-        # 保持前n个不变
+        # Keep first n unchanged
         if _n > 0:
-            # 前n个直接保留
+            # Keep first n directly
             fixed_genes = genes[:_n]
             fixed_expr = expressions[:_n]
             fixed_label = expression_label[:_n]
-            # 剩下的部分按表达值排序
+            # Sort remaining part by expression value
             rest_genes = genes[_n:]
             rest_expr = expressions[_n:]
             rest_label = expression_label[_n:]
@@ -444,7 +444,7 @@ class DataCollator:
                 rest_genes = rest_genes[sorted_indices]
                 rest_expr = rest_expr[sorted_indices]
                 rest_label = rest_label[sorted_indices]
-            # 拼接
+            # Concatenate
             needed = max_length - _n
             selected_genes = rest_genes[:needed]
             selected_expr = rest_expr[:needed]
@@ -453,12 +453,12 @@ class DataCollator:
             out_expr = torch.cat([fixed_expr, selected_expr], dim=0)
             out_label = torch.cat([fixed_label, selected_label], dim=0)
         else:
-            # 全部按表达值排序
+            # Sort all by expression value
             sorted_indices = torch.argsort(expressions, descending=True)
             out_genes = genes[sorted_indices][:max_length]
             out_expr = expressions[sorted_indices][:max_length]
             out_label = expression_label[sorted_indices][:max_length]
-        # 如果还不够长就pad
+        # Pad if still not long enough
         if len(out_genes) < max_length:
             out_genes, out_expr, out_label = self._pad(
                 out_genes, out_expr, out_label, max_length

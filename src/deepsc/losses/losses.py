@@ -69,7 +69,7 @@ class LossCalculator:
         """
         logits: (batch, seq_len, num_bins)
         discrete_expr_label: (batch, seq_len)
-        返回: (num_bins,) 每个bin的平均交叉熵损失
+        Return: (num_bins,) average cross-entropy loss for each bin
         Average calculation does not include bin0
         """
         num_bins = self.num_bins
@@ -130,7 +130,7 @@ class LossCalculator:
 
     def init_ldam_loss(self):
         logging.info("Using LDAM loss...")
-        # 使用缓存的class_counts
+        # Use cached class_counts
         class_counts = self.class_counts
         cls_num_list = class_counts.cpu().numpy()
 

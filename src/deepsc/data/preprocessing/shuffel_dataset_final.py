@@ -81,8 +81,8 @@ def main():
             idx = idx[(idx >= 0) & (idx < csr.shape[0])]
             if idx.size == 0:
                 continue
-            sub = csr[idx]  # CSR 切片返回 CSR/CSR-like
-            sub = sub.tocsr()  # 显式确保 CSR
+            sub = csr[idx]  # CSR slicing returns CSR/CSR-like
+            sub = sub.tocsr()  # Explicitly ensure CSR
             chunk_parts[cid].append(sub)
 
         # Release current file matrix

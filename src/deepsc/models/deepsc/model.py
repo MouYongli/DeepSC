@@ -12,18 +12,18 @@ except ImportError:
     print("Warning: Flash Attention not available, falling back to standard attention")
 
 
-# TODO：embedding 的行数不只是num_genes，而是num_genes+1，因为还有<cls> token
+# TODO: embedding rows is not just num_genes, but num_genes+1, because there's also <cls> token
 class GeneEmbedding(nn.Module):
     """
-    Gene Embedding分支：专注于捕捉基因的语义表示
+    Gene Embedding branch: focuses on capturing semantic representation of genes
 
-    学习基因的语义表示，包括：
-    - 功能相似性：功能相关的基因在嵌入空间中距离较近
-    - 通路关系：同一生物学通路的基因具有相似的表示
-    - 调控关系：转录因子与其靶基因之间的关系
+    Learns semantic representation of genes, including:
+    - Functional similarity: functionally related genes are closer in embedding space
+    - Pathway relationships: genes in the same biological pathway have similar representations
+    - Regulatory relationships: relationships between transcription factors and their target genes
     """
 
-    # num_genes 是基因数量，包括<cls>和<pad>
+    # num_genes is the number of genes, including <cls> and <pad>
     def __init__(self, embedding_dim: int, num_genes: int):
         super(GeneEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
@@ -34,46 +34,46 @@ class GeneEmbedding(nn.Module):
     def forward(self, gene_ids: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            gene_ids: 基因ID序列 G = [g_1, g_2, ..., g_g], shape: (batch_size, g)
+            gene_ids: Gene ID sequence G = [g_1, g_2, ..., g_g], shape: (batch_size, g)
 
         Returns:
-            gene_embeddings: 基因嵌入 E_gene ∈ R^{g×d}, shape: (batch_size, g, d)
+            gene_embeddings: Gene embeddings E_gene ∈ R^{g×d}, shape: (batch_size, g, d)
         """
         return self.gene_embedding(gene_ids)
 
 
-# 需修改，有问题： 归一化和分箱应该放到data_collator里面，这里只做embedding
-# 其次：在data_collator里面还要做好trunctuation和padding以及mask.
+# TODO: Normalization and binning should be moved to data_collator, here we only do embedding
+# Additionally: truncation, padding and mask should be done in data_collator
 class ExpressionEmbedding(nn.Module):
     """
-    Expression Embedding分支：专注于捕捉表达量的数值特征和上下文依赖
+    Expression Embedding branch: focuses on capturing numerical features and contextual dependencies of expression
 
-    考虑到scRNA-seq数据的特点，设计分层编码策略：
-    1. 表达量归一化与离散化
-    2. 分层表达嵌入
+    Considering the characteristics of scRNA-seq data, designs a hierarchical encoding strategy:
+    1. Expression normalization and discretization
+    2. Hierarchical expression embedding
     """
 
-    # num_bins 是bin数量，包括<cls>和<pad>以及<mask>
+    # num_bins is the number of bins, including <cls>, <pad> and <mask>
     def __init__(self, embedding_dim: int, num_bins: int = 50, alpha: float = 0.3):
         """
         Args:
-            embedding_dim: 嵌入维度 d
-            num_bins: 离散化的bin数量 N
-            alpha: 平衡离散和连续特征的权重参数
+            embedding_dim: Embedding dimension d
+            num_bins: Number of bins for discretization N
+            alpha: Weight parameter to balance discrete and continuous features
         """
         super(ExpressionEmbedding, self).__init__()
         self.embedding_dim = embedding_dim
         self.num_bins = num_bins
-        # alpba是否可以作为可学习的参数
+        # TODO: Consider making alpha a learnable parameter
         self.alpha = alpha
-        # 离散表达水平的嵌入矩阵 W_bin ∈ R^{d×N}
+        # Embedding matrix for discrete expression levels W_bin ∈ R^{d×N}
         self.bin_embedding = nn.Embedding(
             num_embeddings=num_bins + 3, embedding_dim=embedding_dim, padding_idx=0
         )
-        # 连续值的投影向量 v_cont ∈ R^d
+        # Projection vector for continuous values v_cont ∈ R^d
         self.continuous_projection = nn.Linear(1, embedding_dim, bias=True)
 
-        # 初始化权重
+        # Initialize weights
         nn.init.xavier_uniform_(self.bin_embedding.weight)
         nn.init.xavier_uniform_(self.continuous_projection.weight)
         nn.init.zeros_(self.continuous_projection.bias)
@@ -82,13 +82,13 @@ class ExpressionEmbedding(nn.Module):
         self, discrete_expression: torch.Tensor, normalized_expr: torch.Tensor
     ) -> torch.Tensor:
         """
-        前向传播
+        Forward pass
 
         Args:
-            expression: 表达量向量 x = [x_1, x_2, ..., x_g], shape: (batch_size, g)
+            expression: Expression vector x = [x_1, x_2, ..., x_g], shape: (batch_size, g)
 
         Returns:
-            expr_embeddings: 表达量嵌入 E_expr ∈ R^{g×d}, shape: (batch_size, g, d)
+            expr_embeddings: Expression embeddings E_expr ∈ R^{g×d}, shape: (batch_size, g, d)
         """
 
         discrete_embeddings = self.bin_embedding(discrete_expression)
@@ -101,14 +101,14 @@ class ExpressionEmbedding(nn.Module):
 
 class FlashAttentionLayer(nn.Module):
     """
-    统一的 Flash Attention v2 注意力层
+    Unified Flash Attention v2 attention layer
 
-    接受 Q, K, V 的输入嵌入,计算多头注意力。
+    Accepts Q, K, V input embeddings and computes multi-head attention.
 
     Args:
-        d: 嵌入维度
-        num_heads: 注意力头数
-        attn_dropout: 注意力dropout率
+        d: Embedding dimension
+        num_heads: Number of attention heads
+        attn_dropout: Attention dropout rate
     """
 
     def __init__(self, d, num_heads, attn_dropout=0.1):
@@ -117,45 +117,45 @@ class FlashAttentionLayer(nn.Module):
         self.head_dim = d // num_heads
         self.d = d
 
-        # Q, K, V 投影矩阵
+        # Q, K, V projection matrices
         self.W_Q = nn.Linear(d, d)
         self.W_K = nn.Linear(d, d)
         self.W_V = nn.Linear(d, d)
 
-        # 输出投影
+        # Output projection
         self.out_proj = nn.Linear(d, d)
 
         # Dropout
         self.dropout = nn.Dropout(attn_dropout)
 
-        # 缩放因子
+        # Scale factor
         self.scale = self.head_dim**-0.5
 
     def forward(self, Q_emb, K_emb=None, V_emb=None):
         """
-        前向传播
+        Forward pass
 
         Args:
-            Q_emb: Query嵌入, shape: (batch_size, seq_len, d)
-            K_emb: Key嵌入, shape: (batch_size, seq_len, d)
-                   如果为None,使用Q_emb (self-attention)
-            V_emb: Value嵌入, shape: (batch_size, seq_len, d)
-                   如果为None,使用K_emb
+            Q_emb: Query embedding, shape: (batch_size, seq_len, d)
+            K_emb: Key embedding, shape: (batch_size, seq_len, d)
+                   If None, uses Q_emb (self-attention)
+            V_emb: Value embedding, shape: (batch_size, seq_len, d)
+                   If None, uses K_emb
 
         Returns:
-            output: 注意力输出, shape: (batch_size, seq_len, d)
+            output: Attention output, shape: (batch_size, seq_len, d)
 
-        使用示例:
+        Usage examples:
             # Self-attention: Q = K = V
             out = layer(x)
 
             # Cross-attention: Q != K = V
             out = layer(query, key_value)
 
-            # 完全自定义: Q, K, V 都不同
+            # Fully customized: Q, K, V are all different
             out = layer(q, k, v)
         """
-        # 默认值处理
+        # Default value handling
         if K_emb is None:
             K_emb = Q_emb
         if V_emb is None:
@@ -163,17 +163,17 @@ class FlashAttentionLayer(nn.Module):
 
         batch_size, seq_len, _ = Q_emb.shape
 
-        # 计算 Q, K, V 投影
+        # Compute Q, K, V projections
         Q = self.W_Q(Q_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
         K = self.W_K(K_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
         V = self.W_V(V_emb).view(batch_size, seq_len, self.num_heads, self.head_dim)
 
-        # 转置以便进行注意力计算
+        # Transpose for attention computation
         Q = Q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
         K = K.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
         V = V.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
 
-        # 使用 Flash Attention v2
+        # Use Flash Attention v2
         if FLASH_ATTENTION_AVAILABLE:
 
             output = scaled_dot_product_attention(
@@ -187,21 +187,21 @@ class FlashAttentionLayer(nn.Module):
         else:
             scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
 
-            # 应用 softmax
+            # Apply softmax
             attn_weights = F.softmax(scores, dim=-1)
             attn_weights = self.dropout(attn_weights)
             A_bar = attn_weights
 
-            # 计算输出
+            # Compute output
             output = torch.matmul(A_bar, V)
 
-        # 转置并重塑
+        # Transpose and reshape
         output = output.transpose(
             1, 2
         ).contiguous()  # (batch_size, seq_len, num_heads, head_dim)
         output = output.view(batch_size, seq_len, self.d)  # (batch_size, seq_len, d)
 
-        # 输出投影
+        # Output projection
         output = self.out_proj(output)
 
         return output
@@ -215,59 +215,59 @@ class FeedForward(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
 
-        # 创建每一层的模块
+        # Create modules for each layer
         self.layers = nn.ModuleList()
 
-        # 第一层：d -> hidden_dim
+        # First layer: d -> hidden_dim
         first_layer = nn.Sequential(
             nn.Linear(d, hidden_dim), nn.GELU(), nn.Dropout(dropout)
         )
         self.layers.append(first_layer)
 
-        # 中间层：hidden_dim -> hidden_dim
+        # Middle layers: hidden_dim -> hidden_dim
         for _ in range(num_layers - 2):
             middle_layer = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Dropout(dropout)
             )
             self.layers.append(middle_layer)
 
-        # 最后一层：hidden_dim -> d
+        # Last layer: hidden_dim -> d
         last_layer = nn.Sequential(nn.Linear(hidden_dim, d), nn.Dropout(dropout))
         self.layers.append(last_layer)
 
     def forward(self, x):
         if self.num_layers == 2:
-            # 只有两层的情况：d -> hidden_dim -> d
+            # Two-layer case: d -> hidden_dim -> d
             h = self.layers[0](x)  # d -> hidden_dim
             h = self.layers[1](h)  # hidden_dim -> d
-            return x + h  # 残差连接
+            return x + h  # residual connection
 
         else:
-            # 多层的情况
-            # 第一层
+            # Multi-layer case
+            # First layer
             h = self.layers[0](x)  # d -> hidden_dim
 
-            # 中间层，每层都有残差连接
+            # Middle layers, each with residual connection
             for i in range(1, self.num_layers - 1):
                 residual = h
                 h = self.layers[i](h)  # hidden_dim -> hidden_dim
-                h = h + residual  # 残差连接
+                h = h + residual  # residual connection
 
-            # 最后一层
+            # Last layer
             h = self.layers[-1](h)  # hidden_dim -> d
-            return x + h  # 最终残差连接
+            return x + h  # final residual connection
 
 
 class MoERegressor(nn.Module):
     """
-    Mixture of Experts (MoE) 回归器
+    Mixture of Experts (MoE) Regressor
 
-    包含一个gate网络和三个expert网络：
-    - Expert 1: 专门处理小值（低表达量）
-    - Expert 2: 专门处理中等值（中等表达量）
-    - Expert 3: 专门处理大值（高表达量）
+    Contains one gate network and three expert networks:
+    - Expert 1: specialized for handling small values (low expression)
+    - Expert 2: specialized for handling medium values (medium expression)
+    - Expert 3: specialized for handling large values (high expression)
 
-    所有expert使用相同的网络结构，通过gate网络学习专门化
+    All experts use the same network structure, learning specialization through the gate network
     """
 
     def __init__(
@@ -278,7 +278,7 @@ class MoERegressor(nn.Module):
         self.num_experts = number_of_experts
         self.gate_temperature = gate_temperature
 
-        # Gate网络：决定每个expert的权重
+        # Gate network: determines weight of each expert
         self.gate = nn.Sequential(
             nn.Linear(embedding_dim, embedding_dim // 2),
             nn.GELU(),
@@ -286,23 +286,23 @@ class MoERegressor(nn.Module):
             nn.Linear(embedding_dim // 2, self.num_experts),
         )
 
-        # 创建三个相同结构的expert网络
+        # Create three expert networks with the same structure
         self.experts = nn.ModuleList(
             [RegressorExpert(embedding_dim, dropout) for _ in range(self.num_experts)]
         )
 
-        # 初始化权重
+        # Initialize weights
         self._initialize_weights()
 
     def _initialize_weights(self):
-        """初始化所有网络的权重"""
-        # 初始化gate网络
+        """Initialize weights for all networks"""
+        # Initialize gate network
         for m in self.gate:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
 
-        # 初始化所有expert网络
+        # Initialize all expert networks
         for expert in self.experts:
             for m in expert.modules():
                 if isinstance(m, nn.Linear):
@@ -317,20 +317,20 @@ class MoERegressor(nn.Module):
             output: (batch_size, seq_len)
             gate_weights: (batch_size, seq_len, num_experts)
         """
-        # 1) gate logits -> softmax 权重
+        # 1) gate logits -> softmax weights
         gate_logits = self.gate(x)  # (B, L, E)
         gate_weights = F.softmax(gate_logits / self.gate_temperature, dim=-1)
 
-        # 2) 逐个 expert 前向
+        # 2) Forward pass through each expert
         expert_outputs = []
         for expert in self.experts:
             y = expert(x)  # (B, L, 1)
             expert_outputs.append(y)
 
-        # 3) 堆叠 -> (B, L, E)
+        # 3) Stack -> (B, L, E)
         expert_outputs = torch.cat(expert_outputs, dim=-1)  # (B, L, E)
 
-        # 4) 加权求和 -> (B, L)
+        # 4) Weighted sum -> (B, L)
         output = torch.sum(gate_weights * expert_outputs, dim=-1)
 
         return output, gate_weights
@@ -347,18 +347,18 @@ class RegressorExpert(nn.Module):
         self.norm1 = nn.LayerNorm(embedding_dim)
 
     def forward(self, x):
-        # ---- 第一子层 ----
+        # ---- First sub-layer ----
         residual = x
         x = self.fc1(x)
         x = self.gelu(x)
         x = self.dropout(x)
         x = self.fc2(x)
         x = self.dropout(x)
-        x = x + residual  # 残差连接
+        x = x + residual  # residual connection
         x = self.norm1(x)  # Post-Norm
 
-        # ---- 第二子层 ----
-        # 输出回归值，维度从 embedding_dim -> 1
+        # ---- Second sub-layer ----
+        # Output regression value, dimension from embedding_dim -> 1
         x = self.fc3(x)  # (B, L, 1)
 
         return x
@@ -414,7 +414,7 @@ class Gate(nn.Module):
         self.n_routed_experts = int(moe_cfg.n_routed_experts)
         self.proj = nn.Linear(self.dim, self.n_routed_experts, bias=True)
 
-        # 用于统计专家使用情况
+        # Used to track expert usage statistics
         self.register_buffer("expert_usage_count", torch.zeros(self.n_routed_experts))
         self.register_buffer("total_tokens", torch.zeros(1))
 
@@ -439,19 +439,19 @@ class Gate(nn.Module):
         indices = torch.topk(scores, self.topk, dim=-1)[1]  # [B, topk]
         weights = original_scores.gather(1, indices)  # [B, topk]
 
-        # # 归一化
+        # # Normalization
         if self.score_func == "sigmoid":
             weights = weights / weights.sum(dim=-1, keepdim=True)
 
         weights = weights * self.route_scale
 
-        # 统计专家使用情况（仅在训练时）
+        # Track expert usage statistics (only during training)
         if self.training:
             batch_size = x.size(0)
-            # 修正：每个token选择topk个专家，所以总的专家选择次数是 batch_size * topk
+            # Correction: each token selects topk experts, so total expert selections = batch_size * topk
             self.total_tokens += batch_size * self.topk
 
-            # 统计每个专家被选中的次数
+            # Count how many times each expert is selected
             for expert_idx in range(self.n_routed_experts):
                 count = (indices == expert_idx).sum().float()
                 self.expert_usage_count[expert_idx] += count
@@ -460,10 +460,10 @@ class Gate(nn.Module):
 
     def get_expert_usage_stats(self):
         """
-        获取专家使用统计信息
+        Get expert usage statistics
 
         Returns:
-            dict: 包含各种统计指标的字典
+            dict: Dictionary containing various statistical metrics
         """
         if self.total_tokens == 0:
             return {
@@ -476,19 +476,19 @@ class Gate(nn.Module):
                 "total_tokens": 0,
             }
 
-        # 计算每个专家的使用比例
+        # Calculate usage ratio for each expert
         usage_ratio = self.expert_usage_count / self.total_tokens
 
-        # 计算统计指标
+        # Calculate statistical metrics
         max_usage = usage_ratio.max().item()
         min_usage = usage_ratio.min().item()
         usage_variance = usage_ratio.var().item()
 
-        # 计算塌缩比例（最常用专家的使用比例）
+        # Calculate collapse ratio (usage ratio of most frequently used expert)
         collapse_ratio = max_usage
 
-        # 计算熵（衡量专家使用的均匀程度）
-        # 避免log(0)的情况
+        # Calculate entropy (measure of uniformity of expert usage)
+        # Avoid log(0)
         epsilon = 1e-10
         usage_ratio_safe = usage_ratio + epsilon
         entropy = -(usage_ratio_safe * torch.log(usage_ratio_safe)).sum().item()
@@ -504,19 +504,19 @@ class Gate(nn.Module):
         }
 
     def reset_usage_stats(self):
-        """重置使用统计"""
+        """Reset usage statistics"""
         self.expert_usage_count.zero_()
         self.total_tokens.zero_()
 
     def is_collapsed(self, threshold=0.8):
         """
-        判断MoE是否塌缩
+        Determine if MoE has collapsed
 
         Args:
-            threshold: 塌缩阈值，如果某个专家使用比例超过此阈值则认为塌缩
+            threshold: Collapse threshold, considered collapsed if an expert's usage ratio exceeds this threshold
 
         Returns:
-            bool: 是否塌缩
+            bool: Whether collapsed
         """
         stats = self.get_expert_usage_stats()
         return stats["collapse_ratio"] > threshold
@@ -612,21 +612,21 @@ class MoE(nn.Module):
         return (y + z).view(shape)
 
     def get_expert_usage_stats(self):
-        """获取专家使用统计信息"""
+        """Get expert usage statistics"""
         return self.gate.get_expert_usage_stats()
 
     def reset_usage_stats(self):
-        """重置使用统计"""
+        """Reset usage statistics"""
         self.gate.reset_usage_stats()
 
     def is_collapsed(self, threshold=0.8):
-        """判断MoE是否塌缩"""
+        """Determine if MoE has collapsed"""
         return self.gate.is_collapsed(threshold)
 
 
 class FlashDeepSCTransformerBlock(nn.Module):
     """
-    使用 Flash Attention v2 的Transformer块
+    Transformer block using Flash Attention v2
     """
 
     def __init__(
@@ -644,7 +644,7 @@ class FlashDeepSCTransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.embedding_dim = embedding_dim
         self.use_moe_ffn = bool(moe_layer)
-        # 使用 Flash Attention 层
+        # Use Flash Attention layer
         self.gene_attn = FlashAttentionLayer(embedding_dim, num_heads, attn_dropout)
         self.expr_attn = FlashAttentionLayer(embedding_dim, num_heads, attn_dropout)
 
@@ -682,11 +682,11 @@ class FlashDeepSCTransformerBlock(nn.Module):
     def forward(self, gene_emb, expr_emb):
         """
         Args:
-            gene_emb: 基因嵌入, shape: (batch_size, seq_len, embedding_dim)
-            expr_emb: 表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+            gene_emb: Gene embedding, shape: (batch_size, seq_len, embedding_dim)
+            expr_emb: Expression embedding, shape: (batch_size, seq_len, embedding_dim)
         Returns:
-            out_gene: 更新后的基因嵌入
-            out_expr: 更新后的表达嵌入
+            out_gene: Updated gene embedding
+            out_expr: Updated expression embedding
         """
         # Gene self-attention
         x = self.norm_gene1(gene_emb)
@@ -717,7 +717,7 @@ class FlashDeepSCTransformerBlock(nn.Module):
 
 class FlashDeepSCTransformerCrossAttentionBlock(nn.Module):
     """
-    使用 Flash Attention v2 的Transformer块
+    Transformer block using Flash Attention v2
     """
 
     def __init__(
@@ -752,9 +752,9 @@ class FlashDeepSCTransformerCrossAttentionBlock(nn.Module):
     def forward(self, gene_emb, expr_emb):
         """
         Args:
-            embedding: 基因或者表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+            embedding: Gene or expression embedding, shape: (batch_size, seq_len, embedding_dim)
         Returns:
-            out_embedding: 更新后的嵌入
+            out_embedding: Updated embedding
         """
         gene_emb = self.gene_norm(gene_emb)
         y = self.norm1(expr_emb)
@@ -776,7 +776,7 @@ class FlashDeepSCTransformerCrossAttentionBlock(nn.Module):
 
 class FlashDeepSCTransformerSelfAttentionBlock(nn.Module):
     """
-    使用 Flash Attention v2 的Transformer块
+    Transformer block using Flash Attention v2
     """
 
     def __init__(
@@ -809,9 +809,9 @@ class FlashDeepSCTransformerSelfAttentionBlock(nn.Module):
     def forward(self, embedding):
         """
         Args:
-            embedding: 基因或者表达嵌入, shape: (batch_size, seq_len, embedding_dim)
+            embedding: Gene or expression embedding, shape: (batch_size, seq_len, embedding_dim)
         Returns:
-            out_embedding: 更新后的嵌入
+            out_embedding: Updated embedding
         """
 
         y = self.norm_expr1(embedding)
@@ -826,15 +826,15 @@ class FlashDeepSCTransformerSelfAttentionBlock(nn.Module):
 
 class DeepSC(nn.Module):
     """
-    使用 Flash Attention v2 的DeepSC模型
-    当前进行四个实验比较：
-    1. ：先对基因嵌入进行N层self-attention，
-            然后用这个得到的嵌入作为Q和K，用表达嵌入作为V进行N层cross attention之后，
-            然后在进行M层expression的self-attention
-    2. 基因嵌入和表达嵌入进行双流的cross attention
-    用以上结果较好的结构作为下面两个实验的基础：
-    3. KV来自基因嵌入，Q来自表达嵌入的单流attention
-    4. Q来自基因嵌入，KV来自表达嵌入的单流attention
+    DeepSC model using Flash Attention v2
+    Currently comparing four experiments:
+    1. First apply N layers of self-attention on gene embedding,
+       then use the resulting embedding as Q and K, and expression embedding as V for N layers of cross attention,
+       then perform M layers of expression self-attention
+    2. Dual-stream cross attention between gene embedding and expression embedding
+    Use the better structure from above as the basis for the following two experiments:
+    3. Single-stream attention with KV from gene embedding, Q from expression embedding
+    4. Single-stream attention with Q from gene embedding, KV from expression embedding
 
     """
 
@@ -939,20 +939,22 @@ class DeepSC(nn.Module):
                     )
                 )
 
-        # 如果你用的是 DictConfig
+        # If you're using DictConfig
         # moe_cfg = MoECfg(**cfg.moe)
         # self.moe, self.n_local_experts = build_moe_from_cfg(moe_cfg)
         self.classifier = nn.Sequential(
-            nn.Linear(embedding_dim, embedding_dim * 2),  # 升维
+            nn.Linear(embedding_dim, embedding_dim * 2),  # expand dimension
             nn.GELU(),
             nn.LayerNorm(embedding_dim * 2),
-            nn.Linear(embedding_dim * 2, embedding_dim),  # 降回原维
+            nn.Linear(
+                embedding_dim * 2, embedding_dim
+            ),  # reduce back to original dimension
             nn.GELU(),
             nn.LayerNorm(embedding_dim),
-            nn.Linear(embedding_dim, num_bins + 1),  # 输出类别
+            nn.Linear(embedding_dim, num_bins + 1),  # output classes
         )
 
-        # 根据配置选择使用哪种regressor
+        # Select which regressor to use based on configuration
         self.use_moe_regressor = use_moe_regressor
         if self.use_moe_regressor:
             self.regressor = MoERegressor(
@@ -962,7 +964,7 @@ class DeepSC(nn.Module):
                 gate_temperature=1.0,
             )
         else:
-            # 原来的simple regressor
+            # Original simple regressor
             self.regressor = nn.Sequential(
                 nn.Linear(embedding_dim, embedding_dim * 2),
                 nn.ReLU(),
@@ -982,7 +984,7 @@ class DeepSC(nn.Module):
         self.enable_l0 = enable_l0
         self.enable_mse = enable_mse
         self.enable_ce = enable_ce
-        # 初始化 classifier 内所有 Linear 层的权重和偏置
+        # Initialize weights and biases of all Linear layers in classifier
         for m in self.classifier:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
@@ -999,10 +1001,10 @@ class DeepSC(nn.Module):
         return_gate_weights=False,
     ):
         """
-        gene_ids: (batch, g)  # 基因ID序列
-        expression_bin: (batch, g)  # 离散化的表达量
-        normalized_expr: (batch, g)  # 归一化的表达量
-        return_gate_weights: 是否返回MoE的gate权重
+        gene_ids: (batch, g)  # Gene ID sequence
+        expression_bin: (batch, g)  # Discretized expression values
+        normalized_expr: (batch, g)  # Normalized expression values
+        return_gate_weights: Whether to return MoE gate weights
         """
         gene_emb = self.gene_embedding(gene_ids)  # (batch, g, d)
         expr_emb = self.expr_embedding(expression_bin, normalized_expr)  # (batch, g, d)
@@ -1041,37 +1043,37 @@ class DeepSC(nn.Module):
 
     def get_regressor_output(self, final_emb):
         """
-        获取回归器输出
+        Get regressor output
 
         Args:
-            final_emb: 最终融合的嵌入特征
+            final_emb: Final fused embedding features
 
         Returns:
-            regression_output: 回归预测结果
-            gate_weights: MoE的gate权重（如果使用MoE）或None（如果使用简单回归器）
+            regression_output: Regression prediction results
+            gate_weights: MoE gate weights (if using MoE) or None (if using simple regressor)
         """
-        # 根据使用的regressor类型获取输出
+        # Get output based on regressor type
         if self.use_moe_regressor:
-            # MoE regressor返回两个值：regression_output和gate_weights
+            # MoE regressor returns two values: regression_output and gate_weights
             regression_output, gate_weights = self.regressor(final_emb)
         else:
-            # 原来的regressor只返回一个值
+            # Original regressor only returns one value
             regression_output = self.regressor(final_emb)
-            regression_output = regression_output.squeeze(-1)  # 去掉最后一个维度
-            gate_weights = None  # 原来的regressor没有gate_weights
+            regression_output = regression_output.squeeze(-1)  # Remove last dimension
+            gate_weights = None  # Original regressor has no gate_weights
 
         return regression_output, gate_weights
 
     def get_all_moe_stats(self):
         """
-        获取模型中所有MoE层的统计信息
+        Get statistics for all MoE layers in the model
 
         Returns:
-            dict: 包含所有MoE层统计信息的字典
+            dict: Dictionary containing statistics for all MoE layers
         """
         moe_stats = {}
 
-        # 检查transformer层中的MoE
+        # Check MoE in transformer layers
         for i, layer in enumerate(self.layers):
             if hasattr(layer, "ffn_gene") and isinstance(layer.ffn_gene, MoE):
                 moe_stats[f"transformer_layer_{i}_gene_ffn"] = (
@@ -1082,14 +1084,14 @@ class DeepSC(nn.Module):
                     layer.ffn_expr.get_expert_usage_stats()
                 )
 
-        # 检查expression层中的MoE
+        # Check MoE in expression layers
         for i, layer in enumerate(self.expression_layers):
             if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
                 moe_stats[f"expression_layer_{i}_expr_ffn"] = (
                     layer.ffn_expr.get_expert_usage_stats()
                 )
 
-        # 检查MoE regressor
+        # Check MoE regressor
         if self.use_moe_regressor and hasattr(self.regressor, "gate"):
             moe_stats["moe_regressor"] = {
                 "expert_usage_ratio": (
@@ -1103,13 +1105,13 @@ class DeepSC(nn.Module):
 
     def check_moe_collapse(self, threshold=0.8):
         """
-        检查模型中是否有MoE层发生塌缩
+        Check if any MoE layers in the model have collapsed
 
         Args:
-            threshold: 塌缩阈值
+            threshold: Collapse threshold
 
         Returns:
-            dict: 包含塌缩检测结果的字典
+            dict: Dictionary containing collapse detection results
         """
         collapse_results = {}
         moe_stats = self.get_all_moe_stats()
@@ -1131,25 +1133,25 @@ class DeepSC(nn.Module):
         return collapse_results
 
     def reset_all_moe_stats(self):
-        """重置所有MoE层的使用统计"""
-        # 重置transformer层中的MoE
+        """Reset usage statistics for all MoE layers"""
+        # Reset MoE in transformer layers
         for layer in self.layers:
             if hasattr(layer, "ffn_gene") and isinstance(layer.ffn_gene, MoE):
                 layer.ffn_gene.reset_usage_stats()
             if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
                 layer.ffn_expr.reset_usage_stats()
 
-        # 重置expression层中的MoE
+        # Reset MoE in expression layers
         for layer in self.expression_layers:
             if hasattr(layer, "ffn_expr") and isinstance(layer.ffn_expr, MoE):
                 layer.ffn_expr.reset_usage_stats()
 
     def print_moe_collapse_report(self, threshold=0.8):
         """
-        打印MoE塌缩检测报告
+        Print MoE collapse detection report
 
         Args:
-            threshold: 塌缩阈值
+            threshold: Collapse threshold
         """
         print(f"\n{'='*60}")
         print("MoE Collapse Detection Report")
@@ -1197,7 +1199,7 @@ class DeepSC(nn.Module):
 
         print(f"\n{'='*60}")
 
-        # 返回是否有塌缩
+        # Return whether there is any collapse
         return len(collapsed_layers) > 0
 
 
@@ -1234,7 +1236,7 @@ class ClsDecoder(nn.Module):
 
 class DeepSCClassifier(nn.Module):
     """
-    分类模型，使用DeepSC作为encoder
+    Classification model using DeepSC as encoder
     """
 
     def __init__(
@@ -1277,22 +1279,22 @@ class DeepSCClassifier(nn.Module):
 
     def forward(self, gene_ids, value_log1p, value_binned, **kwargs):
         """
-        前向传播
+        Forward pass
 
         Args:
-            gene_ids: (batch, g)  # 基因ID序列
-            value_log1p: (batch, g)  # 归一化的表达量
-            value_binned: (batch, g)  # 离散化的表达量
+            gene_ids: (batch, g)  # Gene ID sequence
+            value_log1p: (batch, g)  # Normalized expression values
+            value_binned: (batch, g)  # Discretized expression values
 
         Returns:
-            cls_output: 分类结果
+            cls_output: Classification results
         """
-        # 从kwargs中移除可能冲突的参数
+        # Remove potentially conflicting parameters from kwargs
         encoder_kwargs = kwargs.copy()
         encoder_kwargs.pop("return_encodings", None)
         encoder_kwargs.pop("return_mask_prob", None)
         encoder_kwargs.pop("return_gate_weights", None)
-        # 使用encoder获取嵌入，注意DeepSC的参数名
+        # Use encoder to get embeddings, note DeepSC parameter names
         encoder_output = self.encoder(
             gene_ids=gene_ids,
             normalized_expr=value_log1p,
@@ -1303,14 +1305,14 @@ class DeepSCClassifier(nn.Module):
             **encoder_kwargs,
         )
 
-        # 根据encoder的返回值数量解包
-        # enable_mse and enable_ce: 返回 (logits, regression_output, gene_emb, expr_emb)
-        # enable_ce only: 返回 (logits, gene_emb, expr_emb)
-        # enable_mse only: 返回 (regression_output, gene_emb, expr_emb)
+        # Unpack based on number of encoder return values
+        # enable_mse and enable_ce: returns (logits, regression_output, gene_emb, expr_emb)
+        # enable_ce only: returns (logits, gene_emb, expr_emb)
+        # enable_mse only: returns (regression_output, gene_emb, expr_emb)
         if len(encoder_output) == 4:
             logits, regression_output, gene_emb, expr_emb = encoder_output
         elif len(encoder_output) == 3:
-            # 判断是ce only还是mse only
+            # Determine if ce only or mse only
             if self.encoder.enable_ce:
                 logits, gene_emb, expr_emb = encoder_output
                 regression_output = None
@@ -1320,12 +1322,12 @@ class DeepSCClassifier(nn.Module):
         else:
             raise ValueError(f"Unexpected encoder output length: {len(encoder_output)}")
 
-        # 融合基因和表达嵌入
+        # Fuse gene and expression embeddings
         final_emb = torch.cat([gene_emb, expr_emb], dim=-1)
         final_emb = self.encoder.fused_emb_proj(final_emb)  # (batch, g, d)
 
-        # 获取细胞嵌入 (不再使用y作为权重,因为新架构没有返回y)
+        # Get cell embedding (no longer use y as weights, since new architecture doesn't return y)
         cell_emb = self._get_cell_emb_from_layer(final_emb, weights=None)
-        # 分类
+        # Classification
         cls_output = self.cls_decoder(cell_emb)
         return cls_output

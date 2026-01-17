@@ -43,10 +43,10 @@ def make_output_path(src_path: Path, root_dir: Path, out_base: Path) -> Path:
     """
     rel = src_path.relative_to(root_dir)
     if len(rel.parts) > 1:
-        # 有子目录：保持完整相对子路径
+        # Has subdirectory: keep full relative subpath
         return out_base / rel
     else:
-        # 直接在根下：不新建子目录
+        # Directly under root: don't create subdirectory
         return out_base / rel.name
 
 
@@ -77,11 +77,11 @@ def process_one(
         if out_path.exists() and not overwrite:
             return (str(h5ad_path), True, f"Skip (exists): {out_path}", 0)
 
-        # 读取（修改矩阵，故不使用 backed='r'）
+        # Read (modifying matrix, so don't use backed='r')
         adata = ad.read_h5ad(str(h5ad_path))
 
         if "is_primary_data" not in adata.obs.columns:
-            # 没有该列：直接原样另存（保持结构一致）
+            # No such column: save as-is (keep structure consistent)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             adata.write(str(out_path))
             return (
@@ -95,7 +95,7 @@ def process_one(
         keep_mask = col_bool
         keep_count = int(keep_mask.sum())
 
-        # 如果没有 primary data，跳过保存
+        # If no primary data, skip saving
         if keep_count == 0:
             return (
                 str(h5ad_path),
@@ -104,7 +104,7 @@ def process_one(
                 0,
             )
 
-        # 过滤（同步作用于 obs/X/raw 等）
+        # Filter (synchronously applies to obs/X/raw etc)
         adata_f = adata[keep_mask].copy()
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,17 +139,17 @@ def main():
     root_dir = Path(args.cellxgene_dir)
     output_base = Path(args.output_base)
     num_workers = max(args.num_workers, 1)
-    OVERWRITE = True  # 如目标文件已存在，是否覆盖
+    OVERWRITE = True  # Whether to overwrite if target file exists
 
     files = list(root_dir.rglob("*.h5ad"))
     if not files:
-        print(f"[Info] 在 {root_dir} 下未找到 .h5ad 文件")
+        print(f"[Info] No .h5ad files found under {root_dir}")
         return
 
     print(f"[Info] Found {len(files)} .h5ad files. Using {num_workers} processes.")
     success, fail = 0, 0
-    total_rows = 0  # 新增总行数计数
-    # 可降低子进程内部 BLAS 线程数，避免过度争用（可选）
+    total_rows = 0  # New total row count
+    # Can reduce internal subprocess BLAS thread count，avoid over-contention（optional）
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
