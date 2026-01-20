@@ -131,7 +131,7 @@ add_file_handler(logger, save_dir / "run.log")
 logger.info(f"Running on {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 
-pert_data = PertData("./archive/data")
+pert_data = PertData("/home/angli/DeepSC/src/deepsc/finetune/archive/data")
 pert_data.load(data_name=data_name)
 pert_data.prepare_split(split=split, seed=1)
 pert_data.get_dataloader(batch_size=batch_size, test_batch_size=eval_batch_size)
